@@ -1,0 +1,92 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
+import TaskEditor from "../components/TaskEditor.vue";
+import TaskRow from "../components/TaskRow.vue";
+import ActivityTrendChart from "../components/ActivityTrendChart.vue";
+import WorkTimeDrawer from "../components/WorkTimeDrawer.vue";
+import { useWorkbenchStore } from "../stores/workbench";
+import type { WorkTask } from "../types/workbench";
+import { getDailyActivity, getHistoryCoverage, getTokenTrend, getWorkSummary, isTauriRuntime, listReports, listTestRuns, type DailyActivity, type HistoryCoverage, type ReportRecord, type TestRun, type TokenTrendPoint, type WorkSummary } from "../services/backend";
+
+defineEmits<{ "new-task": [] }>();
+const store = useWorkbenchStore();
+const router = useRouter();
+const selectedTask = ref<WorkTask | null>(null);
+const editorOpen = computed(() => Boolean(selectedTask.value));
+const visibleTodayTasks = computed(() => store.todayTasks.slice(0, 3));
+const visibleWeekTasks = computed(() => store.weekTasks.slice(0, 3));
+const todayIso = new Date().toLocaleDateString("sv-SE");
+const tokenTrend = ref<TokenTrendPoint[]>([]);
+const activityTrend = ref<DailyActivity[]>([]);
+const reports = ref<ReportRecord[]>([]);
+const recentTests = ref<TestRun[]>([]);
+const history = ref<HistoryCoverage | null>(null);
+const emptyWorkSummary = (): WorkSummary => ({ startDate: todayIso, endDate: todayIso, totalMinutes: 0, estimatedMinutes: 0, manualMinutes: 0, hasManualCorrections: false, byProject: [], byType: [], daily: [] });
+const todayWork = ref<WorkSummary>(emptyWorkSummary());
+const weekWork = ref<WorkSummary>(emptyWorkSummary());
+const selectedTimePeriod = ref<{ start: string; end: string; title: string } | null>(null);
+const focusSeconds = ref(0);
+const focusing = ref(false);
+let focusTimer = 0;
+const todayLabel = new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(new Date());
+const todayReport = computed(() => reports.value.find(report => report.reportType === "daily" && report.periodStart === todayIso));
+const weekReport = computed(() => reports.value.find(report => report.reportType === "weekly" && report.periodStart <= todayIso && report.periodEnd >= todayIso));
+const todayToken = computed(() => tokenTrend.value.at(-1)?.totalTokens ?? (isTauriRuntime() ? 0 : 86_400));
+const projectProgress = computed(() => weekWork.value.byProject.slice(0, 4).map(item => ({ name: item.name, progress: weekWork.value.totalMinutes ? Math.round(item.minutes / weekWork.value.totalMinutes * 100) : 0, minutes: item.minutes })));
+const overdueTasks = computed(() => store.tasks.filter((task) => task.status === "overdue" || task.status === "blocked"));
+const weekTaskRate = computed(() => store.weekTasks.length ? Math.round(store.weekTasks.filter(item=>item.status==="done").length/store.weekTasks.length*100) : 0);
+function reportFeatures(report?: ReportRecord) { if (!report) return []; const lines=report.contentMarkdown.split("\n"); const start=lines.findIndex(line=>line.trim()==="## 项目工作总结"); if(start<0)return[]; const end=lines.findIndex((line,index)=>index>start&&line.startsWith("## ")); return lines.slice(start+1,end<0?undefined:end).filter(line=>line.startsWith("### ")||line.startsWith("- ")).slice(0,6).map(line=>line.replace(/^### /,"项目：").replace(/^- /,"")); }
+const todayFeatures = computed(() => reportFeatures(todayReport.value));
+const weekFeatures = computed(() => reportFeatures(weekReport.value));
+function compactToken(value: number) {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+function compactHours(value: number) { const hours = Math.floor(value / 60); const minutes = value % 60; return `${hours ? `${hours}h` : ""}${minutes ? `${minutes}m` : !hours ? "0m" : ""}`; }
+function openSearch() { window.dispatchEvent(new CustomEvent("open-workbench-search")); }
+function toggleFocus() {
+  focusing.value = !focusing.value;
+  window.clearInterval(focusTimer);
+  if (focusing.value) focusTimer = window.setInterval(() => focusSeconds.value += 1, 1000);
+}
+const focusText = computed(() => `${String(Math.floor(focusSeconds.value / 60)).padStart(2, "0")}:${String(focusSeconds.value % 60).padStart(2, "0")}`);
+
+onMounted(async () => {
+  if (!isTauriRuntime()) return;
+  try {
+    const activityStart = new Date(); activityStart.setDate(activityStart.getDate() - 6);
+    [tokenTrend.value, activityTrend.value, reports.value, history.value, recentTests.value] = await Promise.all([getTokenTrend(7), getDailyActivity(activityStart.toLocaleDateString("sv-SE"), todayIso), listReports(), getHistoryCoverage(), listTestRuns()]);
+    const todayDate = new Date(); const monday = new Date(todayDate); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+    weekWork.value = await getWorkSummary(monday.toLocaleDateString("sv-SE"), todayIso, true);
+    todayWork.value = await getWorkSummary(todayIso, todayIso, false);
+  }
+  catch (error) { console.error("首页统计读取失败", error); }
+});
+onBeforeUnmount(() => window.clearInterval(focusTimer));
+</script>
+
+<template>
+  <div class="view dashboard-view">
+    <header class="page-header"><div><h1>工作台</h1><p>汇总今天最重要的工作与提醒</p></div><div><button class="button secondary" @click="openSearch">⌕ 搜索</button><button class="button primary" @click="$emit('new-task')">＋ 新增任务</button></div></header>
+    <section class="welcome-strip"><div><b>早上好，今天有 {{ store.pendingCount }} 项任务需要处理</b><p>工作数据已保存在本机，逾期任务与 AI 草稿仍需人工确认。</p></div><div><RouterLink class="button primary link-button" to="/tasks">查看今日计划</RouterLink><button class="button secondary" @click="toggleFocus">{{ focusing ? `暂停 ${focusText}` : '开始专注' }}</button></div></section>
+    <section class="metric-grid"><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:todayIso,end:todayIso,title:'今日工时明细'}"><span>今日工时</span><b>{{ compactHours(todayWork.totalMinutes) }}</b><p>{{ todayWork.hasManualCorrections ? '手工修正优先' : '估算工时' }} · 查看明细</p></article><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:weekWork.startDate,end:weekWork.endDate,title:'本周工时明细'}"><span>本周工时</span><b>{{ compactHours(weekWork.totalMinutes) }}</b><p>{{ weekWork.byProject.length }} 个项目 · 查看分布</p></article><article class="clickable-card" tabindex="0" @click="router.push('/tasks')"><span>今日任务</span><b>{{ store.todayTasks.length }}<small> 项</small></b><p class="success-text">● 已完成 {{ store.todayTasks.filter(t => t.status === 'done').length }} 项</p></article><article class="clickable-card" tabindex="0" @click="router.push('/tokens')"><span>今日 Token</span><b>{{ compactToken(todayToken) }}</b><p>只反映 AI 使用量</p></article></section>
+    <section class="dashboard-grid">
+      <article class="panel today-panel dashboard-task-panel"><div class="panel-head"><div><h2>今日任务与本周任务</h2><p>本周完成 {{ store.weekTasks.filter(t=>t.status==='done').length }}/{{ store.weekTasks.length }} · {{ weekTaskRate }}%</p></div><RouterLink to="/tasks">查看全部 →</RouterLink></div><div class="week-task-progress"><i :style="{width:`${weekTaskRate}%`}"></i></div><div class="dashboard-task-columns"><section><h3>今天 · {{ todayLabel }}</h3><TaskRow v-for="task in visibleTodayTasks" :key="task.id" :task="task" @toggle="store.toggleTask" @confirm="store.confirmTask" @postpone="store.postponeTask" @edit="selectedTask = $event" /><p v-if="!visibleTodayTasks.length">今天没有任务。</p></section><section><h3>本周</h3><TaskRow v-for="task in visibleWeekTasks" :key="task.id" :task="task" @toggle="store.toggleTask" @confirm="store.confirmTask" @postpone="store.postponeTask" @edit="selectedTask = $event" /><p v-if="!visibleWeekTasks.length">本周没有任务。</p></section></div></article>
+      <article class="panel project-panel"><div class="panel-head"><div><h2>本周项目投入</h2><p>{{ projectProgress.length }} 个活跃项目 · 工时为估算/修正口径</p></div><RouterLink to="/work-records">工作记录 →</RouterLink></div><div v-for="item in projectProgress" :key="item.name" class="project-progress"><span><b>{{ item.name }}</b><em>{{ compactHours(item.minutes) }} · {{ item.progress }}%</em></span><div><i :style="{ width: `${item.progress}%` }"></i></div></div><p v-if="!projectProgress.length" class="panel-empty">本周暂无可估算的本地活动。</p></article>
+      <article class="panel chart-panel clickable-card" tabindex="0" @click="router.push('/work-records')"><div class="panel-head"><div><h2>Codex 活跃趋势</h2><p>近 7 天对话次数 · 悬停查看数据</p></div><b>{{ activityTrend.reduce((sum,item) => sum + item.conversationCount, 0) }} 次</b></div><ActivityTrendChart :points="activityTrend" @select="router.push(`/calendar?date=${$event.date}`)" /></article>
+      <article class="panel recent-panel"><div class="panel-head"><div><h2>最近报告</h2><p>日报与周报均可按历史周期查看</p></div><RouterLink to="/reports">全部报告 →</RouterLink></div><RouterLink v-for="report in reports.slice(0,3)" :key="report.id" class="dashboard-report" :to="`/reports?report=${report.id}`"><span>▤</span><div><b>{{ report.title }}</b><small>{{ report.status === 'locked' ? '已锁定' : '可编辑' }} · {{ report.periodStart }}</small></div></RouterLink><p v-if="!reports.length" class="panel-empty">尚无真实报告，可前往报告中心生成。</p></article>
+      <article class="panel risk-panel"><div class="panel-head"><div><h2>未完成事项与最近测试</h2><p>下一步先处理逾期、阻塞和测试失败</p></div><RouterLink to="/testing">测试中心 →</RouterLink></div><div v-for="task in overdueTasks.slice(0,2)" :key="task.id" class="dashboard-risk" @click="router.push(`/tasks?task=${task.id}`)"><i></i><span><b>{{ task.title }}</b><small>{{ task.project }} · {{ task.status === 'overdue' ? '逾期' : '阻塞' }}</small></span></div><div v-for="test in recentTests.slice(0,2)" :key="test.id" class="dashboard-risk test" @click="router.push('/testing')"><i></i><span><b>{{ test.menuName }}</b><small>{{ test.project }} · {{ test.status === 'passed' ? '测试通过' : '测试失败' }} · {{ test.startedAt.slice(0,10) }}</small></span></div><p v-if="!overdueTasks.length && !recentTests.length" class="panel-empty">当前没有未完成事项或测试记录。</p></article>
+      <article class="panel history-panel"><div class="panel-head"><div><h2>今天和本周做了什么</h2><p>{{ history?.firstDate || '尚无数据' }}—{{ history?.lastDate || '尚无数据' }} · 普通与归档会话统一统计</p></div><RouterLink to="/work-records">全部工作记录 →</RouterLink></div><div class="dashboard-result-columns"><RouterLink :to="todayReport ? `/reports?report=${todayReport.id}` : '/reports'"><b>今天</b><span v-for="item in todayFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!todayFeatures.length">尚未生成今天的项目成果总结</em></RouterLink><RouterLink :to="weekReport ? `/reports?report=${weekReport.id}` : '/reports'"><b>本周</b><span v-for="item in weekFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!weekFeatures.length">尚未生成本周的项目成果总结</em></RouterLink></div></article>
+    </section>
+    <TaskEditor :open="editorOpen" :task="selectedTask" @close="selectedTask = null" @update="store.updateTask" @remove="store.removeTask" />
+    <WorkTimeDrawer :open="Boolean(selectedTimePeriod)" :start-date="selectedTimePeriod?.start || ''" :end-date="selectedTimePeriod?.end || ''" :title="selectedTimePeriod?.title" @close="selectedTimePeriod=null" @changed="router.go(0)" />
+  </div>
+</template>
+
+<style scoped>
+.dashboard-task-panel{overflow:hidden}.week-task-progress{height:3px;background:var(--surface-2)}.week-task-progress i{display:block;height:100%;background:var(--success)}.dashboard-task-columns{display:grid;grid-template-columns:1fr 1fr;height:180px}.dashboard-task-columns>section{min-width:0;border-right:1px solid var(--line);overflow:hidden}.dashboard-task-columns>section:last-child{border-right:0}.dashboard-task-columns h3{height:28px;margin:0;padding:8px 14px 0;color:var(--muted);font-size:10px}.dashboard-task-columns p{padding:12px 14px;color:var(--muted)}
+.dashboard-result-columns{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 16px 14px}.dashboard-result-columns>a{min-height:130px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:10px;color:inherit;text-decoration:none;display:flex;flex-direction:column;gap:6px}.dashboard-result-columns b{color:var(--primary)}.dashboard-result-columns span{font-size:10px;line-height:1.45}.dashboard-result-columns em{font-style:normal;color:var(--muted);font-size:10px}.dashboard-risk{cursor:pointer}.dashboard-risk.test>i{background:var(--primary)}
+</style>

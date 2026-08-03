@@ -1,0 +1,14 @@
+node_modules/
+dist/
+src-tauri/target/
+release/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+*.log
+.DS_Store
+.idea/
+.vscode/
