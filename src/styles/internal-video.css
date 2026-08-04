@@ -1,0 +1,5 @@
+.video-detail-drawer{width:min(720px,62vw)}
+.video-detail-drawer .video-detail-cover{height:360px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:12px}
+.video-detail-cover small{color:#fff;background:rgba(0,0,0,.48);padding:7px 10px;border-radius:7px}
+.internal-video-player{display:block;width:calc(100% - 32px);max-height:430px;aspect-ratio:16/9;margin:16px;border-radius:10px;background:#05070b;object-fit:contain}
+.video-detail-drawer .path-row dd{max-width:470px}

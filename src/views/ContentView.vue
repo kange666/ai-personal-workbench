@@ -7,6 +7,7 @@ const route = useRoute();
 const router = useRouter();
 const today = new Date().toLocaleDateString("sv-SE");
 const selectedDate = ref(typeof route.query.date === "string" ? route.query.date : today);
+const contentType = ref<ContentIdea["contentType"]>(route.query.type === "reasoning" ? "reasoning" : "tech");
 const ideas = ref<ContentIdea[]>([]);
 const selectedId = ref(typeof route.query.idea === "string" ? route.query.idea : "");
 const loading = ref(false);
@@ -19,7 +20,10 @@ const selectedCount = computed(() => ideas.value.filter(item => item.status === 
 const statusLabel: Record<ContentIdea["status"], string> = { candidate: "候选", selected: "已选择", rejected: "已淘汰", published: "已发布" };
 
 function fallbackIdeas(date: string): ContentIdea[] {
-  return Array.from({ length: 5 }, (_, index) => ({ id: `preview-${index}`, ideaDate: date, category: ["AI未来", "智能硬件", "未来生活", "科技趋势", "个人科技升级"][index], title: ["如果 AI 开始替你管理一天，会发生什么？", "AI 眼镜真的会成为下一部手机吗？", "2035 年的普通家庭，可能已经不需要开关了", "为什么所有科技公司突然都在做机器人？", "2030 年的办公桌，会变成什么样？"][index], hook: "未来最懂你的人，可能不是人。", script: "桌面预览模式不会写入数据。请从开发版桌面程序打开内容工坊，程序会自动生成当天 5 套完整内容。", storyboard: "| 时间 | 画面 | 字幕 |\n|---|---|---|\n| 0-3秒 | 未来科技轮廓 | 变化已经开始 |", visualPrompts: "写实电影感、近未来、竖屏 9:16、无品牌 Logo。", editingGuide: "总时长 55—60 秒，前 3 秒快速建立悬念。", coverTitle: "提前看见未来", status: "candidate", source: "local", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+  const reasoning = contentType.value === "reasoning";
+  const techTitles = ["如果 AI 开始替你管理一天，会发生什么？", "AI 眼镜真的会成为下一部手机吗？", "2035 年的普通家庭，可能已经不需要开关了", "为什么所有科技公司突然都在做机器人？", "2030 年的办公桌，会变成什么样？"];
+  const reasoningTitles = ["三个人里，谁在说谎？", "三扇门，你会选哪一扇？", "三个人中，谁偷了宝石？", "两位公主，谁才是真的？", "三杯水，哪一杯有毒？"];
+  return Array.from({ length: 5 }, (_, index) => ({ id: `preview-${contentType.value}-${index}`, ideaDate: date, contentType: contentType.value, category: reasoning ? ["真假话推理", "生死门", "犯罪推理", "身份判断", "逻辑排除"][index] : ["AI未来", "智能硬件", "未来生活", "科技趋势", "个人科技升级"][index], title: (reasoning ? reasoningTitles : techTitles)[index], hook: reasoning ? "只有一个答案，你能在十秒内找出来吗？" : "未来最懂你的人，可能不是人。", script: reasoning ? "题面、选项、十秒思考、唯一答案和逐步排除过程都会在桌面版中完整显示。" : "桌面预览模式不会写入数据。请从开发版桌面程序打开内容工坊，程序会自动生成当天 5 套完整内容。", storyboard: reasoning ? "| 时间 | 画面 | 字幕 |\n|---|---|---|\n| 0-3秒 | 馆主抛出问题 | 谁在说谎？ |\n| 3-20秒 | 证词依次出现 | A / B / C |\n| 20-30秒 | 倒计时 | 10秒思考 |\n| 30-45秒 | 排除并揭晓 | 唯一答案 |" : "| 时间 | 画面 | 字幕 |\n|---|---|---|\n| 0-3秒 | 未来科技轮廓 | 变化已经开始 |", visualPrompts: reasoning ? "二次元悬疑学院风、低饱和灰蓝与暗紫、固定推理馆主、竖屏 9:16。" : "写实电影感、近未来、竖屏 9:16、无品牌 Logo。", editingGuide: reasoning ? "45—50秒；前3秒出题；保留思考时间；红色排除、绿色揭晓。" : "总时长 55—60 秒，前 3 秒快速建立悬念。", coverTitle: reasoning ? "你能找出答案吗？" : "提前看见未来", status: "candidate", source: "local", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
 }
 
 async function load() {
@@ -28,8 +32,8 @@ async function load() {
   try {
     if (!isTauriRuntime()) ideas.value = fallbackIdeas(selectedDate.value);
     else {
-      ideas.value = await listContentIdeas(selectedDate.value);
-      if (ideas.value.length < 5) ideas.value = await generateDailyContent(selectedDate.value, false, false);
+      ideas.value = await listContentIdeas(selectedDate.value, contentType.value);
+      if (ideas.value.length < 5) ideas.value = await generateDailyContent(selectedDate.value, false, false, contentType.value);
     }
     if (!ideas.value.some(item => item.id === selectedId.value)) selectedId.value = ideas.value[0]?.id || "";
   } catch (cause) { error.value = String(cause); }
@@ -43,9 +47,9 @@ async function regenerate() {
   message.value = "";
   error.value = "";
   try {
-    ideas.value = await generateDailyContent(selectedDate.value, true, true);
+    ideas.value = await generateDailyContent(selectedDate.value, true, contentType.value === "tech", contentType.value);
     selectedId.value = ideas.value[0]?.id || "";
-    message.value = ideas.value.some(item => item.source === "deepseek") ? "已使用 DeepSeek 生成今日 5 套内容。" : "未连接 DeepSeek，已使用本地方案生成今日 5 套内容。";
+    message.value = contentType.value === "reasoning" ? "已生成 5 个带唯一答案和完整推理过程的案例。" : ideas.value.some(item => item.source === "deepseek") ? "已使用 DeepSeek 生成今日 5 套内容。" : "未连接 DeepSeek，已使用本地方案生成今日 5 套内容。";
   } catch (cause) { error.value = String(cause); }
   finally { loading.value = false; }
 }
@@ -66,26 +70,38 @@ async function copyPackage() {
 }
 async function copyVideoRequest() {
   if (!selected.value) return;
-  const text=`标题：《${selected.value.title}》\n请使用 generate-tech-short-video 技能，基于已选择的标题制作完整科技探索竖屏短视频，并交付脚本、画面、配音、字幕、封面、MP4 和质检报告。`;
+  const text = selected.value.contentType === "reasoning"
+    ? `标题：《${selected.value.title}》\n请基于已选择的完整推理内容制作二次元悬疑学院风竖屏短视频，保留思考时间、唯一答案和推理过程，并交付脚本、画面、配音、字幕、封面和 MP4。`
+    : `标题：《${selected.value.title}》\n请使用 generate-tech-short-video 技能，基于已选择的标题制作完整科技探索竖屏短视频，并交付脚本、画面、配音、字幕、封面、MP4 和质检报告。`;
   await navigator.clipboard.writeText(text); message.value="完整视频制作请求已复制，可直接粘贴到新的 Codex 任务。";
 }
 
 function choose(item: ContentIdea) {
   selectedId.value = item.id;
   activeSection.value = "script";
-  void router.replace({ query: { date: selectedDate.value, idea: item.id } });
+  void router.replace({ query: { date: selectedDate.value, type: contentType.value, idea: item.id } });
 }
 
-watch(selectedDate, async () => { await router.replace({ query: { date: selectedDate.value } }); selectedId.value = ""; await load(); });
+async function switchContentType(value: ContentIdea["contentType"]) {
+  if (contentType.value === value) return;
+  contentType.value = value;
+  selectedId.value = "";
+  activeSection.value = "script";
+  await router.replace({ query: { date: selectedDate.value, type: value } });
+  await load();
+}
+
+watch(selectedDate, async () => { await router.replace({ query: { date: selectedDate.value, type: contentType.value } }); selectedId.value = ""; await load(); });
 watch(() => route.query.idea, (id) => { if (typeof id === "string" && ideas.value.some(item => item.id === id)) selectedId.value = id; });
 onMounted(load);
 </script>
 
 <template>
   <div class="view content-view">
-    <header class="page-header"><div><h1>内容工坊</h1><p>每天 5 个“小众科技探索”选题，完整内容可直接进入制作</p></div><div><input v-model="selectedDate" class="button secondary content-date" type="date"><button class="button primary" :disabled="loading" @click="regenerate">{{ loading ? '生成中…' : '✦ 重新生成 5 条' }}</button></div></header>
+    <header class="page-header"><div><h1>内容工坊</h1><p>{{ contentType === 'reasoning' ? '每天 5 个推理案例，包含唯一答案、推理过程和统一悬疑学院风制作包' : '每天 5 个“小众科技探索”选题，完整内容可直接进入制作' }}</p></div><div><input v-model="selectedDate" class="button secondary content-date" type="date"><button class="button primary" :disabled="loading" @click="regenerate">{{ loading ? '生成中…' : '✦ 重新生成 5 条' }}</button></div></header>
+    <nav class="content-channel-switch panel"><button :class="{ active:contentType === 'tech' }" @click="switchContentType('tech')"><b>未来科技探索</b><small>趋势、设备与未来生活</small></button><button :class="{ active:contentType === 'reasoning' }" @click="switchContentType('reasoning')"><b>每日推理案例</b><small>悬疑学院风 · 5题可选</small></button></nav>
     <p v-if="message" class="scan-message">{{ message }}</p><p v-if="error" class="scan-message error">{{ error }}</p>
-    <section class="content-summary panel"><div><b>{{ ideas.length }}</b><span>今日候选</span></div><div><b>{{ selectedCount }}</b><span>已选择</span></div><div><b>{{ ideas.filter(item => item.status === 'rejected').length }}</b><span>已淘汰</span></div><p><strong>内容边界</strong><span>不伪装开箱或亲身体验；趋势与推测会明确表达。</span></p></section>
+    <section class="content-summary panel"><div><b>{{ ideas.length }}</b><span>今日候选</span></div><div><b>{{ selectedCount }}</b><span>已选择</span></div><div><b>{{ ideas.filter(item => item.status === 'rejected').length }}</b><span>已淘汰</span></div><p><strong>{{ contentType === 'reasoning' ? '推理规则' : '内容边界' }}</strong><span>{{ contentType === 'reasoning' ? '每题先验证唯一答案，再提供可直接制作的完整内容。' : '不伪装开箱或亲身体验；趋势与推测会明确表达。' }}</span></p></section>
     <section class="content-layout">
       <aside class="panel content-list"><header><b>{{ selectedDate }} 候选标题</b><small>点击查看完整制作包</small></header><button v-for="(item,index) in ideas" :key="item.id" :class="[item.status,{ active:selected?.id === item.id }]" @click="choose(item)"><i>{{ index + 1 }}</i><span><small>{{ item.category }} · {{ item.source === 'deepseek' ? 'AI 生成' : '本地生成' }}</small><b>{{ item.title }}</b><em>{{ statusLabel[item.status] }}</em></span></button><p v-if="!ideas.length && !loading" class="panel-empty">当天还没有候选内容。</p></aside>
       <main v-if="selected" class="panel content-detail">

@@ -14,7 +14,7 @@ const refreshing = ref(false);
 const navItems = [
   ["/", "⌂", "工作台"], ["/work-records", "◫", "工作记录"], ["/tasks", "✓", "任务中心"], ["/calendar", "▦", "日历"],
   ["/reports", "▤", "报告中心"], ["/testing", "◎", "测试中心"], ["/tokens", "◔", "Token 分析"],
-  ["/knowledge", "◇", "知识库"], ["/content", "✦", "内容工坊"],
+  ["/knowledge", "◇", "知识库"], ["/content", "✦", "内容工坊"], ["/videos", "▶", "视频中心"],
 ];
 const dateText = computed(() => new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(new Date()));
 function taskOrder(status: string) { return ({overdue:0,blocked:1,doing:2,todo:3} as Record<string,number>)[status] ?? 4; }

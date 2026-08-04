@@ -157,6 +157,7 @@ export interface WorkspaceSearchResult {
 export interface ContentIdea {
   id: string;
   ideaDate: string;
+  contentType: "tech" | "reasoning";
   category: string;
   title: string;
   hook: string;
@@ -270,6 +271,21 @@ export interface StartTestOptions {
   useEnvironmentToken?: boolean;
 }
 
+export interface VideoItem {
+  id: string;
+  title: string;
+  project: string;
+  path: string;
+  folder: string;
+  sourceRoot: string;
+  fileName: string;
+  extension: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  status: "final" | "output" | "render";
+  coverPath?: string;
+}
+
 export type WorkSessionSource = "estimated" | "manual";
 
 export interface WorkSession {
@@ -374,12 +390,12 @@ export async function syncTaskSuggestions(): Promise<SuggestionSyncSummary> {
   return invoke<SuggestionSyncSummary>("sync_task_suggestions");
 }
 
-export async function listContentIdeas(date?: string): Promise<ContentIdea[]> {
-  return invoke<ContentIdea[]>("list_content_ideas", { date });
+export async function listContentIdeas(date?: string, contentType: ContentIdea["contentType"] = "tech"): Promise<ContentIdea[]> {
+  return invoke<ContentIdea[]>("list_content_ideas", { date, contentType });
 }
 
-export async function generateDailyContent(date?: string, force = false, useAi = true): Promise<ContentIdea[]> {
-  return invoke<ContentIdea[]>("generate_daily_content", { date, force, useAi });
+export async function generateDailyContent(date?: string, force = false, useAi = true, contentType: ContentIdea["contentType"] = "tech"): Promise<ContentIdea[]> {
+  return invoke<ContentIdea[]>("generate_daily_content", { date, force, useAi, contentType });
 }
 
 export async function updateContentStatus(id: string, status: ContentIdea["status"]): Promise<void> {
@@ -472,6 +488,22 @@ export async function readTestReport(path: string): Promise<string> {
 
 export async function startTestRun(options: StartTestOptions): Promise<TestRun> {
   return invoke<TestRun>("start_test_run", { options });
+}
+
+export async function listLocalVideos(): Promise<VideoItem[]> {
+  return invoke<VideoItem[]>("list_local_videos");
+}
+
+export async function readVideoCover(path: string): Promise<string> {
+  return invoke<string>("read_video_cover", { path });
+}
+
+export async function openLocalVideo(path: string): Promise<void> {
+  await invoke("open_local_video", { path });
+}
+
+export async function revealLocalVideo(path: string): Promise<void> {
+  await invoke("reveal_local_video", { path });
 }
 
 export async function listWorkSessions(startDate: string, endDate: string, refresh = true): Promise<WorkSession[]> {

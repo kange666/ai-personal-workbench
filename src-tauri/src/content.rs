@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub struct ContentIdea {
     pub id: String,
     pub idea_date: String,
+    pub content_type: String,
     pub category: String,
     pub title: String,
     pub hook: String,
@@ -46,6 +47,18 @@ struct Concept {
     change: &'static str,
     caution: &'static str,
     conclusion: &'static str,
+    cover: &'static str,
+}
+
+struct ReasoningConcept {
+    category: &'static str,
+    title: &'static str,
+    hook: &'static str,
+    premise: &'static str,
+    options: &'static str,
+    answer: &'static str,
+    reasoning: &'static str,
+    scene: &'static str,
     cover: &'static str,
 }
 
@@ -111,6 +124,29 @@ fn local_drafts(date: NaiveDate) -> Vec<ContentDraft> {
         .collect()
 }
 
+fn reasoning_concepts() -> [ReasoningConcept; 5] {
+    [
+        ReasoningConcept { category: "真假话推理", title: "三个人里，谁在说谎？", hook: "只有一个人说谎，你能在十秒内找出他吗？", premise: "深夜的旧校舍里，A、B、C 被带进推理审判室。馆主说明：三人中只有一个人在说谎，另外两人都说真话。", options: "A：B 在说谎。\nB：C 在说谎。\nC：A 和 B 之中，只有一个人在说谎。", answer: "B 在说谎。", reasoning: "假设 A 说谎，那么 B 说真话会推出 C 说谎，出现两个说谎者。假设 C 说谎，也会与 A、B 的证词冲突。只有假设 B 说谎时，A 的话为真、C 的话也为真，满足唯一说谎者条件。", scene: "谜题审判室，三名学生并排站立，馆主在前景侧面，证词卡片位置清晰。", cover: "谁在说谎？" },
+        ReasoningConcept { category: "生死门", title: "三扇门，你会选哪一扇？", hook: "三扇门只有一扇能活，你会选哪扇？", premise: "主角被困在古堡门厅，必须从三扇门中选一扇离开。", options: "左门：门后是毒蛇房。\n中门：门后是燃烧的火海。\n右门：门后是三个月没吃饭的猛兽。", answer: "选择右门。", reasoning: "三个月没有进食的猛兽无法继续存活，因此右门描述的危险已经失效。左门和中门仍是即时危险。", scene: "古堡门厅，三扇门横向展开，蛇影、火焰和猛兽剪影分别对应三个选项。", cover: "哪扇门能活？" },
+        ReasoningConcept { category: "犯罪推理", title: "三个人中，谁偷了宝石？", hook: "只有一句是真话，宝石到底是谁偷的？", premise: "博物馆的蓝宝石失窃，现场只有学生 A、女仆 B 和商人 C。已知三句证词中只有一句是真话。", options: "A：不是我偷的。\nB：是 C 偷的。\nC：B 在冤枉我。", answer: "A 偷了宝石。", reasoning: "如果 A 是窃贼，A 的否认是假话，B 指认 C 也是假话，C 说自己被冤枉是真话，恰好只有一句真话。换成 B 或 C 都会产生两句真话。", scene: "证词展示板，三人半身像围绕蓝宝石，逐条证词用卡片呈现。", cover: "谁偷了宝石？" },
+        ReasoningConcept { category: "身份判断", title: "两位公主，谁才是真的？", hook: "她们长得一模一样，但只有一位公主会说真话。", premise: "王座前站着两位外表相同的公主。真公主一定说真话，冒牌货一定说假话。", options: "左边：右边是假的。\n右边：我们的身份相同。", answer: "左边是真公主。", reasoning: "如果左边是真公主，那么右边确实是假冒者；右边所说“身份相同”是假的，条件完全成立。反过来假设右边是真公主，她的证词就要求两人身份相同，与只有一位真公主矛盾。", scene: "宫廷审问室，两位公主左右站立，服装一明一暗，馆主在前方观察。", cover: "谁是真公主？" },
+        ReasoningConcept { category: "逻辑排除", title: "三杯水，哪一杯有毒？", hook: "三句话只有一句是真的，你敢选哪杯？", premise: "桌上有 A、B、C 三杯水，其中只有一杯有毒。杯前的三句话只有一句是真话。", options: "A 杯前：毒在 B 杯。\nB 杯前：毒不在 B 杯。\nC 杯前：毒不在 A 杯。", answer: "A 杯有毒。", reasoning: "毒在 A 杯时，A 的提示是假、B 的提示是真、C 的提示是假，恰好一句真话。毒在 B 或 C 杯都会让两句提示同时为真。", scene: "暗色长桌上的三杯水，A、B、C 标记清晰，背后是低饱和证据墙。", cover: "哪杯水有毒？" },
+    ]
+}
+
+fn local_reasoning_drafts() -> Vec<ContentDraft> {
+    reasoning_concepts().into_iter().map(|concept| ContentDraft {
+        category: concept.category.to_string(),
+        title: concept.title.to_string(),
+        hook: concept.hook.to_string(),
+        script: format!("{}\n\n{}\n\n{}\n\n给你十秒钟思考。\n\n答案是：{}\n\n{}\n\n你答对了吗？把你的答案留在评论区。", concept.hook, concept.premise, concept.options, concept.answer, concept.reasoning),
+        storyboard: format!("| 时间 | 画面 | 字幕 | 旁白重点 |\n|---|---|---|---|\n| 0-3秒 | 馆主从暗处抬眼，题目快速出现 | {} | {} |\n| 3-10秒 | {} | 规则只出现一次 | {} |\n| 10-22秒 | 选项依次亮起，人物或道具保持固定站位 | A / B / C | {} |\n| 22-29秒 | 倒计时环与轻微心跳动效 | 10 秒思考 | 暂停口播留给观众判断 |\n| 29-43秒 | 正确选项用绿色标记，矛盾项用红线排除 | 答案：{} | {} |\n| 43-50秒 | 馆主合上文件，画面定格 | 你答对了吗？ | 评论区留下答案 |", concept.cover, concept.hook, concept.scene, concept.premise, concept.options.replace('\n', "；"), concept.answer, concept.reasoning),
+        visual_prompts: format!("统一视觉：二次元悬疑学院风、日系推理插画、轻暗黑、低饱和灰蓝与暗紫、戏剧光影、人物站位明确、竖屏 9:16。答案阶段仅使用红色排除线和绿色正确标记。\n\n1. 固定馆主：冷静的深蓝黑短发少年，改良学院制服，手持文件板，冷蓝眼睛高光。\n2. 题目场景：{}\n3. 选项画面：角色与道具分区清晰，给字幕和证词卡片留出安全区。\n4. 思考阶段：暗色背景、金色倒计时环、轻微悬疑光影。\n5. 揭晓阶段：错误逻辑红色、正确答案绿色，构图不改变，方便观众对照。", concept.scene),
+        editing_guide: "总时长 45—50 秒；前 3 秒直接抛出问题；证词逐条出现并配短促提示音；保留 6—8 秒无口播思考时间；揭晓时先给答案，再用两步排除解释；固定使用深灰蓝背景、神秘紫强调、红色错误和绿色正确；结尾提问“你答对了吗”。".to_string(),
+        cover_title: concept.cover.to_string(),
+    }).collect()
+}
+
 fn extract_json(text: &str) -> &str {
     let trimmed = text.trim();
     if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']')) {
@@ -147,6 +183,7 @@ fn save_drafts(
     date: NaiveDate,
     drafts: Vec<ContentDraft>,
     source: &str,
+    content_type: &str,
     force: bool,
 ) -> Result<Vec<ContentIdea>, String> {
     let date_text = date.format("%Y-%m-%d").to_string();
@@ -155,17 +192,19 @@ fn save_drafts(
     if force {
         transaction
             .execute(
-                "DELETE FROM content_ideas WHERE idea_date=?1 AND status IN ('candidate','rejected')",
-                [&date_text],
+                "DELETE FROM content_ideas WHERE idea_date=?1 AND content_type=?2 AND status IN ('candidate','rejected')",
+                params![date_text, content_type],
             )
             .map_err(|e| e.to_string())?;
     }
     let existing_titles = {
         let mut statement = transaction
-            .prepare("SELECT title FROM content_ideas WHERE idea_date=?1")
+            .prepare("SELECT title FROM content_ideas WHERE idea_date=?1 AND content_type=?2")
             .map_err(|e| e.to_string())?;
         let rows = statement
-            .query_map([&date_text], |row| row.get::<_, String>(0))
+            .query_map(params![date_text, content_type], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<HashSet<_>, _>>()
             .map_err(|e| e.to_string())?
@@ -179,39 +218,47 @@ fn save_drafts(
     {
         transaction
             .execute(
-                "INSERT OR IGNORE INTO content_ideas(id,idea_date,category,title,hook,script,storyboard,visual_prompts,editing_guide,cover_title,status,source,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'candidate',?11,?12,?12)",
-                params![Uuid::new_v4().to_string(),date_text,draft.category,draft.title,draft.hook,draft.script,draft.storyboard,draft.visual_prompts,draft.editing_guide,draft.cover_title,source,now],
+                "INSERT OR IGNORE INTO content_ideas(id,idea_date,content_type,category,title,hook,script,storyboard,visual_prompts,editing_guide,cover_title,status,source,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'candidate',?12,?13,?13)",
+                params![Uuid::new_v4().to_string(),date_text,content_type,draft.category,draft.title,draft.hook,draft.script,draft.storyboard,draft.visual_prompts,draft.editing_guide,draft.cover_title,source,now],
             )
             .map_err(|e| e.to_string())?;
     }
     transaction.commit().map_err(|e| e.to_string())?;
-    list_for_date(state, date)
+    list_for_date(state, date, content_type)
 }
 
-fn list_for_date(state: &DatabaseState, date: NaiveDate) -> Result<Vec<ContentIdea>, String> {
+fn list_for_date(
+    state: &DatabaseState,
+    date: NaiveDate,
+    content_type: &str,
+) -> Result<Vec<ContentIdea>, String> {
     let connection = state.connect()?;
     let mut statement = connection
-        .prepare("SELECT id,idea_date,category,title,hook,script,storyboard,visual_prompts,editing_guide,cover_title,status,source,created_at,updated_at FROM content_ideas WHERE idea_date=?1 ORDER BY CASE status WHEN 'selected' THEN 0 WHEN 'candidate' THEN 1 WHEN 'published' THEN 2 ELSE 3 END,created_at")
+        .prepare("SELECT id,idea_date,content_type,category,title,hook,script,storyboard,visual_prompts,editing_guide,cover_title,status,source,created_at,updated_at FROM content_ideas WHERE idea_date=?1 AND content_type=?2 ORDER BY CASE status WHEN 'selected' THEN 0 WHEN 'candidate' THEN 1 WHEN 'published' THEN 2 ELSE 3 END,created_at")
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map([date.format("%Y-%m-%d").to_string()], |row| {
-            Ok(ContentIdea {
-                id: row.get(0)?,
-                idea_date: row.get(1)?,
-                category: row.get(2)?,
-                title: row.get(3)?,
-                hook: row.get(4)?,
-                script: row.get(5)?,
-                storyboard: row.get(6)?,
-                visual_prompts: row.get(7)?,
-                editing_guide: row.get(8)?,
-                cover_title: row.get(9)?,
-                status: row.get(10)?,
-                source: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
-            })
-        })
+        .query_map(
+            params![date.format("%Y-%m-%d").to_string(), content_type],
+            |row| {
+                Ok(ContentIdea {
+                    id: row.get(0)?,
+                    idea_date: row.get(1)?,
+                    content_type: row.get(2)?,
+                    category: row.get(3)?,
+                    title: row.get(4)?,
+                    hook: row.get(5)?,
+                    script: row.get(6)?,
+                    storyboard: row.get(7)?,
+                    visual_prompts: row.get(8)?,
+                    editing_guide: row.get(9)?,
+                    cover_title: row.get(10)?,
+                    status: row.get(11)?,
+                    source: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                })
+            },
+        )
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
@@ -222,26 +269,51 @@ pub async fn ensure_today_content(state: DatabaseState) -> Result<Vec<ContentIde
     ensure_content_for_date(state, today).await
 }
 
+fn normalize_content_type(value: Option<String>) -> Result<String, String> {
+    let value = value.unwrap_or_else(|| "tech".to_string());
+    if matches!(value.as_str(), "tech" | "reasoning") {
+        Ok(value)
+    } else {
+        Err("内容栏目无效。".to_string())
+    }
+}
+
+async fn ensure_content_type(
+    state: &DatabaseState,
+    date: NaiveDate,
+    content_type: &str,
+) -> Result<Vec<ContentIdea>, String> {
+    if list_for_date(state, date, content_type)?.len() >= 5 {
+        return list_for_date(state, date, content_type);
+    }
+    let (drafts, source) = if content_type == "reasoning" {
+        (local_reasoning_drafts(), "local")
+    } else {
+        match ai_drafts(date).await {
+            Ok(drafts) => (drafts, "deepseek"),
+            Err(_) => (local_drafts(date), "local"),
+        }
+    };
+    save_drafts(state, date, drafts, source, content_type, false)
+}
+
 pub async fn ensure_content_for_date(
     state: DatabaseState,
     date: NaiveDate,
 ) -> Result<Vec<ContentIdea>, String> {
-    if list_for_date(&state, date)?.len() >= 5 {
-        return list_for_date(&state, date);
-    }
-    let (drafts, source) = match ai_drafts(date).await {
-        Ok(drafts) => (drafts, "deepseek"),
-        Err(_) => (local_drafts(date), "local"),
-    };
-    save_drafts(&state, date, drafts, source, false)
+    let tech = ensure_content_type(&state, date, "tech").await?;
+    ensure_content_type(&state, date, "reasoning").await?;
+    Ok(tech)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_content_ideas(
     state: tauri::State<'_, DatabaseState>,
     date: Option<String>,
+    content_type: Option<String>,
 ) -> Result<Vec<ContentIdea>, String> {
-    list_for_date(&state, parse_date(date)?)
+    let content_type = normalize_content_type(content_type)?;
+    list_for_date(&state, parse_date(date)?, &content_type)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -250,14 +322,18 @@ pub async fn generate_daily_content(
     date: Option<String>,
     force: Option<bool>,
     use_ai: Option<bool>,
+    content_type: Option<String>,
 ) -> Result<Vec<ContentIdea>, String> {
     let date = parse_date(date)?;
     let force = force.unwrap_or(false);
+    let content_type = normalize_content_type(content_type)?;
     let database = state.inner().clone();
-    if !force && list_for_date(&database, date)?.len() >= 5 {
-        return list_for_date(&database, date);
+    if !force && list_for_date(&database, date, &content_type)?.len() >= 5 {
+        return list_for_date(&database, date, &content_type);
     }
-    let (drafts, source) = if use_ai.unwrap_or(true) {
+    let (drafts, source) = if content_type == "reasoning" {
+        (local_reasoning_drafts(), "local")
+    } else if use_ai.unwrap_or(true) {
         match ai_drafts(date).await {
             Ok(drafts) => (drafts, "deepseek"),
             Err(_) => (local_drafts(date), "local"),
@@ -265,7 +341,7 @@ pub async fn generate_daily_content(
     } else {
         (local_drafts(date), "local")
     };
-    save_drafts(&database, date, drafts, source, force)
+    save_drafts(&database, date, drafts, source, &content_type, force)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -288,4 +364,20 @@ pub fn update_content_status(
         )
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_cases_are_complete_and_unique() {
+        let drafts = local_reasoning_drafts();
+        assert_eq!(5, drafts.len());
+        let titles: HashSet<_> = drafts.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(5, titles.len());
+        assert!(drafts
+            .iter()
+            .all(|item| item.script.contains("答案是：") && item.storyboard.contains("10 秒思考")));
+    }
 }

@@ -9,6 +9,7 @@ import ContentView from "../views/ContentView.vue";
 import SettingsView from "../views/SettingsView.vue";
 import TestingView from "../views/TestingView.vue";
 import WorkRecordsView from "../views/WorkRecordsView.vue";
+import VideoCenterView from "../views/VideoCenterView.vue";
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -21,6 +22,7 @@ const router = createRouter({
     { path: "/tokens", name: "tokens", component: TokensView, meta: { title: "Token 分析" } },
     { path: "/knowledge", name: "knowledge", component: KnowledgeView, meta: { title: "知识库" } },
     { path: "/content", name: "content", component: ContentView, meta: { title: "内容工坊" } },
+    { path: "/videos", name: "videos", component: VideoCenterView, meta: { title: "视频中心" } },
     { path: "/testing", name: "testing", component: TestingView, meta: { title: "测试中心" } },
     { path: "/settings", name: "settings", component: SettingsView, meta: { title: "设置" } },
   ],

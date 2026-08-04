@@ -1,19 +1,20 @@
 {
   "name": "ai-personal-workbench",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "dev:desktop": "tauri dev",
     "build": "vue-tsc --noEmit && vite build",
-    "test": "vitest run",
+    "test": "vitest run --pool=forks --maxWorkers=1",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
+    "lunar-javascript": "^1.7.7",
     "pinia": "^4.0.2",
     "vue": "^3.5.40",
     "vue-router": "^5.2.0"

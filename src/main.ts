@@ -4,6 +4,8 @@ import App from "./App.vue";
 import router from "./router";
 import { useWorkbenchStore } from "./stores/workbench";
 import "./styles/main.css";
+import "./styles/features.css";
+import "./styles/internal-video.css";
 
 const app = createApp(App);
 const pinia = createPinia();

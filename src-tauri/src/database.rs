@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -270,6 +270,7 @@ impl DatabaseState {
                  CREATE TABLE IF NOT EXISTS content_ideas (
                    id TEXT PRIMARY KEY,
                    idea_date TEXT NOT NULL,
+                   content_type TEXT NOT NULL DEFAULT 'tech',
                    category TEXT NOT NULL,
                    title TEXT NOT NULL,
                    hook TEXT NOT NULL,
@@ -329,6 +330,7 @@ impl DatabaseState {
             "ALTER TABLE git_commits ADD COLUMN author_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE git_commits ADD COLUMN author_email TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE tasks ADD COLUMN source_id TEXT",
+            "ALTER TABLE content_ideas ADD COLUMN content_type TEXT NOT NULL DEFAULT 'tech'",
         ] {
             let _ = connection.execute(migration, []);
         }

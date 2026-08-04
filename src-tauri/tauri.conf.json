@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI 个人工作台",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "identifier": "com.local.ai-personal-workbench",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,7 +22,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$DOCUMENT/视频创作/**"]
+      }
     }
   },
   "bundle": {

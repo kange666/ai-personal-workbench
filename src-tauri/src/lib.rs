@@ -7,6 +7,7 @@ mod knowledge;
 mod reports;
 mod suggestions;
 mod testing;
+mod videos;
 mod worktime;
 
 use chrono::{Duration, Timelike};
@@ -171,6 +172,10 @@ pub fn run() {
             testing::list_test_runs,
             testing::read_test_report,
             testing::start_test_run,
+            videos::list_local_videos,
+            videos::read_video_cover,
+            videos::open_local_video,
+            videos::reveal_local_video,
             worktime::list_work_sessions,
             worktime::work_summary,
             worktime::save_work_session,

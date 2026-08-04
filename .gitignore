@@ -12,3 +12,4 @@ release/
 .DS_Store
 .idea/
 .vscode/
+*.lnk
