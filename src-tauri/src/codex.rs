@@ -4,7 +4,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
@@ -22,6 +22,31 @@ pub struct CodexScanSummary {
     pub archived_conversations_imported: usize,
     pub errors: usize,
     pub error_details: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexQuotaWindow {
+    used_percent: f64,
+    remaining_percent: f64,
+    window_minutes: i64,
+    resets_at: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexQuotaSnapshot {
+    available: bool,
+    captured_at: Option<String>,
+    plan_type: Option<String>,
+    primary: Option<CodexQuotaWindow>,
+    secondary: Option<CodexQuotaWindow>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TrayQuota {
+    pub remaining_percent: u8,
+    pub resets_at: i64,
 }
 
 #[derive(Default)]
@@ -66,6 +91,114 @@ fn string_at(value: &Value, path: &[&str]) -> Option<String> {
 
 fn integer(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or_default()
+}
+
+fn quota_window(value: &Value) -> Option<CodexQuotaWindow> {
+    let used_percent = value.get("used_percent")?.as_f64()?.clamp(0.0, 100.0);
+    Some(CodexQuotaWindow {
+        used_percent,
+        remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
+        window_minutes: value
+            .get("window_minutes")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        resets_at: value
+            .get("resets_at")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+    })
+}
+
+fn quota_from_event(value: &Value) -> Option<CodexQuotaSnapshot> {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg")
+        || value.pointer("/payload/type").and_then(Value::as_str) != Some("token_count")
+    {
+        return None;
+    }
+    let limits = value.pointer("/payload/rate_limits")?;
+    let primary = limits.get("primary").and_then(quota_window);
+    let secondary = limits.get("secondary").and_then(quota_window);
+    if primary.is_none() && secondary.is_none() {
+        return None;
+    }
+    Some(CodexQuotaSnapshot {
+        available: true,
+        captured_at: value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        plan_type: limits
+            .get("plan_type")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        primary,
+        secondary,
+    })
+}
+
+fn quota_from_file_tail(path: &Path) -> Option<CodexQuotaSnapshot> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    for tail_bytes in [
+        256 * 1024_u64,
+        1024 * 1024,
+        4 * 1024 * 1024,
+        16 * 1024 * 1024,
+    ] {
+        let start = length.saturating_sub(tail_bytes);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut bytes = Vec::with_capacity((length - start).min(tail_bytes) as usize);
+        file.read_to_end(&mut bytes).ok()?;
+        if let Some(snapshot) = String::from_utf8_lossy(&bytes)
+            .lines()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|value| quota_from_event(&value))
+        {
+            return Some(snapshot);
+        }
+        if start == 0 {
+            break;
+        }
+    }
+    None
+}
+
+fn latest_quota_snapshot() -> CodexQuotaSnapshot {
+    let mut files = roots()
+        .into_iter()
+        .filter(|(root, _)| root.exists())
+        .flat_map(|(root, _)| {
+            WalkDir::new(root)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.file_type().is_file()
+                        && entry.path().extension().and_then(|value| value.to_str())
+                            == Some("jsonl")
+                })
+                .filter_map(|entry| {
+                    let modified = entry.metadata().ok()?.modified().ok()?;
+                    Some((modified, entry.into_path()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|(modified_a, _), (modified_b, _)| modified_b.cmp(modified_a));
+    files
+        .into_iter()
+        .take(20)
+        .find_map(|(_, path)| quota_from_file_tail(&path))
+        .unwrap_or_default()
+}
+
+pub(crate) fn latest_tray_quota() -> Option<TrayQuota> {
+    let snapshot = latest_quota_snapshot();
+    let window = snapshot.primary.or(snapshot.secondary)?;
+    Some(TrayQuota {
+        remaining_percent: window.remaining_percent.round().clamp(0.0, 100.0) as u8,
+        resets_at: window.resets_at,
+    })
 }
 
 fn title_from_user_message(message: &str) -> Option<String> {
@@ -339,4 +472,47 @@ pub async fn scan_codex_sessions(
     tauri::async_runtime::spawn_blocking(move || scan_codex_sessions_for_state(&database))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn codex_quota() -> Result<CodexQuotaSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(latest_quota_snapshot)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+
+    #[test]
+    fn parses_remaining_weekly_quota() {
+        let event = serde_json::json!({
+            "timestamp":"2026-08-05T07:28:31.497Z",
+            "type":"event_msg",
+            "payload":{
+                "type":"token_count",
+                "rate_limits":{
+                    "primary":{"used_percent":47.0,"window_minutes":10080,"resets_at":1786233736},
+                    "secondary":null,
+                    "plan_type":"prolite"
+                }
+            }
+        });
+        let quota = quota_from_event(&event).expect("应当识别 Codex 额度快照");
+        let primary = quota.primary.expect("应当包含周额度");
+        assert_eq!(primary.remaining_percent, 53.0);
+        assert_eq!(primary.window_minutes, 10_080);
+        assert_eq!(quota.plan_type.as_deref(), Some("prolite"));
+    }
+
+    #[test]
+    fn reads_latest_local_quota_snapshot() {
+        let quota = latest_quota_snapshot();
+        assert!(quota.available, "本机 Codex 日志应包含额度快照");
+        let window = quota.primary.or(quota.secondary).expect("应当包含额度周期");
+        assert!((0.0..=100.0).contains(&window.remaining_percent));
+        assert!(window.window_minutes > 0);
+        assert!(window.resets_at > 0);
+    }
 }

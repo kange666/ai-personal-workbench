@@ -19,6 +19,21 @@ export interface CodexScanSummary {
   errorDetails: string[];
 }
 
+export interface CodexQuotaWindow {
+  usedPercent: number;
+  remainingPercent: number;
+  windowMinutes: number;
+  resetsAt: number;
+}
+
+export interface CodexQuotaSnapshot {
+  available: boolean;
+  capturedAt?: string;
+  planType?: string;
+  primary?: CodexQuotaWindow;
+  secondary?: CodexQuotaWindow;
+}
+
 export interface GitScanSummary {
   repositoriesFound: number;
   commitsImported: number;
@@ -366,6 +381,10 @@ export async function databaseHealth(): Promise<DatabaseHealth> {
 
 export async function scanCodexSessions(): Promise<CodexScanSummary> {
   return invoke<CodexScanSummary>("scan_codex_sessions");
+}
+
+export async function getCodexQuota(): Promise<CodexQuotaSnapshot> {
+  return invoke<CodexQuotaSnapshot>("codex_quota");
 }
 
 export async function scanGitRepositories(): Promise<GitScanSummary> {
