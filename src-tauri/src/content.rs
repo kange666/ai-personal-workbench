@@ -94,8 +94,8 @@ fn concepts() -> [[Concept; 2]; 5] {
     ]
 }
 
-fn local_drafts(date: NaiveDate) -> Vec<ContentDraft> {
-    let parity = date.ordinal() as usize % 2;
+fn local_drafts(date: NaiveDate, generation_round: usize) -> Vec<ContentDraft> {
+    let parity = (date.ordinal() as usize + generation_round) % 2;
     concepts()
         .into_iter()
         .enumerate()
@@ -134,8 +134,23 @@ fn reasoning_concepts() -> [ReasoningConcept; 5] {
     ]
 }
 
-fn local_reasoning_drafts() -> Vec<ContentDraft> {
-    reasoning_concepts().into_iter().map(|concept| ContentDraft {
+fn alternate_reasoning_concepts() -> [ReasoningConcept; 5] {
+    [
+        ReasoningConcept { category: "真假话推理", title: "三名社员中，谁拿走了钥匙？", hook: "三句话只有一句是真的，钥匙到底在谁手里？", premise: "活动室的钥匙不见了，A、B、C 三名社员中只有一人拿走钥匙。馆主确认：三句证词中只有一句是真话。", options: "A：钥匙是 B 拿的。\nB：我没有拿钥匙。\nC：A 没有拿钥匙。", answer: "A 拿走了钥匙。", reasoning: "如果 A 拿走钥匙，A 的指认是假话，B 的否认是真话，C 说 A 没拿是假话，恰好一句真话。钥匙在 B 或 C 手里时都会出现两句真话。", scene: "旧校舍活动室，三名社员围绕空钥匙盒，证词卡片悬浮在各自身旁。", cover: "谁拿了钥匙？" },
+        ReasoningConcept { category: "生死门", title: "午夜三条通道，哪一条可以通过？", hook: "三条通道都很危险，但午夜只有一条已经失效。", premise: "主角被困在地下设施，必须从三条通道中选择一条。现在是午夜十二点。", options: "A 通道：两分钟后会被水淹没。\nB 通道：白天由聚光装置产生高温。\nC 通道：充满无色有毒气体。", answer: "选择 B 通道。", reasoning: "B 通道的危险依赖白天的强光，现在是午夜，聚光装置无法产生描述中的高温。A 和 C 的危险不受昼夜影响。", scene: "地下设施的三岔路口，水位警报、熄灭的聚光装置和气体警示分别对应三个选项。", cover: "午夜走哪条路？" },
+        ReasoningConcept { category: "犯罪推理", title: "是谁拿走了档案袋？", hook: "只有一句真话，档案袋藏在谁那里？", premise: "办公室的档案袋被人拿走，现场只有 A、B、C。已知三人中只有一人说真话。", options: "A：不是我拿的。\nB：是 A 拿的。\nC：B 没有拿。", answer: "B 拿走了档案袋。", reasoning: "如果 B 拿走档案袋，A 的否认是真话，B 对 A 的指认是假话，C 说 B 没拿也是假话，恰好一句真话。换成 A 或 C 都会出现两句真话。", scene: "昏暗办公室与空文件柜，三名职员站在证据板前，黄色档案袋作为中心线索。", cover: "谁拿了档案？" },
+        ReasoningConcept { category: "身份判断", title: "三个人中，谁才是真医生？", hook: "只有真正的医生说真话，你能认出他吗？", premise: "诊所里出现三名自称医生的人。只有一人是真医生，而且真医生说真话，另外两名冒牌者都说假话。", options: "A：我是真医生。\nB：A 不是真医生。\nC：B 是真医生。", answer: "A 是真医生。", reasoning: "A 为真医生时，A 的话为真，B 对 A 的否认是假，C 对 B 的指认也是假，条件成立。若 B 或 C 是真医生，至少会让一名冒牌者说出真话，产生矛盾。", scene: "夜间诊所候诊区，三人穿着不同细节的白色制服，馆主检查证件与证词。", cover: "谁是真医生？" },
+        ReasoningConcept { category: "逻辑排除", title: "三个标签全贴错，先开哪只箱子？", hook: "苹果、橙子和混合水果，三个标签全部错误。", premise: "桌上有三只箱子，标签分别写着“苹果”“橙子”“混合”，但三个标签全部贴错。你只能从一只箱子里拿出一个水果。", options: "A：先开标着“苹果”的箱子。\nB：先开标着“橙子”的箱子。\nC：先开标着“混合”的箱子。", answer: "先开标着“混合”的箱子。", reasoning: "因为所有标签都错，标着“混合”的箱子一定只装一种水果。取出一个就能确定它的真实类别，再利用另外两个错误标签依次确定剩余箱子。", scene: "谜题教室的长桌上放着三只木箱，错误标签清晰，苹果和橙子作为推理道具。", cover: "先开哪只箱子？" },
+    ]
+}
+
+fn local_reasoning_drafts(date: NaiveDate, generation_round: usize) -> Vec<ContentDraft> {
+    let concepts = if (date.ordinal() as usize + generation_round) % 2 == 0 {
+        reasoning_concepts()
+    } else {
+        alternate_reasoning_concepts()
+    };
+    concepts.into_iter().map(|concept| ContentDraft {
         category: concept.category.to_string(),
         title: concept.title.to_string(),
         hook: concept.hook.to_string(),
@@ -156,10 +171,11 @@ fn extract_json(text: &str) -> &str {
     }
 }
 
-async fn ai_drafts(date: NaiveDate) -> Result<Vec<ContentDraft>, String> {
+async fn ai_drafts(date: NaiveDate, generation_round: usize) -> Result<Vec<ContentDraft>, String> {
     let prompt = format!(
-        "为日期 {} 的中文短视频账号生成 5 条候选内容。账号定位是“小众科技探索”，没有实物，不做虚假开箱或亲身体验，内容方向覆盖 AI未来、智能硬件、未来生活、科技趋势、个人科技升级。每条约 60 秒，既有想象力，也必须说明现实限制。只返回 JSON 数组，必须恰好 5 项。每项字段：category、title、hook、script、storyboard、visualPrompts、editingGuide、coverTitle。storyboard 使用 Markdown 表格且至少 6 镜；visualPrompts 至少 5 条，统一写实近未来竖屏 9:16 风格；不要使用代码围栏。",
-        date.format("%Y-%m-%d")
+        "为日期 {} 的中文短视频账号生成第 {} 批 5 条全新候选内容，不要重复此前批次的常见标题。账号定位是“小众科技探索”，没有实物，不做虚假开箱或亲身体验，内容方向覆盖 AI未来、智能硬件、未来生活、科技趋势、个人科技升级。每条约 60 秒，既有想象力，也必须说明现实限制。只返回 JSON 数组，必须恰好 5 项。每项字段：category、title、hook、script、storyboard、visualPrompts、editingGuide、coverTitle。storyboard 使用 Markdown 表格且至少 6 镜；visualPrompts 至少 5 条，统一写实近未来竖屏 9:16 风格；不要使用代码围栏。",
+        date.format("%Y-%m-%d"),
+        generation_round + 1
     );
     let raw = ai::complete_with_limit(
         "你是严谨的中文科技短视频策划。禁止伪造产品体验、参数和新闻事实，必须清楚区分趋势、推测与已知事实。",
@@ -209,7 +225,11 @@ fn save_drafts(
         rows.collect::<Result<HashSet<_>, _>>()
             .map_err(|e| e.to_string())?
     };
-    let missing = 5usize.saturating_sub(existing_titles.len());
+    let missing = if force {
+        5
+    } else {
+        5usize.saturating_sub(existing_titles.len())
+    };
     let now = Utc::now().to_rfc3339();
     for draft in drafts
         .into_iter()
@@ -225,6 +245,85 @@ fn save_drafts(
     }
     transaction.commit().map_err(|e| e.to_string())?;
     list_for_date(state, date, content_type)
+}
+
+fn generation_round(
+    state: &DatabaseState,
+    date: NaiveDate,
+    content_type: &str,
+) -> Result<usize, String> {
+    let key = format!(
+        "content_generation_round:{}:{}",
+        date.format("%Y-%m-%d"),
+        content_type
+    );
+    let connection = state.connect()?;
+    let value = connection
+        .query_row("SELECT value FROM app_meta WHERE key=?1", [&key], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap_or_else(|_| "0".to_string());
+    Ok(value.parse::<usize>().unwrap_or(0))
+}
+
+fn local_titles_for_round(date: NaiveDate, content_type: &str, round: usize) -> HashSet<String> {
+    let drafts = if content_type == "reasoning" {
+        local_reasoning_drafts(date, round)
+    } else {
+        local_drafts(date, round)
+    };
+    drafts.into_iter().map(|draft| draft.title).collect()
+}
+
+fn next_generation_round(
+    state: &DatabaseState,
+    date: NaiveDate,
+    content_type: &str,
+) -> Result<usize, String> {
+    let key = format!(
+        "content_generation_round:{}:{}",
+        date.format("%Y-%m-%d"),
+        content_type
+    );
+    let connection = state.connect()?;
+    let stored_round = connection
+        .query_row("SELECT value FROM app_meta WHERE key=?1", [&key], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let next_round = if let Some(round) = stored_round {
+        round + 1
+    } else {
+        let existing_titles = {
+            let mut statement = connection
+                .prepare("SELECT title FROM content_ideas WHERE idea_date=?1 AND content_type=?2")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(
+                    params![date.format("%Y-%m-%d").to_string(), content_type],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<HashSet<_>, _>>()
+                .map_err(|error| error.to_string())?
+        };
+        let current_round = (0..2)
+            .max_by_key(|round| {
+                local_titles_for_round(date, content_type, *round)
+                    .intersection(&existing_titles)
+                    .count()
+            })
+            .unwrap_or(0);
+        current_round + 1
+    };
+    connection
+        .execute(
+            "INSERT INTO app_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, next_round.to_string()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(next_round)
 }
 
 fn list_for_date(
@@ -264,11 +363,6 @@ fn list_for_date(
         .map_err(|e| e.to_string())
 }
 
-pub async fn ensure_today_content(state: DatabaseState) -> Result<Vec<ContentIdea>, String> {
-    let today = Local::now().date_naive();
-    ensure_content_for_date(state, today).await
-}
-
 fn normalize_content_type(value: Option<String>) -> Result<String, String> {
     let value = value.unwrap_or_else(|| "tech".to_string());
     if matches!(value.as_str(), "tech" | "reasoning") {
@@ -286,12 +380,13 @@ async fn ensure_content_type(
     if list_for_date(state, date, content_type)?.len() >= 5 {
         return list_for_date(state, date, content_type);
     }
+    let round = generation_round(state, date, content_type)?;
     let (drafts, source) = if content_type == "reasoning" {
-        (local_reasoning_drafts(), "local")
+        (local_reasoning_drafts(date, round), "local")
     } else {
-        match ai_drafts(date).await {
+        match ai_drafts(date, round).await {
             Ok(drafts) => (drafts, "deepseek"),
-            Err(_) => (local_drafts(date), "local"),
+            Err(_) => (local_drafts(date, round), "local"),
         }
     };
     save_drafts(state, date, drafts, source, content_type, false)
@@ -331,15 +426,20 @@ pub async fn generate_daily_content(
     if !force && list_for_date(&database, date, &content_type)?.len() >= 5 {
         return list_for_date(&database, date, &content_type);
     }
+    let round = if force {
+        next_generation_round(&database, date, &content_type)?
+    } else {
+        generation_round(&database, date, &content_type)?
+    };
     let (drafts, source) = if content_type == "reasoning" {
-        (local_reasoning_drafts(), "local")
+        (local_reasoning_drafts(date, round), "local")
     } else if use_ai.unwrap_or(true) {
-        match ai_drafts(date).await {
+        match ai_drafts(date, round).await {
             Ok(drafts) => (drafts, "deepseek"),
-            Err(_) => (local_drafts(date), "local"),
+            Err(_) => (local_drafts(date, round), "local"),
         }
     } else {
-        (local_drafts(date), "local")
+        (local_drafts(date, round), "local")
     };
     save_drafts(&database, date, drafts, source, &content_type, force)
 }
@@ -372,12 +472,119 @@ mod tests {
 
     #[test]
     fn reasoning_cases_are_complete_and_unique() {
-        let drafts = local_reasoning_drafts();
+        let date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let drafts = local_reasoning_drafts(date, 0);
         assert_eq!(5, drafts.len());
         let titles: HashSet<_> = drafts.iter().map(|item| item.title.as_str()).collect();
         assert_eq!(5, titles.len());
         assert!(drafts
             .iter()
             .all(|item| item.script.contains("答案是：") && item.storyboard.contains("10 秒思考")));
+    }
+
+    #[test]
+    fn manual_generation_rotates_to_a_fresh_batch() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let first_reasoning: HashSet<_> = local_reasoning_drafts(date, 0)
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        let next_reasoning: HashSet<_> = local_reasoning_drafts(date, 1)
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        let first_tech: HashSet<_> = local_drafts(date, 0)
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        let next_tech: HashSet<_> = local_drafts(date, 1)
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+
+        assert!(first_reasoning.is_disjoint(&next_reasoning));
+        assert!(first_tech.is_disjoint(&next_tech));
+    }
+
+    #[test]
+    fn force_generation_keeps_selected_and_adds_five_candidates() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let path = std::env::temp_dir().join(format!("content-test-{}.sqlite3", Uuid::new_v4()));
+        let state = DatabaseState::new(path.clone()).unwrap();
+        let initial = save_drafts(
+            &state,
+            date,
+            local_reasoning_drafts(date, 0),
+            "local",
+            "reasoning",
+            false,
+        )
+        .unwrap();
+        state
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE content_ideas SET status='selected' WHERE id=?1",
+                [&initial[0].id],
+            )
+            .unwrap();
+
+        let regenerated = save_drafts(
+            &state,
+            date,
+            local_reasoning_drafts(date, 1),
+            "local",
+            "reasoning",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            1,
+            regenerated
+                .iter()
+                .filter(|item| item.status == "selected")
+                .count()
+        );
+        assert_eq!(
+            5,
+            regenerated
+                .iter()
+                .filter(|item| item.status == "candidate")
+                .count()
+        );
+
+        drop(state);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn first_generation_after_upgrade_skips_the_existing_legacy_batch() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let path = std::env::temp_dir().join(format!("content-test-{}.sqlite3", Uuid::new_v4()));
+        let state = DatabaseState::new(path.clone()).unwrap();
+        let legacy_titles: HashSet<_> = local_reasoning_drafts(date, 1)
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        save_drafts(
+            &state,
+            date,
+            local_reasoning_drafts(date, 1),
+            "local",
+            "reasoning",
+            false,
+        )
+        .unwrap();
+
+        let next_round = next_generation_round(&state, date, "reasoning").unwrap();
+        let next_titles = local_titles_for_round(date, "reasoning", next_round);
+        assert!(legacy_titles.is_disjoint(&next_titles));
+
+        drop(state);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 }

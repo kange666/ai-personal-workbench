@@ -48,8 +48,10 @@ async function regenerate() {
   error.value = "";
   try {
     ideas.value = await generateDailyContent(selectedDate.value, true, contentType.value === "tech", contentType.value);
-    selectedId.value = ideas.value[0]?.id || "";
-    message.value = contentType.value === "reasoning" ? "已生成 5 个带唯一答案和完整推理过程的案例。" : ideas.value.some(item => item.source === "deepseek") ? "已使用 DeepSeek 生成今日 5 套内容。" : "未连接 DeepSeek，已使用本地方案生成今日 5 套内容。";
+    const firstNewCandidate = ideas.value.find(item => item.status === "candidate");
+    selectedId.value = firstNewCandidate?.id || ideas.value[0]?.id || "";
+    const candidateCount = ideas.value.filter(item => item.status === "candidate").length;
+    message.value = contentType.value === "reasoning" ? `已生成 ${candidateCount} 个带唯一答案和完整推理过程的新案例。` : ideas.value.some(item => item.source === "deepseek") ? `已使用 DeepSeek 生成 ${candidateCount} 套新内容。` : `未连接 DeepSeek，已使用本地方案生成 ${candidateCount} 套新内容。`;
   } catch (cause) { error.value = String(cause); }
   finally { loading.value = false; }
 }

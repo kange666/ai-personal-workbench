@@ -80,7 +80,6 @@ pub fn run() {
             ensure_parent(&path).map_err(std::io::Error::other)?;
             let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
             app.manage(state.clone());
-            tauri::async_runtime::spawn(content::ensure_today_content(state.clone()));
             let history_state = state.clone();
             std::thread::spawn(move || {
                 if let Err(error) = reports::sync_history_if_sources_changed(&history_state) {
@@ -96,6 +95,11 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 let now = chrono::Local::now();
                 let maintenance_date = now.format("%Y-%m-%d").to_string();
+                if let Err(error) = tauri::async_runtime::block_on(
+                    content::ensure_content_for_date(state.clone(), now.date_naive()),
+                ) {
+                    eprintln!("自动补齐当天内容失败：{error}");
+                }
                 let last_maintenance = state.connect().ok().and_then(|connection| {
                     connection.query_row("SELECT value FROM app_meta WHERE key='last_daily_maintenance_date'", [], |row| row.get::<_, String>(0)).ok()
                 });
@@ -114,11 +118,12 @@ pub fn run() {
                         if let Ok(connection) = state.connect() {
                             let _ = connection.execute("INSERT INTO app_meta(key,value) VALUES('last_daily_maintenance_date',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&maintenance_date]);
                         }
-                        let content_state = state.clone();
-                        let tomorrow = now.date_naive() + Duration::days(1);
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(error) = content::ensure_content_for_date(content_state, tomorrow).await { eprintln!("生成第二天内容标题失败：{error}"); }
-                        });
+                    }
+                    let tomorrow = now.date_naive() + Duration::days(1);
+                    if let Err(error) = tauri::async_runtime::block_on(
+                        content::ensure_content_for_date(state.clone(), tomorrow),
+                    ) {
+                        eprintln!("生成第二天内容标题失败：{error}");
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_secs(60));
