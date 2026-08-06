@@ -88,6 +88,15 @@ export interface RepositoryAssetUpdate {
 export interface RepositoryAssetDetails {
   conversations: Array<{ id: string; title: string; updatedAt: string; archived: boolean }>;
   commits: Array<{ hash: string; subject: string; committedAt: string }>;
+  commitPlan?: CommitPlan;
+}
+
+export interface CommitPlanGroup {
+  id: string; title: string; commitMessage: string; files: string[]; riskNotes: string; verificationNotes: string; status: string;
+}
+
+export interface CommitPlan {
+  id: string; repositoryPath: string; status: string; riskLevel: string; summary: string; createdAt: string; groups: CommitPlanGroup[];
 }
 
 export interface TokenSummary {
@@ -458,6 +467,10 @@ export async function getRepositoryAssetDetails(path: string): Promise<Repositor
 
 export async function saveRepositoryAsset(asset: RepositoryAssetUpdate): Promise<void> {
   await invoke("save_repository_asset", { asset });
+}
+
+export async function generateCommitPlan(path: string): Promise<CommitPlan> {
+  return invoke<CommitPlan>("generate_commit_plan", { path });
 }
 
 export async function getTokenSummary(): Promise<TokenSummary> {

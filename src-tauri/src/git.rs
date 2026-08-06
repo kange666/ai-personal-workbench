@@ -2,7 +2,7 @@ use crate::database::DatabaseState;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::{DirEntry, WalkDir};
@@ -91,6 +91,31 @@ pub struct RepositoryCommit {
 pub struct RepositoryAssetDetails {
     pub conversations: Vec<RepositoryConversation>,
     pub commits: Vec<RepositoryCommit>,
+    pub commit_plan: Option<CommitPlanView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitPlanGroupView {
+    pub id: String,
+    pub title: String,
+    pub commit_message: String,
+    pub files: Vec<String>,
+    pub risk_notes: String,
+    pub verification_notes: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitPlanView {
+    pub id: String,
+    pub repository_path: String,
+    pub status: String,
+    pub risk_level: String,
+    pub summary: String,
+    pub created_at: String,
+    pub groups: Vec<CommitPlanGroupView>,
 }
 
 #[derive(Debug)]
@@ -213,6 +238,84 @@ fn merge_repository(repositories: &mut Vec<String>, seen: &mut HashSet<String>, 
     if seen.insert(key) {
         repositories.push(candidate);
     }
+}
+
+fn commit_group_for_path(path: &str) -> (&'static str, &'static str) {
+    let lower = path.replace('\\', "/").to_lowercase();
+    if lower.contains("node_modules/")
+        || lower.contains("target/")
+        || lower.contains("dist/")
+        || lower.ends_with(".log")
+        || lower.ends_with(".exe")
+    {
+        ("generated", "生成物与二进制")
+    } else if lower.contains("test") || lower.contains("e2e/") || lower.contains("spec") {
+        ("tests", "测试与用例")
+    } else if lower.ends_with(".md") || lower.contains("docs/") {
+        ("docs", "文档")
+    } else if lower.ends_with(".json")
+        || lower.ends_with(".toml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".config.js")
+        || lower.ends_with(".config.ts")
+    {
+        ("config", "配置与依赖")
+    } else {
+        ("code", "业务代码")
+    }
+}
+
+fn sensitive_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains(".env")
+        || lower.contains("secret")
+        || lower.contains("credential")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+}
+
+fn latest_commit_plan(
+    connection: &Connection,
+    path: &str,
+) -> Result<Option<CommitPlanView>, String> {
+    let plan = connection
+        .query_row(
+            "SELECT id,status,risk_level,summary,created_at FROM commit_plans WHERE repository_path=?1 ORDER BY created_at DESC LIMIT 1",
+            [path],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((id, status, risk_level, summary, created_at)) = plan else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare("SELECT id,title,commit_message,files_json,risk_notes,verification_notes,status FROM commit_groups WHERE plan_id=?1 ORDER BY group_order").map_err(|error| error.to_string())?;
+    let groups = statement
+        .query_map([&id], |row| {
+            let files_json: String = row.get(3)?;
+            Ok(CommitPlanGroupView {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                commit_message: row.get(2)?,
+                files: serde_json::from_str(&files_json).unwrap_or_default(),
+                risk_notes: row.get(4)?,
+                verification_notes: row.get(5)?,
+                status: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(Some(CommitPlanView {
+        id,
+        repository_path: path.to_string(),
+        status,
+        risk_level,
+        summary,
+        created_at,
+        groups,
+    }))
 }
 
 fn parse_commits(output: &str) -> Vec<CommitRecord> {
@@ -601,10 +704,91 @@ pub fn repository_asset_details(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let commit_plan = latest_commit_plan(&connection, &path)?;
     Ok(RepositoryAssetDetails {
         conversations,
         commits,
+        commit_plan,
     })
+}
+
+#[tauri::command]
+pub fn generate_commit_plan(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<CommitPlanView, String> {
+    let status = git_output(&[
+        "-C",
+        &path,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+    ])?;
+    if status.trim().is_empty() {
+        return Err("当前工作区没有未提交修改".to_string());
+    }
+    let mut grouped: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    let mut has_sensitive = false;
+    for line in status.lines() {
+        let raw_path = line.get(3..).unwrap_or_default().trim();
+        let file = raw_path
+            .split(" -> ")
+            .last()
+            .unwrap_or(raw_path)
+            .trim_matches('"')
+            .to_string();
+        if file.is_empty() {
+            continue;
+        }
+        has_sensitive |= sensitive_path(&file);
+        let (key, title) = commit_group_for_path(&file);
+        grouped
+            .entry(key.to_string())
+            .or_insert_with(|| (title.to_string(), Vec::new()))
+            .1
+            .push(file);
+    }
+    let diff_warning = git_output(&["-C", &path, "diff", "--check"])
+        .err()
+        .unwrap_or_default();
+    let risk_level = if has_sensitive {
+        "高"
+    } else if !diff_warning.is_empty() || grouped.contains_key("generated") {
+        "中"
+    } else {
+        "低"
+    };
+    let now = Utc::now().to_rfc3339();
+    let plan_id = uuid::Uuid::new_v4().to_string();
+    let summary = format!(
+        "识别 {} 个文件，拆分为 {} 组；仅生成建议，未修改暂存区。",
+        status.lines().count(),
+        grouped.len()
+    );
+    let mut connection = state.connect()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction.execute("INSERT INTO commit_plans(id,repository_path,status,risk_level,summary,created_at,updated_at) VALUES(?1,?2,'draft',?3,?4,?5,?5)", params![plan_id,path,risk_level,summary,now]).map_err(|error| error.to_string())?;
+    let messages = BTreeMap::from([
+        ("code", "feat: 整理业务功能修改"),
+        ("config", "chore: 更新项目配置与依赖"),
+        ("docs", "docs: 更新项目文档"),
+        ("tests", "test: 完善测试与用例"),
+        ("generated", "chore: 核对生成物与二进制"),
+    ]);
+    for (order, (key, (title, files))) in grouped.into_iter().enumerate() {
+        let group_risk = if files.iter().any(|file| sensitive_path(file)) {
+            "包含疑似敏感文件，提交前必须逐项确认"
+        } else if key == "generated" {
+            "生成物或二进制通常不应提交，请先核对忽略规则"
+        } else {
+            "未发现明显高风险文件"
+        };
+        transaction.execute("INSERT INTO commit_groups(id,plan_id,group_order,title,commit_message,files_json,risk_notes,verification_notes,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'suggested')", params![uuid::Uuid::new_v4().to_string(),plan_id,order as i64,title,messages.get(key.as_str()).copied().unwrap_or("chore: 整理项目修改"),serde_json::to_string(&files).map_err(|error| error.to_string())?,group_risk,if diff_warning.is_empty(){"建议执行项目已配置的安全测试命令"}else{"git diff --check 未通过，请先处理空白或冲突标记"}]).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    latest_commit_plan(&state.connect()?, &path)?.ok_or_else(|| "提交建议生成失败".to_string())
 }
 
 #[tauri::command]
@@ -633,7 +817,10 @@ pub fn save_repository_asset(
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_repository_candidates, parse_commits, GitScanConfiguration};
+    use super::{
+        commit_group_for_path, discover_repository_candidates, parse_commits, sensitive_path,
+        GitScanConfiguration,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -666,5 +853,15 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(repositories, vec![project]);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn commit_plan_separates_tests_generated_files_and_secrets() {
+        assert_eq!(commit_group_for_path("src/user/index.vue").0, "code");
+        assert_eq!(commit_group_for_path("e2e/user.spec.ts").0, "tests");
+        assert_eq!(commit_group_for_path("dist/app.js").0, "generated");
+        assert!(sensitive_path(".env.production"));
+        assert!(sensitive_path("cert/private.key"));
+        assert!(!sensitive_path("src/token-chart.vue"));
     }
 }

@@ -294,6 +294,7 @@ pub fn run() {
             git::list_repository_assets,
             git::repository_asset_details,
             git::save_repository_asset,
+            git::generate_commit_plan,
             reports::list_reports,
             reports::report_sources,
             reports::generate_report,
