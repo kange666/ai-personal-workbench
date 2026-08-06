@@ -12,13 +12,13 @@ use uuid::Uuid;
 const CLIENT_ROOT: &str = r"F:\TB-project\client";
 const APP_ROOT: &str = r"F:\TB-project\APP";
 
-fn client_root() -> PathBuf {
+pub(crate) fn client_root() -> PathBuf {
     std::env::var_os("AI_WORKBENCH_CLIENT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(CLIENT_ROOT))
 }
 
-fn app_root() -> PathBuf {
+pub(crate) fn app_root() -> PathBuf {
     std::env::var_os("AI_WORKBENCH_APP_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(APP_ROOT))
@@ -180,7 +180,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<TestRun> {
     })
 }
 
-fn client_menus(state: &DatabaseState) -> Result<Vec<TestMenu>, String> {
+pub(crate) fn client_menus(state: &DatabaseState) -> Result<Vec<TestMenu>, String> {
     let case_dir = client_root().join("e2e").join("menu-cases");
     if !case_dir.is_dir() {
         return Ok(Vec::new());
@@ -295,7 +295,7 @@ fn add_app_pages(items: &mut Vec<TestMenu>, root: &str, pages: Option<&Vec<Value
     }
 }
 
-fn app_menus(state: &DatabaseState) -> Result<Vec<TestMenu>, String> {
+pub(crate) fn app_menus(state: &DatabaseState) -> Result<Vec<TestMenu>, String> {
     let pages_path = app_root().join("pages.json");
     if !pages_path.is_file() {
         return Ok(Vec::new());

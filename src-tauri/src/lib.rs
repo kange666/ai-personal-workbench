@@ -4,6 +4,7 @@ mod content;
 mod database;
 mod git;
 mod knowledge;
+mod parity;
 mod reports;
 mod suggestions;
 mod testing;
@@ -215,6 +216,9 @@ pub fn run() {
             app.manage(state.clone());
             let history_state = state.clone();
             std::thread::spawn(move || {
+                if let Err(error) = parity::sync_feature_parity_for_state(&history_state) {
+                    eprintln!("启动时同步 PC/APP 对照矩阵失败：{error}");
+                }
                 if let Err(error) = reports::sync_history_if_sources_changed(&history_state) {
                     eprintln!("启动时同步 Codex 历史失败：{error}");
                 }
@@ -317,6 +321,9 @@ pub fn run() {
             testing::list_test_runs,
             testing::read_test_report,
             testing::start_test_run,
+            parity::sync_feature_parity,
+            parity::list_feature_parity,
+            parity::save_feature_parity_review,
             videos::list_local_videos,
             videos::read_video_cover,
             videos::open_local_video,

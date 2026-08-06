@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
-import { isTauriRuntime, listTestMenus, listTestRuns, readTestReport, startTestRun, type StartTestOptions, type TestMenu, type TestRun } from "../services/backend";
+import { isTauriRuntime, listFeatureParity, listTestMenus, listTestRuns, readTestReport, saveFeatureParityReview, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestRun } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
 
 const demoMenus: TestMenu[] = [
@@ -13,6 +13,9 @@ const store = useWorkbenchStore();
 const route = useRoute();
 const menus = ref<TestMenu[]>(isTauriRuntime() ? [] : demoMenus);
 const runs = ref<TestRun[]>(isTauriRuntime() ? [] : demoRuns);
+const parities = ref<FeatureParity[]>([]);
+const activeSection = ref<"menus" | "parity">("menus");
+const selectedParity = ref<FeatureParity | null>(null);
 const projectFilter = ref<"all" | "client" | "APP">("all");
 const statusFilter = ref<"all" | "tested" | "untested" | "passed" | "failed">("all");
 const typeFilter = ref<"all" | "functional" | "style">("all");
@@ -29,6 +32,17 @@ const useEnvironmentToken = ref(true);
 const account = ref("");
 const token = ref("");
 const mode = ref<TestRun["mode"]>("mock");
+const verificationKinds: RegressionEvidence["verificationType"][] = ["static", "api", "browser"];
+
+function regression(feature: FeatureParity, platform: "PC" | "APP", kind: RegressionEvidence["verificationType"]) {
+  return feature.regression.find((item) => item.platform === platform && item.verificationType === kind);
+}
+function evidenceLabel(status?: RegressionEvidence["status"]) {
+  return status === "passed" ? "已通过" : status === "failed" ? "未通过" : "未执行";
+}
+function parityLabel(status: FeatureParity["parityStatus"]) {
+  return ({ pending: "待核对", "static-aligned": "静态一致", confirmed: "人工确认一致", different: "存在差异" })[status];
+}
 
 const filteredMenus = computed(() => menus.value.filter((menu) => {
   if (projectFilter.value !== "all" && menu.project !== projectFilter.value) return false;
@@ -98,8 +112,18 @@ function openConfig(menu: TestMenu) {
 }
 async function refresh() {
   if (!isTauriRuntime()) return;
-  menus.value = await listTestMenus();
-  runs.value = await listTestRuns();
+  await syncFeatureParity();
+  [menus.value, runs.value, parities.value] = await Promise.all([listTestMenus(), listTestRuns(), listFeatureParity()]);
+}
+async function saveParity(feature: FeatureParity) {
+  if (!isTauriRuntime()) return;
+  loading.value = true; error.value = "";
+  try {
+    await saveFeatureParityReview({ id: feature.id, parityStatus: feature.parityStatus, intentionalDifference: feature.intentionalDifference, manuallyConfirmed: true });
+    feature.manuallyConfirmed = true;
+    message.value = `${feature.featureName} 的人工核对结果已保存。`;
+  } catch (cause) { error.value = String(cause); }
+  finally { loading.value = false; }
 }
 async function runTest() {
   if (!configuring.value || loading.value) return;
@@ -156,17 +180,51 @@ onMounted(async () => {
 
 <template>
   <div class="view testing-view">
-    <header class="page-header"><div><h1>测试中心</h1><p>复用 client 现有菜单用例与 APP 已注册页面，统一发起测试并保存报告</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">↻ 刷新菜单与报告</button></div></header>
+    <header class="page-header"><div><h1>测试中心</h1><p>复用项目已有用例，并将 PC 与 APP 的静态、接口、浏览器证据分层记录</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">↻ 刷新菜单、矩阵与报告</button></div></header>
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
-    <section class="metric-grid testing-metrics"><article class="clickable-card" @click="statusFilter='all'"><span>菜单 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article></section>
-    <section class="panel testing-panel">
+    <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">菜单自动化测试</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button></div>
+    <section v-if="activeSection==='menus'" class="metric-grid testing-metrics"><article class="clickable-card" @click="statusFilter='all'"><span>菜单 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article></section>
+    <section v-if="activeSection==='menus'" class="panel testing-panel">
       <div class="testing-toolbar"><label>⌕<input v-model="query" placeholder="搜索菜单名称、路由或源码路径"></label><select v-model="projectFilter"><option value="all">全部项目</option><option value="client">client</option><option value="APP">APP</option></select><select v-model="statusFilter"><option value="all">全部状态</option><option value="tested">已测试</option><option value="untested">未测试</option><option value="passed">最近通过</option><option value="failed">最近未通过</option></select><select v-model="typeFilter"><option value="all">全部能力</option><option value="functional">已有功能用例</option><option value="style">页面 / 样式检查</option></select></div>
       <div class="testing-note"><b>执行边界</b><span>当前读取 client {{ projectCounts.client }} 个已有菜单用例、APP {{ projectCounts.app }} 个 pages.json 注册页面。项目目录不存在时列表为空；真实接口测试可能创建、修改和清理 E2E 前缀测试数据，默认不启用。</span></div>
       <div class="test-table-wrap"><table class="test-table"><thead><tr><th>项目</th><th>功能菜单 / 页面</th><th>已有测试能力</th><th>最近结果</th><th>测试报告</th><th>操作</th></tr></thead><tbody><tr v-for="menu in filteredMenus" :key="menu.id"><td><span class="project-badge" :class="menu.project.toLowerCase()">{{ menu.project }}</span></td><td><b>{{ menu.name }}</b><small>{{ menu.route }}</small><em>{{ menu.sourcePath }}</em></td><td><div class="capability-tags"><span v-if="menu.capabilities.mock">功能用例</span><span v-if="menu.capabilities.realApi">真实接口</span><span v-if="menu.capabilities.sourceStyle">源码 / 样式</span><span v-if="menu.capabilities.browserStyle">浏览器样式</span><span v-if="!menu.caseId" class="muted">暂无交互用例</span></div></td><td><span class="test-status" :class="menu.latestStatus || 'untested'">{{ statusLabel(menu) }}</span><small>{{ formatTime(menu.latestTime) }}</small></td><td><button class="text-button" :disabled="!menu.tested" @click="openReport(menu)">{{ menu.tested ? '查看报告' : '暂无报告' }}</button></td><td><button class="button primary small" :disabled="loading" @click="openConfig(menu)">▶ 测试</button></td></tr></tbody></table><div v-if="!filteredMenus.length" class="empty-state"><b>没有符合条件的菜单</b><p>请调整项目、状态、测试能力或关键词筛选。</p></div></div>
     </section>
+
+    <section v-else class="panel parity-panel">
+      <div class="testing-note"><b>验证口径</b><span>“静态”只证明页面、API 文件和约定接口存在；“接口”和“浏览器”必须实际执行后才会变为通过。未执行不会显示为失败，也不会冒充已验证。</span></div>
+      <div class="parity-grid">
+        <article v-for="feature in parities" :key="feature.id" class="parity-card" @click="selectedParity=feature">
+          <header><div><small>{{ feature.domain }}</small><h3>{{ feature.featureName }}</h3></div><span :class="feature.parityStatus">{{ parityLabel(feature.parityStatus) }}</span></header>
+          <div class="platform-matrix">
+            <div><b>PC</b><span v-for="kind in verificationKinds" :key="kind" :class="regression(feature,'PC',kind)?.status"><i></i>{{ kind==='static'?'静态':kind==='api'?'接口':'浏览器' }} · {{ evidenceLabel(regression(feature,'PC',kind)?.status) }}</span></div>
+            <div><b>APP</b><span v-for="kind in verificationKinds" :key="kind" :class="regression(feature,'APP',kind)?.status"><i></i>{{ kind==='static'?'静态':kind==='api'?'接口':'浏览器' }} · {{ evidenceLabel(regression(feature,'APP',kind)?.status) }}</span></div>
+          </div>
+          <footer><span>{{ feature.contracts.length }} 条接口契约</span><button class="text-button">查看证据 →</button></footer>
+        </article>
+      </div>
+    </section>
+
+    <div v-if="selectedParity" class="activity-backdrop" @click.self="selectedParity=null"><section class="panel parity-detail">
+      <header><div><small>{{ selectedParity.domain }} · PARITY REVIEW</small><h2>{{ selectedParity.featureName }}</h2><p>人工确认只记录你的判断，不会修改 client 或 APP 项目。</p></div><button class="icon-button" @click="selectedParity=null">×</button></header>
+      <div class="parity-paths"><article><b>PC 页面</b><code>{{ selectedParity.pcPage }}</code></article><article><b>APP 页面</b><code>{{ selectedParity.appPage }}</code></article></div>
+      <h3>分层验证证据</h3><div class="evidence-list"><article v-for="item in selectedParity.regression" :key="`${item.platform}-${item.verificationType}`"><span class="project-badge" :class="item.platform.toLowerCase()">{{ item.platform }}</span><b>{{ item.verificationType==='static'?'静态检查':item.verificationType==='api'?'接口测试':'浏览器测试' }}</b><span class="evidence-status" :class="item.status">{{ evidenceLabel(item.status) }}</span><p>{{ item.resultSummary }}</p><code>{{ item.sourcePath || '暂无执行来源' }}</code></article></div>
+      <h3>接口契约</h3><div class="contract-list"><div v-for="contract in selectedParity.contracts" :key="contract.id"><span>{{ contract.platform }}</span><b>{{ contract.method }}</b><code>{{ contract.url }}</code><em>{{ contract.verificationLevel === 'static' ? '静态读取' : contract.verificationLevel }}</em></div></div>
+      <footer class="parity-review"><label>核对结论<select v-model="selectedParity.parityStatus"><option value="static-aligned">静态一致，待实际测试</option><option value="confirmed">人工确认一致</option><option value="different">存在差异</option><option value="pending">待核对</option></select></label><label class="check-row"><input v-model="selectedParity.intentionalDifference" type="checkbox">差异属于有意设计</label><button class="button primary" :disabled="loading" @click="saveParity(selectedParity)">保存人工核对</button></footer>
+    </section></div>
 
     <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && (configuring = null)"><section class="panel test-config-dialog"><header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading" @click="configuring = null">×</button></header><div class="test-config-body"><label>测试类型<select v-model="mode"><option v-for="value in availableModes(configuring)" :key="value" :value="value">{{ modeLabel(value) }}</option></select></label><div v-if="mode === 'real'" class="real-test-warning"><b>真实接口写入提醒</b><p>现有 client 真实用例会创建、修改或删除 E2E 前缀测试数据，并在结束时尝试清理。只有确认测试环境允许写入时才执行。</p></div><label v-if="mode === 'real'" class="check-row"><input v-model="useEnvironmentToken" type="checkbox">读取 Windows 用户环境变量 HLZT_TOKEN</label><label v-if="mode === 'real' && !useEnvironmentToken">临时 Token<input v-model="token" type="password" autocomplete="off" placeholder="只传给本次测试子进程，不保存"></label><label v-if="mode === 'real'">测试账号（可选）<input v-model="account" autocomplete="off" placeholder="仅传给支持 E2E_TEST_ACCOUNT 的已有用例"><small>当前多数 client 用例使用 Token 登录；账号字段不会写入数据库。</small></label><div class="reuse-source"><b>复用来源</b><code v-if="configuring.caseId">client/e2e/menu-cases/{{ configuring.caseId }}.json</code><code v-else>APP/pages.json + {{ configuring.sourcePath }}</code></div></div><footer><span>{{ loading ? '正在运行项目现有测试，完成后自动打开报告…' : '测试结果和报告保存在个人工作台本地数据库；凭据不保存。' }}</span><button class="button secondary" :disabled="loading" @click="configuring = null">取消</button><button class="button primary" :disabled="loading" @click="runTest">{{ loading ? '测试中…' : '开始测试' }}</button></footer></section></div>
 
     <div v-if="reportContent" class="activity-backdrop report-dialog-backdrop" @click.self="closeReport"><section class="panel test-report-dialog designed-report"><header><div><small>TEST REPORT</small><h2>{{ reportTitle }}</h2><p>项目现有测试报告 / 工作台静态检查报告</p></div><div class="report-header-actions"><span class="report-result-pill" :class="activeReportStatus">{{ activeReportStatus === 'passed' ? '✓ 测试通过' : activeReportStatus === 'failed' ? '× 测试未通过' : '— 结果未知' }}</span><button class="icon-button" @click="closeReport">×</button></div></header><div class="report-overview"><article><small>执行结果</small><b :class="activeReportStatus">{{ activeReportStatus === 'passed' ? '通过' : activeReportStatus === 'failed' ? '需处理' : '待确认' }}</b><span>{{ activeReportStatus === 'passed' ? '当前用例达到预期' : activeReportStatus === 'failed' ? '请查看失败项和输出' : '报告未包含明确状态' }}</span></article><article><small>测试方式</small><b>{{ activeReportRun ? modeLabel(activeReportRun.mode) : '已有报告' }}</b><span>{{ activeReportRun?.project || '本地项目' }} · {{ activeReportRun ? formatTime(activeReportRun.startedAt) : '历史记录' }}</span></article><article><small>报告结构</small><b>{{ reportStats.sections }} 个分区</b><span>{{ reportStats.passed }} 个通过标记 · {{ reportStats.failed }} 个失败标记</span></article></div><div class="structured-report-body"><article v-for="(section,index) in reportSections" :key="`${section.title}-${index}`" class="report-section-card"><header><i>{{ String(index+1).padStart(2,'0') }}</i><h3>{{ section.title }}</h3></header><div class="report-section-content"><p v-for="(text,textIndex) in section.paragraphs" :key="textIndex">{{ text }}</p><ul v-if="section.bullets.length"><li v-for="item in section.bullets" :key="item"><span :class="{good:/✅|通过|passed/i.test(item),bad:/❌|失败|未通过|failed/i.test(item)}"></span>{{ item }}</li></ul><pre v-if="section.code.length"><code>{{ section.code.join('\n') }}</code></pre></div></article></div></section></div>
   </div>
 </template>
+
+<style scoped>
+.testing-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--border-color);border-radius:12px;background:var(--panel-bg)}
+.testing-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--text-secondary);cursor:pointer}.testing-tabs button.active{background:var(--primary);color:#fff}
+.parity-panel{padding:18px}.parity-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}.parity-card{padding:18px;border:1px solid var(--border-color);border-radius:14px;background:var(--panel-bg);cursor:pointer;transition:.18s}.parity-card:hover{transform:translateY(-2px);border-color:var(--primary)}
+.parity-card>header,.parity-card>footer,.parity-detail>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.parity-card h3{margin:4px 0 0}.parity-card header>span{padding:5px 9px;border-radius:999px;font-size:12px;background:var(--muted-bg)}.parity-card header>span.static-aligned,.parity-card header>span.confirmed{color:#53c895;background:rgba(83,200,149,.12)}.parity-card header>span.different{color:#f39a62;background:rgba(243,154,98,.12)}
+.platform-matrix{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}.platform-matrix>div{display:grid;gap:8px}.platform-matrix span{font-size:12px;color:var(--text-secondary)}.platform-matrix i{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:#7c8293}.platform-matrix .passed i,.evidence-status.passed{color:#53c895}.platform-matrix .passed i{background:#53c895}.platform-matrix .failed i,.evidence-status.failed{color:#ef6d75}.platform-matrix .failed i{background:#ef6d75}.parity-card>footer{padding-top:12px;border-top:1px solid var(--border-color);font-size:12px;color:var(--text-secondary)}
+.parity-detail{width:min(1040px,calc(100vw - 80px));max-height:calc(100vh - 70px);padding:24px;overflow:auto}.parity-detail h3{margin:22px 0 10px}.parity-paths{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}.parity-paths article{padding:13px;border:1px solid var(--border-color);border-radius:10px}.parity-paths code,.evidence-list code{display:block;margin-top:7px;white-space:normal;word-break:break-all;color:var(--text-secondary)}
+.evidence-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.evidence-list article{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;padding:12px;border:1px solid var(--border-color);border-radius:10px}.evidence-list p,.evidence-list code{grid-column:1/-1;margin:0}.contract-list{display:grid;gap:6px}.contract-list>div{display:grid;grid-template-columns:48px 64px 1fr 70px;gap:8px;align-items:center;padding:9px 12px;border-radius:8px;background:var(--muted-bg)}.contract-list em{font-size:11px;color:var(--text-secondary)}
+.parity-review{display:flex;align-items:end;gap:16px;margin-top:22px;padding-top:18px;border-top:1px solid var(--border-color)}.parity-review label:first-child{display:grid;gap:6px}.parity-review .check-row{margin-right:auto}@media(max-width:1000px){.parity-grid,.evidence-list,.parity-paths{grid-template-columns:1fr}}
+</style>

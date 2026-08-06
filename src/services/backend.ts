@@ -344,6 +344,48 @@ export interface StartTestOptions {
   useEnvironmentToken?: boolean;
 }
 
+export interface ApiContract {
+  id: string;
+  featureId: string;
+  platform: "PC" | "APP";
+  method: string;
+  url: string;
+  sourceFile: string;
+  verificationLevel: "static" | "api" | "browser";
+}
+
+export interface RegressionEvidence {
+  platform: "PC" | "APP";
+  verificationType: "static" | "api" | "browser";
+  status: "passed" | "failed" | "unverified";
+  resultSummary: string;
+  sourcePath: string;
+  verifiedAt?: string;
+}
+
+export interface FeatureParity {
+  id: string;
+  domain: string;
+  featureName: string;
+  pcPage: string;
+  appPage: string;
+  parityStatus: "pending" | "static-aligned" | "confirmed" | "different";
+  evidence: string[];
+  intentionalDifference: boolean;
+  manuallyConfirmed: boolean;
+  updatedAt: string;
+  contracts: ApiContract[];
+  regression: RegressionEvidence[];
+}
+
+export interface ParitySyncSummary {
+  featureCount: number;
+  contractCount: number;
+  regressionCount: number;
+  alignedCount: number;
+  pendingCount: number;
+}
+
 export interface VideoItem {
   id: string;
   title: string;
@@ -603,6 +645,18 @@ export async function readTestReport(path: string): Promise<string> {
 
 export async function startTestRun(options: StartTestOptions): Promise<TestRun> {
   return invoke<TestRun>("start_test_run", { options });
+}
+
+export async function syncFeatureParity(): Promise<ParitySyncSummary> {
+  return invoke<ParitySyncSummary>("sync_feature_parity");
+}
+
+export async function listFeatureParity(): Promise<FeatureParity[]> {
+  return invoke<FeatureParity[]>("list_feature_parity");
+}
+
+export async function saveFeatureParityReview(review: Pick<FeatureParity, "id" | "parityStatus" | "intentionalDifference" | "manuallyConfirmed">): Promise<void> {
+  await invoke("save_feature_parity_review", { review });
 }
 
 export async function listLocalVideos(): Promise<VideoItem[]> {
