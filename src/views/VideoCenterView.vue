@@ -5,12 +5,16 @@ import {
   getVideoProjectDetails,
   isTauriRuntime,
   listLocalVideos,
+  listVideoJobs,
   openLocalVideo,
   readVideoCover,
   revealLocalFile,
   revealLocalVideo,
+  saveVideoJobType,
+  syncVideoPipeline,
   type VideoDeliverable,
   type VideoItem,
+  type VideoJob,
   type VideoProjectDetails,
 } from "../services/backend";
 
@@ -30,6 +34,8 @@ const selected = ref<VideoItem | null>(null);
 const details = ref<VideoProjectDetails | null>(null);
 const detailsLoading = ref(false);
 const detailMessage = ref("");
+const activeSection = ref<"library" | "pipeline">("library");
+const jobs = ref<VideoJob[]>([]);
 
 const projects = computed(() => ["全部项目", ...new Set(videos.value.map(item => item.project))]);
 const filtered = computed(() => videos.value.filter(item => {
@@ -42,6 +48,13 @@ const totalBytes = computed(() => videos.value.reduce((sum,item)=>sum+item.sizeB
 const selectedVideoSrc = computed(() => selected.value && isTauriRuntime() ? convertFileSrc(selected.value.path) : "");
 const statusText: Record<VideoItem["status"],string> = { final:"最终成片", output:"输出版本", render:"渲染版本" };
 const deliverableIcons: Record<VideoDeliverable["kind"], string> = { video:"▶", cover:"▧", script:"▤", publish:"✎" };
+const jobTypeText: Record<VideoJob["videoType"], string> = { tech:"科技探索", reasoning:"推理案例", "product-demo":"产品演示" };
+const stageText: Record<VideoJob["currentStage"], string> = { script:"脚本", render:"成片", cover:"封面", publish:"发布文案", delivery:"交付完成" };
+const pipelineStats = computed(() => ({
+  complete: jobs.value.filter(item=>item.status==="complete").length,
+  attention: jobs.value.filter(item=>item.status!=="complete").length,
+  types: new Set(jobs.value.filter(item=>item.status==="complete").map(item=>item.videoType)).size,
+}));
 
 function formatSize(bytes:number) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
@@ -58,9 +71,20 @@ async function refresh() {
   loading.value=true; error.value="";
   try {
     videos.value = isTauriRuntime() ? await listLocalVideos() : demoVideos;
+    if (isTauriRuntime()) {
+      await syncVideoPipeline();
+      jobs.value = await listVideoJobs();
+    }
     await loadCovers(videos.value);
   } catch (cause) { error.value=String(cause); }
   finally { loading.value=false; }
+}
+async function changeJobType(job: VideoJob) {
+  if (!isTauriRuntime()) return;
+  try {
+    await saveVideoJobType(job.id, job.videoType);
+    job.manuallyConfirmedType = true;
+  } catch (cause) { error.value=String(cause); }
 }
 function demoDetails(item: VideoItem): VideoProjectDetails {
   return {
@@ -118,15 +142,16 @@ onMounted(refresh);
 
 <template>
   <div class="view video-center-view">
-    <header class="page-header"><div><h1>视频中心</h1><p>集中查看和管理“视频创作”及其 videos 子目录中的本地成片</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">{{ loading ? '扫描中…' : '↻ 重新扫描' }}</button></div></header>
+    <header class="page-header"><div><h1>视频中心</h1><p>管理本地成片，并按脚本、视频、封面、发布文案检查生产交付</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">{{ loading ? '扫描中…' : '↻ 重新扫描' }}</button></div></header>
     <p v-if="error" class="scan-message error">{{ error }}</p>
-    <section class="video-metrics">
+    <div class="video-center-tabs"><button :class="{active:activeSection==='library'}" @click="activeSection='library'">本地视频库</button><button :class="{active:activeSection==='pipeline'}" @click="activeSection='pipeline'">生产流水线</button></div>
+    <section v-if="activeSection==='library'" class="video-metrics">
       <button @click="statusFilter='all'"><span>本地视频</span><b>{{ videos.length }}</b><small>排除 clip 和 work 中间文件</small></button>
       <button @click="statusFilter='final'"><span>最终成片</span><b>{{ videos.filter(item=>item.status==='final').length }}</b><small>文件名已标记 final / 最终 / 成片</small></button>
       <div><span>创作项目</span><b>{{ projects.length - 1 }}</b><small>按作品目录自动归类</small></div>
       <div><span>视频空间</span><b>{{ formatSize(totalBytes) }}</b><small>只统计当前列表文件</small></div>
     </section>
-    <section class="panel video-library">
+    <section v-if="activeSection==='library'" class="panel video-library">
       <header class="video-toolbar"><label>⌕<input v-model="query" placeholder="搜索视频标题、项目或文件名"></label><select v-model="projectFilter"><option v-for="project in projects" :key="project">{{ project }}</option></select><div class="mode-switch"><button :class="{active:statusFilter==='all'}" @click="statusFilter='all'">全部</button><button :class="{active:statusFilter==='final'}" @click="statusFilter='final'">成片</button><button :class="{active:statusFilter==='output'}" @click="statusFilter='output'">输出</button><button :class="{active:statusFilter==='render'}" @click="statusFilter='render'">渲染</button></div></header>
       <div class="video-grid">
         <article v-for="item in filtered" :key="item.id" class="video-card" @dblclick="play(item)">
@@ -136,6 +161,19 @@ onMounted(refresh);
         <div v-if="!filtered.length && !loading" class="empty-state video-empty"><b>没有符合条件的视频</b><p>工作台只展示成片和 renders/output 中的渲染结果，中间 clip 会自动忽略。</p></div>
       </div>
     </section>
+    <template v-else>
+      <section class="video-metrics pipeline-metrics"><div><span>生产项目</span><b>{{ jobs.length }}</b><small>每个目录只保留一条任务</small></div><div><span>完整交付</span><b>{{ pipelineStats.complete }}</b><small>四项交付全部可读</small></div><div><span>需要补齐</span><b>{{ pipelineStats.attention }}</b><small>明确显示缺少哪一项</small></div><div><span>完整类型</span><b>{{ pipelineStats.types }}/3</b><small>科技、推理、产品演示</small></div></section>
+      <section class="panel pipeline-panel">
+        <div class="pipeline-explain"><b>统一验收口径</b><span>脚本 → 成片 → 封面 → 发布文案。工作台只检查并管理现有本地交付，不会未经确认自动发布视频。</span></div>
+        <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="video-job-card" :class="job.status">
+          <header><div><small>{{ jobTypeText[job.videoType] }}</small><h2>{{ job.title }}</h2></div><span>{{ job.status==='complete'?'完整交付':'需要补齐' }}</span></header>
+          <div class="job-stage"><i :style="{width:`${job.status==='complete'?100:Math.max(15,job.deliverables.filter(item=>item.status==='ready').length*25)}%`}"></i></div>
+          <div class="job-deliverables"><span v-for="item in job.deliverables" :key="item.kind" :class="item.status"><b>{{ deliverableIcons[item.kind] }}</b>{{ item.kind==='script'?'脚本':item.kind==='video'?'成片':item.kind==='cover'?'封面':'发布' }}<em>{{ item.status==='ready'?'已就绪':'缺失' }}</em><small>{{ item.qualitySummary }}</small></span></div>
+          <p v-if="job.failureReason" class="job-failure">下一步：补齐{{ job.failureReason }}</p><p v-else class="job-success">四项交付完整，可在视频库中播放、查看和复制。</p>
+          <footer><label>类型<select v-model="job.videoType" @change="changeJobType(job)"><option value="tech">科技探索</option><option value="reasoning">推理案例</option><option value="product-demo">产品演示</option></select></label><span>{{ job.manuallyConfirmedType?'已人工确认':'自动识别' }}</span><b>当前阶段：{{ stageText[job.currentStage] }}</b></footer>
+        </article><div v-if="!jobs.length&&!loading" class="empty-state"><b>尚未建立视频生产任务</b><p>点击重新扫描后，会从本地视频项目自动建立。</p></div></div>
+      </section>
+    </template>
     <div v-if="selected" class="activity-backdrop" @click.self="selected=null">
       <aside class="activity-drawer panel video-detail-drawer">
         <header>
@@ -182,3 +220,7 @@ onMounted(refresh);
     </div>
   </div>
 </template>
+
+<style scoped>
+.video-center-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.video-center-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}.video-center-tabs button.active{background:var(--primary);color:#fff}.pipeline-panel{padding:18px}.pipeline-explain{display:flex;gap:14px;padding:14px 16px;border-radius:12px;background:rgba(117,100,245,.08)}.pipeline-explain span{color:var(--muted)}.job-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}.video-job-card{padding:18px;border:1px solid var(--line);border-radius:14px}.video-job-card>header,.video-job-card>footer{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.video-job-card h2{margin:4px 0 0;font-size:17px}.video-job-card>header>span{padding:5px 9px;border-radius:99px;background:rgba(243,154,98,.12);color:#f39a62;font-size:12px}.video-job-card.complete>header>span{background:rgba(83,200,149,.12);color:#53c895}.job-stage{height:5px;margin:16px 0;border-radius:99px;background:var(--surface-2);overflow:hidden}.job-stage i{display:block;height:100%;background:linear-gradient(90deg,var(--primary),#53c895)}.job-deliverables{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.job-deliverables>span{display:grid;gap:3px;padding:9px 7px;border-radius:9px;background:var(--surface-2);font-size:12px}.job-deliverables b{font-size:16px}.job-deliverables em,.job-deliverables small{font-size:10px;color:var(--muted)}.job-deliverables .ready em{color:#53c895}.job-deliverables .missing em{color:#f39a62}.job-success,.job-failure{margin:14px 0;color:var(--muted);font-size:12px}.job-success{color:#53c895}.video-job-card>footer{align-items:end;padding-top:12px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.video-job-card>footer label{display:grid;gap:4px}.video-job-card>footer select{padding:6px 8px}.video-job-card>footer b{font-size:11px;color:var(--text)}@media(max-width:1050px){.job-grid{grid-template-columns:1fr}}
+</style>

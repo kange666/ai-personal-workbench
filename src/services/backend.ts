@@ -401,6 +401,37 @@ export interface VideoItem {
   coverPath?: string;
 }
 
+export interface VideoJobDeliverable {
+  kind: "script" | "video" | "cover" | "publish";
+  path: string;
+  status: "ready" | "missing";
+  qualitySummary: string;
+  checkedAt?: string;
+}
+
+export interface VideoJob {
+  id: string;
+  title: string;
+  videoType: "tech" | "reasoning" | "product-demo";
+  status: "complete" | "needs-attention";
+  currentStage: "script" | "render" | "cover" | "publish" | "delivery";
+  projectRoot: string;
+  failureReason: string;
+  manuallyConfirmedType: boolean;
+  createdAt: string;
+  updatedAt: string;
+  deliverables: VideoJobDeliverable[];
+}
+
+export interface VideoPipelineSummary {
+  jobCount: number;
+  completeCount: number;
+  needsAttentionCount: number;
+  techSamples: number;
+  reasoningSamples: number;
+  productSamples: number;
+}
+
 export interface VideoDeliverable {
   kind: "video" | "cover" | "script" | "publish";
   label: string;
@@ -677,6 +708,18 @@ export async function revealLocalVideo(path: string): Promise<void> {
 
 export async function getVideoProjectDetails(path: string): Promise<VideoProjectDetails> {
   return invoke<VideoProjectDetails>("video_project_details", { path });
+}
+
+export async function syncVideoPipeline(): Promise<VideoPipelineSummary> {
+  return invoke<VideoPipelineSummary>("sync_video_pipeline");
+}
+
+export async function listVideoJobs(): Promise<VideoJob[]> {
+  return invoke<VideoJob[]>("list_video_jobs");
+}
+
+export async function saveVideoJobType(id: string, videoType: VideoJob["videoType"]): Promise<void> {
+  await invoke("save_video_job_type", { selection: { id, videoType } });
 }
 
 export async function revealLocalFile(path: string): Promise<void> {

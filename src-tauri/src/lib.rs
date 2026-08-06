@@ -219,6 +219,9 @@ pub fn run() {
                 if let Err(error) = parity::sync_feature_parity_for_state(&history_state) {
                     eprintln!("启动时同步 PC/APP 对照矩阵失败：{error}");
                 }
+                if let Err(error) = videos::sync_video_pipeline_for_state(&history_state) {
+                    eprintln!("启动时同步视频生产流水线失败：{error}");
+                }
                 if let Err(error) = reports::sync_history_if_sources_changed(&history_state) {
                     eprintln!("启动时同步 Codex 历史失败：{error}");
                 }
@@ -330,6 +333,9 @@ pub fn run() {
             videos::reveal_local_video,
             videos::video_project_details,
             videos::reveal_local_file,
+            videos::sync_video_pipeline,
+            videos::list_video_jobs,
+            videos::save_video_job_type,
             worktime::list_work_sessions,
             worktime::work_summary,
             worktime::save_work_session,

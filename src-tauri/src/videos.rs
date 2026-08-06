@@ -1,6 +1,8 @@
+use crate::database::DatabaseState;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
@@ -42,6 +44,50 @@ pub struct VideoDeliverable {
 pub struct VideoProjectDetails {
     project_root: String,
     deliverables: Vec<VideoDeliverable>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoJobDeliverable {
+    kind: String,
+    path: String,
+    status: String,
+    quality_summary: String,
+    checked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoJob {
+    id: String,
+    title: String,
+    video_type: String,
+    status: String,
+    current_stage: String,
+    project_root: String,
+    failure_reason: String,
+    manually_confirmed_type: bool,
+    created_at: String,
+    updated_at: String,
+    deliverables: Vec<VideoJobDeliverable>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPipelineSummary {
+    job_count: usize,
+    complete_count: usize,
+    needs_attention_count: usize,
+    tech_samples: usize,
+    reasoning_samples: usize,
+    product_samples: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveVideoType {
+    id: String,
+    video_type: String,
 }
 
 fn creation_root() -> Result<PathBuf, String> {
@@ -239,6 +285,237 @@ fn project_root_for_video(video_path: &Path) -> Result<PathBuf, String> {
         Some(name) if relative.components().count() > 1 => Ok(base.join(name)),
         _ => Ok(video_path.parent().unwrap_or(&base).to_path_buf()),
     }
+}
+
+fn classify_video_type(title: &str, project_root: &Path) -> &'static str {
+    let text = format!("{} {}", title, project_root.display()).to_lowercase();
+    if text.contains("reasoning") || text.contains("推理") || text.contains("who-lied") {
+        "reasoning"
+    } else if text.contains("codex")
+        || text.contains("工作台")
+        || text.contains("分析器")
+        || text.contains("产品")
+    {
+        "product-demo"
+    } else {
+        "tech"
+    }
+}
+
+fn stage_for(deliverables: &[VideoDeliverable]) -> (&'static str, &'static str) {
+    for (kind, stage) in [
+        ("script", "script"),
+        ("video", "render"),
+        ("cover", "cover"),
+        ("publish", "publish"),
+    ] {
+        if deliverables
+            .iter()
+            .find(|item| item.kind == kind)
+            .is_none_or(|item| !item.available)
+        {
+            return ("needs-attention", stage);
+        }
+    }
+    ("complete", "delivery")
+}
+
+fn deliverable_quality(item: &VideoDeliverable) -> String {
+    if !item.available {
+        return "未找到交付文件".into();
+    }
+    if let Some(content) = item.content.as_deref() {
+        let chars = content.chars().count();
+        return format!("文本可读 · {chars} 字符");
+    }
+    let size = item
+        .path
+        .as_deref()
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|value| value.len())
+        .unwrap_or_default();
+    format!("文件可读 · {:.1} MB", size as f64 / 1_048_576_f64)
+}
+
+pub fn sync_video_pipeline_for_state(
+    state: &DatabaseState,
+) -> Result<VideoPipelineSummary, String> {
+    let videos = list_local_videos()?;
+    let mut roots = HashSet::new();
+    let now = Utc::now().to_rfc3339();
+    for video in videos {
+        let details = video_project_details(video.path.clone())?;
+        if !roots.insert(details.project_root.clone()) {
+            continue;
+        }
+        let (automatic_status, stage) = stage_for(&details.deliverables);
+        let id = format!("video-job:{}", details.project_root.to_lowercase());
+        let previous = state
+            .connect()?
+            .query_row(
+                "SELECT video_type,manually_confirmed_type,created_at FROM video_jobs WHERE id=?1",
+                [&id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let automatic_type = classify_video_type(&video.project, Path::new(&details.project_root));
+        let (video_type, manually_confirmed, created_at) = previous
+            .map(|(value, confirmed, created)| {
+                (
+                    if confirmed != 0 {
+                        value
+                    } else {
+                        automatic_type.into()
+                    },
+                    confirmed,
+                    created,
+                )
+            })
+            .unwrap_or_else(|| (automatic_type.into(), 0, now.clone()));
+        let missing = details
+            .deliverables
+            .iter()
+            .filter(|item| !item.available)
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>();
+        state.connect()?.execute(
+            "INSERT INTO video_jobs(id,title,video_type,status,current_stage,project_root,failure_reason,manually_confirmed_type,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET title=excluded.title,video_type=?3,status=excluded.status,current_stage=excluded.current_stage,project_root=excluded.project_root,failure_reason=excluded.failure_reason,manually_confirmed_type=?8,updated_at=excluded.updated_at",
+            params![id,video.project,video_type,automatic_status,stage,details.project_root,missing.join("、"),manually_confirmed,created_at,now],
+        ).map_err(|error| error.to_string())?;
+        state
+            .connect()?
+            .execute(
+                "DELETE FROM video_deliverables WHERE video_job_id=?1",
+                [&id],
+            )
+            .map_err(|error| error.to_string())?;
+        for item in details.deliverables {
+            let deliverable_id = format!("{}:{}", id, item.kind);
+            let quality = deliverable_quality(&item);
+            state.connect()?.execute(
+                "INSERT INTO video_deliverables(id,video_job_id,kind,path,status,quality_summary,checked_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![deliverable_id,id,item.kind,item.path.unwrap_or_default(),if item.available {"ready"} else {"missing"},quality,now],
+            ).map_err(|error| error.to_string())?;
+        }
+    }
+    let jobs = list_video_jobs_for_state(state)?;
+    Ok(VideoPipelineSummary {
+        job_count: jobs.len(),
+        complete_count: jobs.iter().filter(|item| item.status == "complete").count(),
+        needs_attention_count: jobs.iter().filter(|item| item.status != "complete").count(),
+        tech_samples: jobs
+            .iter()
+            .filter(|item| item.video_type == "tech" && item.status == "complete")
+            .count(),
+        reasoning_samples: jobs
+            .iter()
+            .filter(|item| item.video_type == "reasoning" && item.status == "complete")
+            .count(),
+        product_samples: jobs
+            .iter()
+            .filter(|item| item.video_type == "product-demo" && item.status == "complete")
+            .count(),
+    })
+}
+
+pub fn list_video_jobs_for_state(state: &DatabaseState) -> Result<Vec<VideoJob>, String> {
+    let connection = state.connect()?;
+    let mut statement = connection.prepare("SELECT id,title,video_type,status,current_stage,project_root,failure_reason,manually_confirmed_type,created_at,updated_at FROM video_jobs ORDER BY updated_at DESC,title").map_err(|error| error.to_string())?;
+    let base = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut jobs = Vec::new();
+    for (
+        id,
+        title,
+        video_type,
+        status,
+        current_stage,
+        project_root,
+        failure_reason,
+        confirmed,
+        created_at,
+        updated_at,
+    ) in base
+    {
+        let mut deliverable_statement = connection.prepare("SELECT kind,path,status,quality_summary,checked_at FROM video_deliverables WHERE video_job_id=?1 ORDER BY CASE kind WHEN 'script' THEN 1 WHEN 'video' THEN 2 WHEN 'cover' THEN 3 ELSE 4 END").map_err(|error| error.to_string())?;
+        let deliverables = deliverable_statement
+            .query_map([&id], |row| {
+                Ok(VideoJobDeliverable {
+                    kind: row.get(0)?,
+                    path: row.get(1)?,
+                    status: row.get(2)?,
+                    quality_summary: row.get(3)?,
+                    checked_at: row.get(4)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        jobs.push(VideoJob {
+            id,
+            title,
+            video_type,
+            status,
+            current_stage,
+            project_root,
+            failure_reason,
+            manually_confirmed_type: confirmed != 0,
+            created_at,
+            updated_at,
+            deliverables,
+        });
+    }
+    Ok(jobs)
+}
+
+#[tauri::command]
+pub fn sync_video_pipeline(
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<VideoPipelineSummary, String> {
+    sync_video_pipeline_for_state(&state)
+}
+
+#[tauri::command]
+pub fn list_video_jobs(state: tauri::State<'_, DatabaseState>) -> Result<Vec<VideoJob>, String> {
+    list_video_jobs_for_state(&state)
+}
+
+#[tauri::command]
+pub fn save_video_job_type(
+    state: tauri::State<'_, DatabaseState>,
+    selection: SaveVideoType,
+) -> Result<(), String> {
+    if !["tech", "reasoning", "product-demo"].contains(&selection.video_type.as_str()) {
+        return Err("视频类型仅支持科技探索、推理案例和产品演示。".into());
+    }
+    state.connect()?.execute(
+        "UPDATE video_jobs SET video_type=?2,manually_confirmed_type=1,updated_at=?3 WHERE id=?1",
+        params![selection.id,selection.video_type,Utc::now().to_rfc3339()],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn text_file_score(path: &Path, kind: &str) -> i32 {
@@ -548,6 +825,7 @@ pub fn reveal_local_file(path: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn scanner_excludes_intermediate_clips() {
@@ -586,5 +864,21 @@ mod tests {
                 })
                 .unwrap_or(false)
         }));
+    }
+
+    #[test]
+    fn pipeline_has_complete_samples_for_all_three_video_types() {
+        let path = std::env::temp_dir().join(format!(
+            "workbench-video-pipeline-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let state = DatabaseState::new(path.clone()).unwrap();
+        let summary = sync_video_pipeline_for_state(&state).unwrap();
+        assert!(summary.tech_samples > 0, "缺少完整科技探索样例");
+        assert!(summary.reasoning_samples > 0, "缺少完整推理样例");
+        assert!(summary.product_samples > 0, "缺少完整产品演示样例");
+        assert!(summary.complete_count >= 3);
+        drop(state);
+        let _ = std::fs::remove_file(path);
     }
 }
