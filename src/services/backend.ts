@@ -15,8 +15,15 @@ export interface CodexScanSummary {
   messagesImported: number;
   filesUnchanged: number;
   archivedConversationsImported: number;
+  conversationsTotal: number;
+  archivedConversationsTotal: number;
   errors: number;
   errorDetails: string[];
+}
+
+export interface GitScanConfiguration {
+  roots: string[];
+  maxDepth: number;
 }
 
 export interface CodexQuotaWindow {
@@ -389,6 +396,14 @@ export async function getCodexQuota(): Promise<CodexQuotaSnapshot> {
 
 export async function scanGitRepositories(): Promise<GitScanSummary> {
   return invoke<GitScanSummary>("scan_git_repositories");
+}
+
+export async function getGitScanConfiguration(): Promise<GitScanConfiguration> {
+  return invoke<GitScanConfiguration>("git_scan_configuration");
+}
+
+export async function saveGitScanConfiguration(configuration: GitScanConfiguration): Promise<void> {
+  await invoke("save_git_scan_configuration", { configuration });
 }
 
 export async function getTokenSummary(): Promise<TokenSummary> {

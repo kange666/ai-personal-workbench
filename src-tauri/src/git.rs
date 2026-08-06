@@ -1,10 +1,11 @@
 use crate::database::DatabaseState;
 use chrono::Utc;
-use rusqlite::params;
-use serde::Serialize;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use walkdir::{DirEntry, WalkDir};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -18,6 +19,13 @@ pub struct GitScanSummary {
     pub commits_imported: usize,
     pub snapshots_created: usize,
     pub errors: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitScanConfiguration {
+    pub roots: Vec<String>,
+    pub max_depth: usize,
 }
 
 #[derive(Debug)]
@@ -46,6 +54,100 @@ fn git_output(arguments: &[&str]) -> Result<String, String> {
 
 fn repository_root(cwd: &str) -> Result<String, String> {
     git_output(&["-C", cwd, "rev-parse", "--show-toplevel"])
+}
+
+fn default_scan_roots() -> Vec<String> {
+    let mut roots = Vec::new();
+    let drive = PathBuf::from(r"F:\");
+    if drive.exists() {
+        roots.push(drive.display().to_string());
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let documents = PathBuf::from(profile).join("Documents");
+        if documents.exists() {
+            roots.push(documents.display().to_string());
+        }
+    }
+    roots
+}
+
+fn load_scan_configuration(connection: &Connection) -> Result<GitScanConfiguration, String> {
+    let stored = connection
+        .query_row(
+            "SELECT value FROM app_meta WHERE key='git_scan_configuration'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let mut configuration = stored
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<GitScanConfiguration>(value).ok())
+        .unwrap_or_else(|| GitScanConfiguration {
+            roots: default_scan_roots(),
+            max_depth: 3,
+        });
+    configuration.max_depth = configuration.max_depth.clamp(1, 6);
+    configuration.roots.retain(|root| !root.trim().is_empty());
+    Ok(configuration)
+}
+
+fn should_descend(entry: &DirEntry) -> bool {
+    if entry.depth() == 0 {
+        return true;
+    }
+    let name = entry.file_name().to_string_lossy();
+    !matches!(
+        name.as_ref(),
+        ".git"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".nuxt"
+            | ".vite"
+            | "coverage"
+            | "$RECYCLE.BIN"
+            | "System Volume Information"
+    )
+}
+
+fn discover_repository_candidates(configuration: &GitScanConfiguration) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut repositories = Vec::new();
+    for root in &configuration.roots {
+        let root = PathBuf::from(root);
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&root)
+            .max_depth(configuration.max_depth)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(should_descend)
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_dir())
+        {
+            let candidate = entry.path();
+            if !candidate.join(".git").exists() {
+                continue;
+            }
+            let path = candidate.display().to_string();
+            let key = path.replace('/', "\\").to_lowercase();
+            if seen.insert(key) {
+                repositories.push(path);
+            }
+        }
+    }
+    repositories
+}
+
+fn merge_repository(repositories: &mut Vec<String>, seen: &mut HashSet<String>, candidate: String) {
+    let key = candidate.replace('/', "\\").to_lowercase();
+    if seen.insert(key) {
+        repositories.push(candidate);
+    }
 }
 
 fn parse_commits(output: &str) -> Vec<CommitRecord> {
@@ -121,14 +223,21 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
             .map_err(|error| error.to_string())?
     };
 
+    let configuration = load_scan_configuration(&connection)?;
+
     let mut seen = HashSet::new();
-    let mut repositories = Vec::new();
+    let mut repositories = discover_repository_candidates(&configuration)
+        .into_iter()
+        .map(|candidate| repository_root(&candidate).unwrap_or(candidate))
+        .collect::<Vec<_>>();
+    repositories.sort_by_key(|path| path.to_lowercase());
+    repositories.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    for repository in &repositories {
+        seen.insert(repository.replace('/', "\\").to_lowercase());
+    }
     for workspace in workspaces {
         if let Ok(root) = repository_root(&workspace) {
-            let key = root.to_lowercase();
-            if seen.insert(key) {
-                repositories.push(root);
-            }
+            merge_repository(&mut repositories, &mut seen, root);
         }
     }
 
@@ -172,6 +281,7 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
             "--format=@@@%H%x1f%cI%x1f%s%x1f%an%x1f%ae",
             "--numstat",
             "--no-renames",
+            "--max-count=500",
         ];
         if let Some(argument) = since_argument.as_deref() {
             history_arguments.push(argument);
@@ -180,20 +290,20 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
             Ok(output) => parse_commits(&output),
             Err(_) => {
                 summary.errors += 1;
-                continue;
+                Vec::new()
             }
         };
-        let status = match git_output(&[
+        let (status, status_failed) = match git_output(&[
             "-C",
             &repository,
             "status",
             "--porcelain=v1",
             "--untracked-files=normal",
         ]) {
-            Ok(output) => output,
+            Ok(output) => (output, false),
             Err(_) => {
                 summary.errors += 1;
-                continue;
+                (String::new(), true)
             }
         };
         let (unstaged_additions, unstaged_deletions) =
@@ -205,6 +315,14 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
             .and_then(|name| name.to_str())
             .unwrap_or(&repository)
             .to_string();
+        let has_uncommitted_changes = !status.trim().is_empty();
+        let health_level = if status_failed {
+            "失败"
+        } else if has_uncommitted_changes {
+            "警告"
+        } else {
+            "健康"
+        };
 
         let transaction = connection
             .transaction()
@@ -215,6 +333,29 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
                  VALUES(?1,?2,?3,?4,?5,?6)
                  ON CONFLICT(path) DO UPDATE SET name=excluded.name,current_branch=excluded.current_branch,user_name=excluded.user_name,user_email=excluded.user_email,last_scanned_at=excluded.last_scanned_at",
                 params![repository, repository_name, branch, user_name, user_email, captured_at],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO repository_assets(path,name,default_branch,has_uncommitted_changes,last_scanned_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)
+                 ON CONFLICT(path) DO UPDATE SET name=excluded.name,default_branch=excluded.default_branch,has_uncommitted_changes=excluded.has_uncommitted_changes,last_scanned_at=excluded.last_scanned_at,updated_at=excluded.updated_at",
+                params![repository, repository_name, branch, has_uncommitted_changes as i64, captured_at],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO repository_health_snapshots(id,repository_path,health_level,has_uncommitted_changes,summary,failure_reason,verified_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    repository,
+                    health_level,
+                    has_uncommitted_changes as i64,
+                    if has_uncommitted_changes { "工作区存在未提交修改" } else { "Git 状态正常" },
+                    if status_failed { "无法读取 Git 工作区状态" } else { "" },
+                    captured_at
+                ],
             )
             .map_err(|error| error.to_string())?;
         for commit in history {
@@ -263,6 +404,36 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
 }
 
 #[tauri::command]
+pub fn git_scan_configuration(
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<GitScanConfiguration, String> {
+    load_scan_configuration(&state.connect()?)
+}
+
+#[tauri::command]
+pub fn save_git_scan_configuration(
+    state: tauri::State<'_, DatabaseState>,
+    configuration: GitScanConfiguration,
+) -> Result<(), String> {
+    if configuration.roots.is_empty() {
+        return Err("至少保留一个 Git 扫描根目录".to_string());
+    }
+    if !(1..=6).contains(&configuration.max_depth) {
+        return Err("扫描深度必须在 1 到 6 之间".to_string());
+    }
+    let value = serde_json::to_string(&configuration).map_err(|error| error.to_string())?;
+    state
+        .connect()?
+        .execute(
+            "INSERT INTO app_meta(key,value) VALUES('git_scan_configuration',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [value],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn scan_git_repositories(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<GitScanSummary, String> {
@@ -274,7 +445,8 @@ pub async fn scan_git_repositories(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_commits;
+    use super::{discover_repository_candidates, parse_commits, GitScanConfiguration};
+    use std::path::PathBuf;
 
     #[test]
     fn commit_parser_keeps_author_identity_for_personal_reports() {
@@ -286,5 +458,25 @@ mod tests {
         assert_eq!(commits[0].author_email, "user@example.com");
         assert_eq!(commits[0].additions, 10);
         assert_eq!(commits[0].deletions, 2);
+    }
+
+    #[test]
+    fn root_scanner_finds_nested_repositories_and_skips_dependencies() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-git-scan-{}", uuid::Uuid::new_v4()));
+        let project = directory.join("group").join("project");
+        let dependency = directory.join("node_modules").join("ignored");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(dependency.join(".git")).unwrap();
+        let configuration = GitScanConfiguration {
+            roots: vec![directory.display().to_string()],
+            max_depth: 3,
+        };
+        let repositories = discover_repository_candidates(&configuration)
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        assert_eq!(repositories, vec![project]);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

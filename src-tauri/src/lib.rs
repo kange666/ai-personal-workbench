@@ -289,6 +289,8 @@ pub fn run() {
             codex::scan_codex_sessions,
             codex::codex_quota,
             git::scan_git_repositories,
+            git::git_scan_configuration,
+            git::save_git_scan_configuration,
             reports::list_reports,
             reports::report_sources,
             reports::generate_report,

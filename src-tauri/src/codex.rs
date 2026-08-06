@@ -20,6 +20,8 @@ pub struct CodexScanSummary {
     pub messages_imported: usize,
     pub files_unchanged: usize,
     pub archived_conversations_imported: usize,
+    pub conversations_total: usize,
+    pub archived_conversations_total: usize,
     pub errors: usize,
     pub error_details: Vec<String>,
 }
@@ -461,6 +463,16 @@ pub fn scan_codex_sessions_for_state(state: &DatabaseState) -> Result<CodexScanS
         }
     }
     transaction.commit().map_err(|error| error.to_string())?;
+    let (conversations_total, archived_conversations_total): (i64, i64) = state
+        .connect()?
+        .query_row(
+            "SELECT COUNT(*),COALESCE(SUM(archived),0) FROM conversations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    summary.conversations_total = conversations_total.max(0) as usize;
+    summary.archived_conversations_total = archived_conversations_total.max(0) as usize;
     Ok(summary)
 }
 
