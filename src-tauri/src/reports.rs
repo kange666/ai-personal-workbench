@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
-const HISTORY_SUMMARY_VERSION: &str = "9";
+const HISTORY_SUMMARY_VERSION: &str = "10";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -326,51 +326,60 @@ fn plain_summary_text(content: &str, max_chars: usize) -> String {
 
 pub(crate) fn is_low_value_process(content: &str) -> bool {
     let lower = content.to_lowercase();
-    [
-        "停止后端",
-        "停止服务",
-        "已全部停止",
-        "所有都停止",
-        "先把这个项目跑起来",
-        "启动management后端",
-        "启动后端",
-        "git忽略",
-        ".gitignore",
-        "忽略测试",
-        "忽略所有测试",
-        "忽略测试文件",
-        "删除测试文件",
-        "清理测试文件",
-        "测试已全部通过",
-        "项后端测试",
-        "静态检查结果",
-        "没有必须整改",
-        "继续操作",
-        "重新运行",
-        "关闭窗口",
-        "一次性自动任务",
-        "npm install",
-        "node版本",
-        "安装几个常用的版本",
-        "测试下网络",
-        "禁止windows更新",
-        "windows更新",
-        "有什么方法让我",
-        "切换为国内",
-        "创建一个快捷方式",
-        "禁止自动更新",
-        "帮我打lol",
-        "不挂机",
-        "核对一下前端",
-        "未开放，正在进行开发",
-        "只修改以下文件",
-        "risk_level",
-        "user_authorization",
-        "direction_semantics",
-        "isolated blind qa",
-    ]
-    .iter()
-    .any(|word| lower.contains(word))
+    let file_only = [".vue", ".js", ".ts", ".java", ".rs"]
+        .iter()
+        .any(|extension| lower.contains(extension))
+        && content
+            .chars()
+            .filter(|value| matches!(value, '\u{4e00}'..='\u{9fff}'))
+            .count()
+            <= 6;
+    file_only
+        || [
+            "停止后端",
+            "停止服务",
+            "已全部停止",
+            "所有都停止",
+            "先把这个项目跑起来",
+            "启动management后端",
+            "启动后端",
+            "git忽略",
+            ".gitignore",
+            "忽略测试",
+            "忽略所有测试",
+            "忽略测试文件",
+            "删除测试文件",
+            "清理测试文件",
+            "测试已全部通过",
+            "项后端测试",
+            "静态检查结果",
+            "没有必须整改",
+            "继续操作",
+            "重新运行",
+            "关闭窗口",
+            "一次性自动任务",
+            "npm install",
+            "node版本",
+            "安装几个常用的版本",
+            "测试下网络",
+            "禁止windows更新",
+            "windows更新",
+            "有什么方法让我",
+            "切换为国内",
+            "创建一个快捷方式",
+            "禁止自动更新",
+            "帮我打lol",
+            "不挂机",
+            "核对一下前端",
+            "未开放，正在进行开发",
+            "只修改以下文件",
+            "risk_level",
+            "user_authorization",
+            "direction_semantics",
+            "isolated blind qa",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
 }
 
 fn conversation_work_summary(conversation: &ConversationFact) -> Option<String> {
@@ -432,7 +441,13 @@ fn git_work_summary(subject: &str) -> Option<String> {
     {
         return None;
     }
-    let summary = if lower.starts_with("feat<") && cleaned.contains('>') {
+    let summary = if lower.contains("pc and app verification matrix") {
+        "新增 PC/APP 功能对照与静态、接口、浏览器分层回归矩阵".to_string()
+    } else if lower.contains("track video production deliverables") {
+        "新增视频生产流水线：按脚本、成片、封面和发布文案检查交付完整性".to_string()
+    } else if lower.contains("weekly audit and toolchain checks") {
+        "新增每周整体检查、漏跑补偿与工具链重复版本提示".to_string()
+    } else if lower.starts_with("feat<") && cleaned.contains('>') {
         let end = cleaned.find('>').unwrap_or(5);
         format!("新增{}{}", &cleaned[5..end], &cleaned[end + 1..])
     } else if let Some((prefix, detail)) = cleaned.split_once(':') {
@@ -1631,8 +1646,8 @@ pub fn daily_activity(
 mod tests {
     use super::{
         add_test_section, add_work_time_section, build_content, clean_excerpt,
-        conversation_work_summary, project_label, redact_long_secrets, simplify_work_item,
-        ConversationFact, GitFact, TaskFact, TestFact,
+        conversation_work_summary, git_work_summary, is_low_value_process, project_label,
+        redact_long_secrets, simplify_work_item, ConversationFact, GitFact, TaskFact, TestFact,
     };
     use crate::worktime::{WorkBreakdown, WorkSummary};
     use chrono::NaiveDate;
@@ -1860,6 +1875,19 @@ mod tests {
             };
             assert!(conversation_work_summary(&fact).is_none());
         }
+    }
+
+    #[test]
+    fn report_filters_file_only_outcomes_and_translates_workbench_commits() {
+        assert!(is_low_value_process("已修复 ReportAttachment/index.vue"));
+        assert_eq!(
+            git_work_summary("feat: track video production deliverables"),
+            Some("新增视频生产流水线：按脚本、成片、封面和发布文案检查交付完整性".into())
+        );
+        assert_eq!(
+            git_work_summary("feat: add weekly audit and toolchain checks"),
+            Some("新增每周整体检查、漏跑补偿与工具链重复版本提示".into())
+        );
     }
 
     #[test]
