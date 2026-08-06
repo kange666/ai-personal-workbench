@@ -181,6 +181,8 @@ pub fn run() {
             videos::read_video_cover,
             videos::open_local_video,
             videos::reveal_local_video,
+            videos::video_project_details,
+            videos::reveal_local_file,
             worktime::list_work_sessions,
             worktime::work_summary,
             worktime::save_work_session,

@@ -286,6 +286,20 @@ export interface VideoItem {
   coverPath?: string;
 }
 
+export interface VideoDeliverable {
+  kind: "video" | "cover" | "script" | "publish";
+  label: string;
+  path?: string;
+  fileName?: string;
+  content?: string;
+  available: boolean;
+}
+
+export interface VideoProjectDetails {
+  projectRoot: string;
+  deliverables: VideoDeliverable[];
+}
+
 export type WorkSessionSource = "estimated" | "manual";
 
 export interface WorkSession {
@@ -504,6 +518,14 @@ export async function openLocalVideo(path: string): Promise<void> {
 
 export async function revealLocalVideo(path: string): Promise<void> {
   await invoke("reveal_local_video", { path });
+}
+
+export async function getVideoProjectDetails(path: string): Promise<VideoProjectDetails> {
+  return invoke<VideoProjectDetails>("video_project_details", { path });
+}
+
+export async function revealLocalFile(path: string): Promise<void> {
+  await invoke("reveal_local_file", { path });
 }
 
 export async function listWorkSessions(startDate: string, endDate: string, refresh = true): Promise<WorkSession[]> {
