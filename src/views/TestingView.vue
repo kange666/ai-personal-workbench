@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
-import { isTauriRuntime, listFeatureParity, listTestMenus, listTestRuns, readTestReport, saveFeatureParityReview, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestRun } from "../services/backend";
+import { ensureWeeklyAudit, isTauriRuntime, listFeatureParity, listTestMenus, listTestRuns, listToolchains, listWeeklyAudits, readTestReport, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestRun, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
 
 const demoMenus: TestMenu[] = [
@@ -14,8 +14,10 @@ const route = useRoute();
 const menus = ref<TestMenu[]>(isTauriRuntime() ? [] : demoMenus);
 const runs = ref<TestRun[]>(isTauriRuntime() ? [] : demoRuns);
 const parities = ref<FeatureParity[]>([]);
-const activeSection = ref<"menus" | "parity">("menus");
+const activeSection = ref<"menus" | "parity" | "audit">("menus");
 const selectedParity = ref<FeatureParity | null>(null);
+const toolchains = ref<ToolchainInventory>({installations:[],conflicts:[]});
+const audits = ref<WeeklyAudit[]>([]);
 const projectFilter = ref<"all" | "client" | "APP">("all");
 const statusFilter = ref<"all" | "tested" | "untested" | "passed" | "failed">("all");
 const typeFilter = ref<"all" | "functional" | "style">("all");
@@ -113,7 +115,21 @@ function openConfig(menu: TestMenu) {
 async function refresh() {
   if (!isTauriRuntime()) return;
   await syncFeatureParity();
-  [menus.value, runs.value, parities.value] = await Promise.all([listTestMenus(), listTestRuns(), listFeatureParity()]);
+  await ensureWeeklyAudit();
+  [menus.value, runs.value, parities.value, toolchains.value, audits.value] = await Promise.all([listTestMenus(), listTestRuns(), listFeatureParity(), listToolchains(), listWeeklyAudits()]);
+  if (!toolchains.value.installations.length) toolchains.value = await scanToolchains();
+}
+async function runAudit() {
+  if (!isTauriRuntime() || loading.value) return;
+  loading.value=true; error.value="";
+  try { const result=await runWeeklyAudit(); audits.value=await listWeeklyAudits(); toolchains.value=await listToolchains(); message.value=`${result.weekStart} 周检完成：${result.summary}`; }
+  catch(cause){error.value=String(cause);} finally{loading.value=false;}
+}
+async function rescanToolchains() {
+  if (!isTauriRuntime() || loading.value) return;
+  loading.value=true; error.value="";
+  try{toolchains.value=await scanToolchains();message.value=`已读取 ${toolchains.value.installations.length} 个工具入口，发现 ${toolchains.value.conflicts.length} 个待人工确认项。`;}
+  catch(cause){error.value=String(cause);}finally{loading.value=false;}
 }
 async function saveParity(feature: FeatureParity) {
   if (!isTauriRuntime()) return;
@@ -182,7 +198,7 @@ onMounted(async () => {
   <div class="view testing-view">
     <header class="page-header"><div><h1>测试中心</h1><p>复用项目已有用例，并将 PC 与 APP 的静态、接口、浏览器证据分层记录</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">↻ 刷新菜单、矩阵与报告</button></div></header>
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
-    <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">菜单自动化测试</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button></div>
+    <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">菜单自动化测试</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button><button :class="{active:activeSection==='audit'}" @click="activeSection='audit'">系统周检与工具链</button></div>
     <section v-if="activeSection==='menus'" class="metric-grid testing-metrics"><article class="clickable-card" @click="statusFilter='all'"><span>菜单 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article></section>
     <section v-if="activeSection==='menus'" class="panel testing-panel">
       <div class="testing-toolbar"><label>⌕<input v-model="query" placeholder="搜索菜单名称、路由或源码路径"></label><select v-model="projectFilter"><option value="all">全部项目</option><option value="client">client</option><option value="APP">APP</option></select><select v-model="statusFilter"><option value="all">全部状态</option><option value="tested">已测试</option><option value="untested">未测试</option><option value="passed">最近通过</option><option value="failed">最近未通过</option></select><select v-model="typeFilter"><option value="all">全部能力</option><option value="functional">已有功能用例</option><option value="style">页面 / 样式检查</option></select></div>
@@ -190,7 +206,7 @@ onMounted(async () => {
       <div class="test-table-wrap"><table class="test-table"><thead><tr><th>项目</th><th>功能菜单 / 页面</th><th>已有测试能力</th><th>最近结果</th><th>测试报告</th><th>操作</th></tr></thead><tbody><tr v-for="menu in filteredMenus" :key="menu.id"><td><span class="project-badge" :class="menu.project.toLowerCase()">{{ menu.project }}</span></td><td><b>{{ menu.name }}</b><small>{{ menu.route }}</small><em>{{ menu.sourcePath }}</em></td><td><div class="capability-tags"><span v-if="menu.capabilities.mock">功能用例</span><span v-if="menu.capabilities.realApi">真实接口</span><span v-if="menu.capabilities.sourceStyle">源码 / 样式</span><span v-if="menu.capabilities.browserStyle">浏览器样式</span><span v-if="!menu.caseId" class="muted">暂无交互用例</span></div></td><td><span class="test-status" :class="menu.latestStatus || 'untested'">{{ statusLabel(menu) }}</span><small>{{ formatTime(menu.latestTime) }}</small></td><td><button class="text-button" :disabled="!menu.tested" @click="openReport(menu)">{{ menu.tested ? '查看报告' : '暂无报告' }}</button></td><td><button class="button primary small" :disabled="loading" @click="openConfig(menu)">▶ 测试</button></td></tr></tbody></table><div v-if="!filteredMenus.length" class="empty-state"><b>没有符合条件的菜单</b><p>请调整项目、状态、测试能力或关键词筛选。</p></div></div>
     </section>
 
-    <section v-else class="panel parity-panel">
+    <section v-else-if="activeSection==='parity'" class="panel parity-panel">
       <div class="testing-note"><b>验证口径</b><span>“静态”只证明页面、API 文件和约定接口存在；“接口”和“浏览器”必须实际执行后才会变为通过。未执行不会显示为失败，也不会冒充已验证。</span></div>
       <div class="parity-grid">
         <article v-for="feature in parities" :key="feature.id" class="parity-card" @click="selectedParity=feature">
@@ -202,6 +218,11 @@ onMounted(async () => {
           <footer><span>{{ feature.contracts.length }} 条接口契约</span><button class="text-button">查看证据 →</button></footer>
         </article>
       </div>
+    </section>
+
+    <section v-else class="audit-layout">
+      <article class="panel weekly-audit-panel"><header><div><small>WEEKLY ACCEPTANCE</small><h2>每周整体检查</h2><p>每周一 09:00 后自动执行；程序未运行时，下次启动自动补跑。</p></div><button class="button primary" :disabled="loading" @click="runAudit">{{ loading?'检查中…':'立即重新检查' }}</button></header><template v-if="audits[0]"><div class="audit-summary"><b :class="audits[0].status">{{ audits[0].status==='passed'?'全部通过':audits[0].status==='attention'?'有待确认项':'存在失败项' }}</b><span>{{ audits[0].weekStart }} 开始的一周</span><em v-if="audits[0].catchUpRun">漏跑补偿</em></div><div class="audit-checks"><article v-for="item in audits[0].checks" :key="item.checkType" :class="item.status"><i>{{ item.status==='passed'?'✓':item.status==='attention'?'!':'×' }}</i><div><b>{{ item.target }}</b><p>{{ item.summary }}</p></div></article></div><p class="audit-boundary">{{ audits[0].summary }}</p></template><div v-else class="empty-state"><b>本周周检尚未执行</b><p>到计划时间会自动运行，也可以现在手工执行。</p></div></article>
+      <article class="panel toolchain-panel"><header><div><small>TOOLCHAIN</small><h2>工具链冲突</h2><p>只读检查 PATH 顺序和版本，不自动卸载或改环境变量。</p></div><button class="button secondary" :disabled="loading" @click="rescanToolchains">重新扫描</button></header><div class="tool-overview"><b>{{ toolchains.installations.length }}</b><span>检测到的入口</span><b :class="{warning:toolchains.conflicts.length}">{{ toolchains.conflicts.length }}</b><span>待人工确认</span></div><div v-if="toolchains.conflicts.length" class="conflict-list"><article v-for="item in toolchains.conflicts" :key="item.id"><header><b>{{ item.toolName }}</b><span>{{ item.conflictType==='multiple-paths'?'重复入口':'版本不一致' }}</span></header><p>{{ item.summary }}</p><small>{{ item.recommendedAction }}</small></article></div><div v-else class="empty-state compact"><b>未发现冲突</b><p>当前 PATH 中的工具入口没有明显重复或版本差异。</p></div><details class="installation-details"><summary>查看全部工具入口</summary><div v-for="item in toolchains.installations" :key="item.id"><b>{{ item.toolName }}</b><code>{{ item.version }}</code><span>#{{ item.pathPriority+1 }} · {{ item.source }}</span><small>{{ item.executablePath }}</small></div></details></article>
     </section>
 
     <div v-if="selectedParity" class="activity-backdrop" @click.self="selectedParity=null"><section class="panel parity-detail">
@@ -219,12 +240,13 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.testing-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--border-color);border-radius:12px;background:var(--panel-bg)}
-.testing-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--text-secondary);cursor:pointer}.testing-tabs button.active{background:var(--primary);color:#fff}
-.parity-panel{padding:18px}.parity-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}.parity-card{padding:18px;border:1px solid var(--border-color);border-radius:14px;background:var(--panel-bg);cursor:pointer;transition:.18s}.parity-card:hover{transform:translateY(-2px);border-color:var(--primary)}
+.testing-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.testing-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}.testing-tabs button.active{background:var(--primary);color:#fff}
+.parity-panel{padding:18px}.parity-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}.parity-card{padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--surface);cursor:pointer;transition:.18s}.parity-card:hover{transform:translateY(-2px);border-color:var(--primary)}
 .parity-card>header,.parity-card>footer,.parity-detail>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.parity-card h3{margin:4px 0 0}.parity-card header>span{padding:5px 9px;border-radius:999px;font-size:12px;background:var(--muted-bg)}.parity-card header>span.static-aligned,.parity-card header>span.confirmed{color:#53c895;background:rgba(83,200,149,.12)}.parity-card header>span.different{color:#f39a62;background:rgba(243,154,98,.12)}
-.platform-matrix{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}.platform-matrix>div{display:grid;gap:8px}.platform-matrix span{font-size:12px;color:var(--text-secondary)}.platform-matrix i{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:#7c8293}.platform-matrix .passed i,.evidence-status.passed{color:#53c895}.platform-matrix .passed i{background:#53c895}.platform-matrix .failed i,.evidence-status.failed{color:#ef6d75}.platform-matrix .failed i{background:#ef6d75}.parity-card>footer{padding-top:12px;border-top:1px solid var(--border-color);font-size:12px;color:var(--text-secondary)}
-.parity-detail{width:min(1040px,calc(100vw - 80px));max-height:calc(100vh - 70px);padding:24px;overflow:auto}.parity-detail h3{margin:22px 0 10px}.parity-paths{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}.parity-paths article{padding:13px;border:1px solid var(--border-color);border-radius:10px}.parity-paths code,.evidence-list code{display:block;margin-top:7px;white-space:normal;word-break:break-all;color:var(--text-secondary)}
-.evidence-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.evidence-list article{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;padding:12px;border:1px solid var(--border-color);border-radius:10px}.evidence-list p,.evidence-list code{grid-column:1/-1;margin:0}.contract-list{display:grid;gap:6px}.contract-list>div{display:grid;grid-template-columns:48px 64px 1fr 70px;gap:8px;align-items:center;padding:9px 12px;border-radius:8px;background:var(--muted-bg)}.contract-list em{font-size:11px;color:var(--text-secondary)}
-.parity-review{display:flex;align-items:end;gap:16px;margin-top:22px;padding-top:18px;border-top:1px solid var(--border-color)}.parity-review label:first-child{display:grid;gap:6px}.parity-review .check-row{margin-right:auto}@media(max-width:1000px){.parity-grid,.evidence-list,.parity-paths{grid-template-columns:1fr}}
+.platform-matrix{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}.platform-matrix>div{display:grid;gap:8px}.platform-matrix span{font-size:12px;color:var(--muted)}.platform-matrix i{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:#7c8293}.platform-matrix .passed i,.evidence-status.passed{color:#53c895}.platform-matrix .passed i{background:#53c895}.platform-matrix .failed i,.evidence-status.failed{color:#ef6d75}.platform-matrix .failed i{background:#ef6d75}.parity-card>footer{padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.parity-detail{width:min(1040px,calc(100vw - 80px));max-height:calc(100vh - 70px);padding:24px;overflow:auto}.parity-detail h3{margin:22px 0 10px}.parity-paths{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}.parity-paths article{padding:13px;border:1px solid var(--line);border-radius:10px}.parity-paths code,.evidence-list code{display:block;margin-top:7px;white-space:normal;word-break:break-all;color:var(--muted)}
+.evidence-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.evidence-list article{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;padding:12px;border:1px solid var(--line);border-radius:10px}.evidence-list p,.evidence-list code{grid-column:1/-1;margin:0}.contract-list{display:grid;gap:6px}.contract-list>div{display:grid;grid-template-columns:48px 64px 1fr 70px;gap:8px;align-items:center;padding:9px 12px;border-radius:8px;background:var(--surface-2)}.contract-list em{font-size:11px;color:var(--muted)}
+.parity-review{display:flex;align-items:end;gap:16px;margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}.parity-review label:first-child{display:grid;gap:6px}.parity-review .check-row{margin-right:auto}@media(max-width:1000px){.parity-grid,.evidence-list,.parity-paths{grid-template-columns:1fr}}
+.audit-layout{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(340px,.65fr);gap:16px}.weekly-audit-panel,.toolchain-panel{padding:20px}.weekly-audit-panel>header,.toolchain-panel>header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}.weekly-audit-panel h2,.toolchain-panel h2{margin:4px 0}.weekly-audit-panel header p,.toolchain-panel header p{margin:4px 0;color:var(--muted)}.audit-summary{display:flex;align-items:center;gap:10px;margin:18px 0;padding:14px;border-radius:12px;background:var(--surface-2)}.audit-summary b{font-size:18px}.audit-summary b.attention{color:var(--warning)}.audit-summary b.failed{color:var(--danger)}.audit-summary b.passed{color:var(--success)}.audit-summary span{margin-right:auto;color:var(--muted)}.audit-summary em{padding:4px 8px;border-radius:99px;background:rgba(255,180,84,.12);color:var(--warning);font-size:11px}.audit-checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.audit-checks article{display:flex;gap:10px;padding:12px;border:1px solid var(--line);border-radius:10px}.audit-checks i{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--surface-2)}.audit-checks .passed i{color:var(--success)}.audit-checks .attention i{color:var(--warning)}.audit-checks .failed i{color:var(--danger)}.audit-checks p{margin:5px 0 0;color:var(--muted);font-size:12px}.audit-boundary{margin:15px 0 0;color:var(--muted);font-size:12px}.tool-overview{display:grid;grid-template-columns:auto 1fr auto 1fr;align-items:baseline;gap:6px 10px;margin:18px 0}.tool-overview b{font-size:26px}.tool-overview b.warning{color:var(--warning)}.tool-overview span{color:var(--muted);font-size:12px}.conflict-list{display:grid;gap:9px}.conflict-list article{padding:12px;border:1px solid rgba(255,180,84,.25);border-radius:10px;background:rgba(255,180,84,.05)}.conflict-list header{display:flex;justify-content:space-between}.conflict-list header span{color:var(--warning);font-size:11px}.conflict-list p{margin:7px 0}.conflict-list small{color:var(--muted)}.installation-details{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}.installation-details summary{cursor:pointer;color:var(--primary)}.installation-details>div{display:grid;grid-template-columns:70px 1fr auto;gap:5px 8px;padding:9px 0;border-bottom:1px solid var(--line);font-size:11px}.installation-details small{grid-column:1/-1;word-break:break-all;color:var(--muted)}.empty-state.compact{padding:20px}@media(max-width:1150px){.audit-layout{grid-template-columns:1fr}}
 </style>

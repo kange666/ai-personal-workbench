@@ -386,6 +386,52 @@ export interface ParitySyncSummary {
   pendingCount: number;
 }
 
+export interface ToolchainInstallation {
+  id: string;
+  toolName: string;
+  version: string;
+  executablePath: string;
+  source: string;
+  pathPriority: number;
+  scannedAt: string;
+}
+
+export interface ToolchainConflict {
+  id: string;
+  toolName: string;
+  conflictType: "multiple-paths" | "version-mismatch";
+  summary: string;
+  recommendedAction: string;
+  status: "unconfirmed" | "confirmed" | "ignored";
+  detectedAt: string;
+}
+
+export interface ToolchainInventory {
+  installations: ToolchainInstallation[];
+  conflicts: ToolchainConflict[];
+}
+
+export interface AuditCheck {
+  checkType: string;
+  target: string;
+  status: "passed" | "attention" | "failed";
+  summary: string;
+  detailsJson: string;
+  checkedAt?: string;
+}
+
+export interface WeeklyAudit {
+  id: string;
+  weekStart: string;
+  status: "passed" | "attention" | "failed" | "running";
+  scheduledAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  summary: string;
+  catchUpRun: boolean;
+  checks: AuditCheck[];
+}
+
 export interface VideoItem {
   id: string;
   title: string;
@@ -688,6 +734,26 @@ export async function listFeatureParity(): Promise<FeatureParity[]> {
 
 export async function saveFeatureParityReview(review: Pick<FeatureParity, "id" | "parityStatus" | "intentionalDifference" | "manuallyConfirmed">): Promise<void> {
   await invoke("save_feature_parity_review", { review });
+}
+
+export async function scanToolchains(): Promise<ToolchainInventory> {
+  return invoke<ToolchainInventory>("scan_toolchains");
+}
+
+export async function listToolchains(): Promise<ToolchainInventory> {
+  return invoke<ToolchainInventory>("list_toolchains");
+}
+
+export async function ensureWeeklyAudit(): Promise<WeeklyAudit | null> {
+  return invoke<WeeklyAudit | null>("ensure_weekly_audit");
+}
+
+export async function runWeeklyAudit(): Promise<WeeklyAudit> {
+  return invoke<WeeklyAudit>("run_weekly_audit");
+}
+
+export async function listWeeklyAudits(): Promise<WeeklyAudit[]> {
+  return invoke<WeeklyAudit[]>("list_weekly_audits");
 }
 
 export async function listLocalVideos(): Promise<VideoItem[]> {

@@ -1,4 +1,5 @@
 mod ai;
+mod audit;
 mod codex;
 mod content;
 mod database;
@@ -8,6 +9,7 @@ mod parity;
 mod reports;
 mod suggestions;
 mod testing;
+mod toolchain;
 mod videos;
 mod worktime;
 
@@ -235,6 +237,9 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 let now = chrono::Local::now();
                 let maintenance_date = now.format("%Y-%m-%d").to_string();
+                if let Err(error) = audit::ensure_weekly_audit_for_state(&state) {
+                    eprintln!("自动周检或漏跑补偿失败：{error}");
+                }
                 if let Err(error) = tauri::async_runtime::block_on(
                     content::ensure_content_for_date(state.clone(), now.date_naive()),
                 ) {
@@ -336,6 +341,11 @@ pub fn run() {
             videos::sync_video_pipeline,
             videos::list_video_jobs,
             videos::save_video_job_type,
+            toolchain::scan_toolchains,
+            toolchain::list_toolchains,
+            audit::run_weekly_audit,
+            audit::ensure_weekly_audit,
+            audit::list_weekly_audits,
             worktime::list_work_sessions,
             worktime::work_summary,
             worktime::save_work_session,
