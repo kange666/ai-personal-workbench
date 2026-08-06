@@ -1,8 +1,8 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, MAIN_DB};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -119,8 +119,76 @@ pub struct WorkTask {
 impl DatabaseState {
     pub fn new(path: PathBuf) -> Result<Self, String> {
         let state = Self { path };
+        state.backup_before_migration()?;
         state.initialize()?;
         Ok(state)
+    }
+
+    fn stored_schema_version(&self) -> Result<Option<i64>, String> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let metadata = std::fs::metadata(&self.path).map_err(|error| error.to_string())?;
+        if metadata.len() == 0 {
+            return Ok(None);
+        }
+        let connection = self.connect()?;
+        let has_meta = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_meta')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !has_meta {
+            return Ok(Some(0));
+        }
+        let stored = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(Some(stored))
+    }
+
+    fn backup_before_migration(&self) -> Result<Option<PathBuf>, String> {
+        let Some(stored_version) = self.stored_schema_version()? else {
+            return Ok(None);
+        };
+        if stored_version >= SCHEMA_VERSION {
+            return Ok(None);
+        }
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "数据库路径缺少父目录".to_string())?;
+        let backup_dir = parent.join("backups");
+        std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
+        let database_name = self
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workbench");
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+        let backup_path = backup_dir.join(format!(
+            "{database_name}-before-v{SCHEMA_VERSION}-{timestamp}.sqlite3"
+        ));
+        let connection = self.connect()?;
+        connection
+            .backup(MAIN_DB, &backup_path, None)
+            .map_err(|error| format!("迁移前备份失败：{error}"))?;
+        let backup = Connection::open(&backup_path).map_err(|error| error.to_string())?;
+        let integrity = backup
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        if integrity != "ok" {
+            return Err(format!("迁移前备份完整性检查失败：{integrity}"));
+        }
+        Ok(Some(backup_path))
     }
 
     pub fn connect(&self) -> Result<Connection, String> {
@@ -311,6 +379,165 @@ impl DatabaseState {
                    note TEXT NOT NULL DEFAULT '',
                    created_at TEXT NOT NULL,
                    updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS repository_assets (
+                   path TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   category TEXT NOT NULL DEFAULT '待确认',
+                   purpose TEXT NOT NULL DEFAULT '',
+                   technology_stack TEXT NOT NULL DEFAULT '',
+                   main_modules TEXT NOT NULL DEFAULT '',
+                   install_command TEXT NOT NULL DEFAULT '',
+                   start_command TEXT NOT NULL DEFAULT '',
+                   test_command TEXT NOT NULL DEFAULT '',
+                   build_command TEXT NOT NULL DEFAULT '',
+                   command_source TEXT NOT NULL DEFAULT '',
+                   remote_url TEXT NOT NULL DEFAULT '',
+                   default_branch TEXT NOT NULL DEFAULT '',
+                   has_uncommitted_changes INTEGER NOT NULL DEFAULT 0,
+                   inference_status TEXT NOT NULL DEFAULT 'pending',
+                   manually_confirmed INTEGER NOT NULL DEFAULT 0,
+                   last_scanned_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_repository_assets_category ON repository_assets(category);
+                 CREATE TABLE IF NOT EXISTS repository_health_snapshots (
+                   id TEXT PRIMARY KEY,
+                   repository_path TEXT NOT NULL,
+                   health_level TEXT NOT NULL,
+                   has_uncommitted_changes INTEGER NOT NULL DEFAULT 0,
+                   summary TEXT NOT NULL DEFAULT '',
+                   failure_reason TEXT NOT NULL DEFAULT '',
+                   verified_at TEXT NOT NULL,
+                   FOREIGN KEY(repository_path) REFERENCES repository_assets(path) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_repository_health_path_time ON repository_health_snapshots(repository_path,verified_at);
+                 CREATE TABLE IF NOT EXISTS commit_plans (
+                   id TEXT PRIMARY KEY,
+                   repository_path TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'draft',
+                   risk_level TEXT NOT NULL DEFAULT 'unverified',
+                   summary TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS commit_groups (
+                   id TEXT PRIMARY KEY,
+                   plan_id TEXT NOT NULL,
+                   group_order INTEGER NOT NULL DEFAULT 0,
+                   title TEXT NOT NULL,
+                   commit_message TEXT NOT NULL,
+                   files_json TEXT NOT NULL DEFAULT '[]',
+                   risk_notes TEXT NOT NULL DEFAULT '',
+                   verification_notes TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT 'suggested',
+                   commit_hash TEXT,
+                   confirmed_at TEXT,
+                   committed_at TEXT,
+                   FOREIGN KEY(plan_id) REFERENCES commit_plans(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_commit_groups_plan ON commit_groups(plan_id,group_order);
+                 CREATE TABLE IF NOT EXISTS feature_parities (
+                   id TEXT PRIMARY KEY,
+                   domain TEXT NOT NULL,
+                   feature_name TEXT NOT NULL,
+                   pc_page TEXT NOT NULL DEFAULT '',
+                   app_page TEXT NOT NULL DEFAULT '',
+                   parity_status TEXT NOT NULL DEFAULT 'pending',
+                   evidence_json TEXT NOT NULL DEFAULT '[]',
+                   intentional_difference INTEGER NOT NULL DEFAULT 0,
+                   manually_confirmed INTEGER NOT NULL DEFAULT 0,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_feature_parities_domain ON feature_parities(domain,parity_status);
+                 CREATE TABLE IF NOT EXISTS api_contracts (
+                   id TEXT PRIMARY KEY,
+                   feature_id TEXT,
+                   platform TEXT NOT NULL,
+                   method TEXT NOT NULL,
+                   url TEXT NOT NULL,
+                   parameters_json TEXT NOT NULL DEFAULT '{}',
+                   response_fields_json TEXT NOT NULL DEFAULT '[]',
+                   source_file TEXT NOT NULL DEFAULT '',
+                   verification_level TEXT NOT NULL DEFAULT 'static',
+                   updated_at TEXT NOT NULL,
+                   FOREIGN KEY(feature_id) REFERENCES feature_parities(id) ON DELETE SET NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS regression_cases (
+                   id TEXT PRIMARY KEY,
+                   feature_id TEXT,
+                   platform TEXT NOT NULL,
+                   verification_type TEXT NOT NULL,
+                   case_name TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'unverified',
+                   result_summary TEXT NOT NULL DEFAULT '',
+                   source_path TEXT NOT NULL DEFAULT '',
+                   verified_at TEXT,
+                   FOREIGN KEY(feature_id) REFERENCES feature_parities(id) ON DELETE SET NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_regression_cases_feature ON regression_cases(feature_id,platform);
+                 CREATE TABLE IF NOT EXISTS video_jobs (
+                   id TEXT PRIMARY KEY,
+                   title TEXT NOT NULL,
+                   video_type TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'draft',
+                   current_stage TEXT NOT NULL DEFAULT 'selection',
+                   project_root TEXT NOT NULL DEFAULT '',
+                   failure_reason TEXT NOT NULL DEFAULT '',
+                   manually_confirmed_type INTEGER NOT NULL DEFAULT 0,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS video_deliverables (
+                   id TEXT PRIMARY KEY,
+                   video_job_id TEXT NOT NULL,
+                   kind TEXT NOT NULL,
+                   path TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT 'missing',
+                   quality_summary TEXT NOT NULL DEFAULT '',
+                   checked_at TEXT,
+                   FOREIGN KEY(video_job_id) REFERENCES video_jobs(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_video_deliverables_job ON video_deliverables(video_job_id,kind);
+                 CREATE TABLE IF NOT EXISTS toolchain_installations (
+                   id TEXT PRIMARY KEY,
+                   tool_name TEXT NOT NULL,
+                   version TEXT NOT NULL DEFAULT '',
+                   executable_path TEXT NOT NULL DEFAULT '',
+                   source TEXT NOT NULL DEFAULT '',
+                   path_priority INTEGER,
+                   scanned_at TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_toolchain_installations_name ON toolchain_installations(tool_name);
+                 CREATE TABLE IF NOT EXISTS toolchain_conflicts (
+                   id TEXT PRIMARY KEY,
+                   tool_name TEXT NOT NULL,
+                   conflict_type TEXT NOT NULL,
+                   summary TEXT NOT NULL,
+                   recommended_action TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT 'unconfirmed',
+                   detected_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS weekly_audits (
+                   id TEXT PRIMARY KEY,
+                   week_start TEXT NOT NULL UNIQUE,
+                   status TEXT NOT NULL DEFAULT 'pending',
+                   scheduled_at TEXT NOT NULL,
+                   started_at TEXT,
+                   finished_at TEXT,
+                   summary TEXT NOT NULL DEFAULT '',
+                   catch_up_run INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE IF NOT EXISTS audit_checks (
+                   id TEXT PRIMARY KEY,
+                   audit_id TEXT NOT NULL,
+                   check_type TEXT NOT NULL,
+                   target TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'unverified',
+                   summary TEXT NOT NULL DEFAULT '',
+                   details_json TEXT NOT NULL DEFAULT '{}',
+                   checked_at TEXT,
+                   FOREIGN KEY(audit_id) REFERENCES weekly_audits(id) ON DELETE CASCADE
                  );",
             )
             .map_err(|error| error.to_string())?;
@@ -646,4 +873,84 @@ pub fn search_workspace(
     results.sort_by(|a, b| b.date.cmp(&a.date));
     results.truncate(50);
     Ok(results)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    fn test_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("workbench-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn backup_files(directory: &Path) -> Vec<PathBuf> {
+        let backup_directory = directory.join("backups");
+        if !backup_directory.exists() {
+            return Vec::new();
+        }
+        std::fs::read_dir(backup_directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
+            .collect()
+    }
+
+    #[test]
+    fn backs_up_existing_database_before_additive_migration() {
+        let directory = test_directory("migration-backup");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("workbench.sqlite3");
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO app_meta(key,value) VALUES('schema_version','15');
+                 CREATE TABLE preserved_data (value TEXT NOT NULL);
+                 INSERT INTO preserved_data(value) VALUES('keep-me');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let state = DatabaseState::new(database_path.clone()).unwrap();
+        let upgraded = state.connect().unwrap();
+        let version: String = upgraded
+            .query_row(
+                "SELECT value FROM app_meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let repository_assets_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='repository_assets')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(repository_assets_exists);
+        drop(upgraded);
+
+        let backups = backup_files(&directory);
+        assert_eq!(backups.len(), 1);
+        let backup = Connection::open(&backups[0]).unwrap();
+        let backup_version: String = backup
+            .query_row(
+                "SELECT value FROM app_meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let preserved: String = backup
+            .query_row("SELECT value FROM preserved_data", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(backup_version, "15");
+        assert_eq!(preserved, "keep-me");
+        drop(backup);
+
+        DatabaseState::new(database_path).unwrap();
+        assert_eq!(backup_files(&directory).len(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
