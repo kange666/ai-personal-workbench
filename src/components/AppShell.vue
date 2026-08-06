@@ -16,7 +16,7 @@ const quotaOpen = ref(false);
 const quotaLoading = ref(false);
 const quota = ref<CodexQuotaSnapshot>({ available:false });
 const navItems = [
-  ["/", "⌂", "工作台"], ["/work-records", "◫", "工作记录"], ["/tasks", "✓", "任务中心"], ["/calendar", "▦", "日历"],
+  ["/", "⌂", "工作台"], ["/work-records", "◫", "工作记录"], ["/projects", "◆", "项目资产"], ["/tasks", "✓", "任务中心"], ["/calendar", "▦", "日历"],
   ["/reports", "▤", "报告中心"], ["/testing", "◎", "测试中心"], ["/tokens", "◔", "Token 分析"],
   ["/knowledge", "◇", "知识库"], ["/content", "✦", "内容工坊"], ["/videos", "▶", "视频中心"],
 ];

@@ -28,6 +28,71 @@ pub struct GitScanConfiguration {
     pub max_depth: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryAsset {
+    pub path: String,
+    pub name: String,
+    pub category: String,
+    pub purpose: String,
+    pub technology_stack: String,
+    pub main_modules: String,
+    pub install_command: String,
+    pub start_command: String,
+    pub test_command: String,
+    pub build_command: String,
+    pub command_source: String,
+    pub remote_url: String,
+    pub default_branch: String,
+    pub has_uncommitted_changes: bool,
+    pub inference_status: String,
+    pub manually_confirmed: bool,
+    pub last_scanned_at: String,
+    pub health_level: String,
+    pub health_summary: String,
+    pub commit_count: i64,
+    pub conversation_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryAssetUpdate {
+    pub path: String,
+    pub category: String,
+    pub purpose: String,
+    pub technology_stack: String,
+    pub main_modules: String,
+    pub install_command: String,
+    pub start_command: String,
+    pub test_command: String,
+    pub build_command: String,
+    pub command_source: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryConversation {
+    pub id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub archived: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryCommit {
+    pub hash: String,
+    pub subject: String,
+    pub committed_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryAssetDetails {
+    pub conversations: Vec<RepositoryConversation>,
+    pub commits: Vec<RepositoryCommit>,
+}
+
 #[derive(Debug)]
 struct CommitRecord {
     hash: String,
@@ -441,6 +506,129 @@ pub async fn scan_git_repositories(
     tauri::async_runtime::spawn_blocking(move || scan_git_repositories_for_state(&database))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub fn list_repository_assets(
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<Vec<RepositoryAsset>, String> {
+    let connection = state.connect()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT a.path,a.name,a.category,a.purpose,a.technology_stack,a.main_modules,
+                    a.install_command,a.start_command,a.test_command,a.build_command,a.command_source,
+                    a.remote_url,a.default_branch,a.has_uncommitted_changes,a.inference_status,
+                    a.manually_confirmed,a.last_scanned_at,
+                    COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证'),
+                    COALESCE((SELECT h.summary FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'尚未执行健康检查'),
+                    (SELECT COUNT(*) FROM git_commits c WHERE c.repository_path=a.path),
+                    (SELECT COUNT(*) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%')
+             FROM repository_assets a ORDER BY a.has_uncommitted_changes DESC,a.name COLLATE NOCASE",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(RepositoryAsset {
+                path: row.get(0)?,
+                name: row.get(1)?,
+                category: row.get(2)?,
+                purpose: row.get(3)?,
+                technology_stack: row.get(4)?,
+                main_modules: row.get(5)?,
+                install_command: row.get(6)?,
+                start_command: row.get(7)?,
+                test_command: row.get(8)?,
+                build_command: row.get(9)?,
+                command_source: row.get(10)?,
+                remote_url: row.get(11)?,
+                default_branch: row.get(12)?,
+                has_uncommitted_changes: row.get::<_, i64>(13)? != 0,
+                inference_status: row.get(14)?,
+                manually_confirmed: row.get::<_, i64>(15)? != 0,
+                last_scanned_at: row.get(16)?,
+                health_level: row.get(17)?,
+                health_summary: row.get(18)?,
+                commit_count: row.get(19)?,
+                conversation_count: row.get(20)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn repository_asset_details(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<RepositoryAssetDetails, String> {
+    let connection = state.connect()?;
+    let normalized = path.replace('/', "\\").to_lowercase();
+    let mut conversation_statement = connection
+        .prepare(
+            "SELECT id,COALESCE(NULLIF(title,''),'未命名 Codex 任务'),COALESCE(updated_at,started_at,''),archived
+             FROM conversations
+             WHERE lower(replace(COALESCE(cwd,''),'/','\')) LIKE ?1 || '%'
+             ORDER BY COALESCE(updated_at,started_at) DESC LIMIT 30",
+        )
+        .map_err(|error| error.to_string())?;
+    let conversations = conversation_statement
+        .query_map([&normalized], |row| {
+            Ok(RepositoryConversation {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                updated_at: row.get(2)?,
+                archived: row.get::<_, i64>(3)? != 0,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut commit_statement = connection
+        .prepare(
+            "SELECT commit_hash,subject,committed_at FROM git_commits
+             WHERE repository_path=?1 ORDER BY committed_at DESC LIMIT 30",
+        )
+        .map_err(|error| error.to_string())?;
+    let commits = commit_statement
+        .query_map([&path], |row| {
+            Ok(RepositoryCommit {
+                hash: row.get(0)?,
+                subject: row.get(1)?,
+                committed_at: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(RepositoryAssetDetails {
+        conversations,
+        commits,
+    })
+}
+
+#[tauri::command]
+pub fn save_repository_asset(
+    state: tauri::State<'_, DatabaseState>,
+    asset: RepositoryAssetUpdate,
+) -> Result<(), String> {
+    if asset.path.trim().is_empty() {
+        return Err("项目路径不能为空".to_string());
+    }
+    let changed = state
+        .connect()?
+        .execute(
+            "UPDATE repository_assets SET category=?2,purpose=?3,technology_stack=?4,main_modules=?5,
+                    install_command=?6,start_command=?7,test_command=?8,build_command=?9,command_source=?10,
+                    inference_status='confirmed',manually_confirmed=1,updated_at=?11 WHERE path=?1",
+            params![asset.path,asset.category,asset.purpose,asset.technology_stack,asset.main_modules,
+                asset.install_command,asset.start_command,asset.test_command,asset.build_command,asset.command_source,Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("项目资产不存在，请先重新扫描 Git 仓库".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

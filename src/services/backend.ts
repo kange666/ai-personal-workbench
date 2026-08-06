@@ -48,6 +48,48 @@ export interface GitScanSummary {
   errors: number;
 }
 
+export interface RepositoryAsset {
+  path: string;
+  name: string;
+  category: string;
+  purpose: string;
+  technologyStack: string;
+  mainModules: string;
+  installCommand: string;
+  startCommand: string;
+  testCommand: string;
+  buildCommand: string;
+  commandSource: string;
+  remoteUrl: string;
+  defaultBranch: string;
+  hasUncommittedChanges: boolean;
+  inferenceStatus: string;
+  manuallyConfirmed: boolean;
+  lastScannedAt: string;
+  healthLevel: string;
+  healthSummary: string;
+  commitCount: number;
+  conversationCount: number;
+}
+
+export interface RepositoryAssetUpdate {
+  path: string;
+  category: string;
+  purpose: string;
+  technologyStack: string;
+  mainModules: string;
+  installCommand: string;
+  startCommand: string;
+  testCommand: string;
+  buildCommand: string;
+  commandSource: string;
+}
+
+export interface RepositoryAssetDetails {
+  conversations: Array<{ id: string; title: string; updatedAt: string; archived: boolean }>;
+  commits: Array<{ hash: string; subject: string; committedAt: string }>;
+}
+
 export interface TokenSummary {
   conversationCount: number;
   messageCount: number;
@@ -404,6 +446,18 @@ export async function getGitScanConfiguration(): Promise<GitScanConfiguration> {
 
 export async function saveGitScanConfiguration(configuration: GitScanConfiguration): Promise<void> {
   await invoke("save_git_scan_configuration", { configuration });
+}
+
+export async function listRepositoryAssets(): Promise<RepositoryAsset[]> {
+  return invoke<RepositoryAsset[]>("list_repository_assets");
+}
+
+export async function getRepositoryAssetDetails(path: string): Promise<RepositoryAssetDetails> {
+  return invoke<RepositoryAssetDetails>("repository_asset_details", { path });
+}
+
+export async function saveRepositoryAsset(asset: RepositoryAssetUpdate): Promise<void> {
+  await invoke("save_repository_asset", { asset });
 }
 
 export async function getTokenSummary(): Promise<TokenSummary> {

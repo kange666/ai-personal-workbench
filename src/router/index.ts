@@ -10,12 +10,14 @@ import SettingsView from "../views/SettingsView.vue";
 import TestingView from "../views/TestingView.vue";
 import WorkRecordsView from "../views/WorkRecordsView.vue";
 import VideoCenterView from "../views/VideoCenterView.vue";
+import ProjectsView from "../views/ProjectsView.vue";
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: "/", name: "dashboard", component: DashboardView, meta: { title: "工作台" } },
     { path: "/work-records", name: "work-records", component: WorkRecordsView, meta: { title: "工作记录" } },
+    { path: "/projects", name: "projects", component: ProjectsView, meta: { title: "项目资产" } },
     { path: "/tasks", name: "tasks", component: TasksView, meta: { title: "任务中心" } },
     { path: "/calendar", name: "calendar", component: CalendarView, meta: { title: "日历与甘特" } },
     { path: "/reports", name: "reports", component: ReportsView, meta: { title: "报告中心" } },
