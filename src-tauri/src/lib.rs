@@ -1,23 +1,29 @@
 mod ai;
 mod audit;
 mod codex;
+mod codex_video;
 mod content;
 mod database;
+mod email;
 mod git;
 mod knowledge;
+mod notifications;
 mod parity;
+mod parity_catalog;
 mod reports;
 mod suggestions;
+mod tapd;
 mod testing;
 mod toolchain;
 mod videos;
+mod vip;
 mod worktime;
 
 use chrono::{Duration, Timelike};
 use database::{ensure_parent, DatabaseState};
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
@@ -64,18 +70,52 @@ fn glyph(value: char) -> [u8; 7] {
     }
 }
 
+fn tray_palette(percent: Option<u8>) -> ([u8; 3], [u8; 3], [u8; 3]) {
+    match percent {
+        Some(value) if value <= 10 => ([244, 111, 120], [199, 62, 79], [255, 156, 160]),
+        Some(value) if value <= 25 => ([230, 159, 73], [191, 104, 45], [247, 191, 112]),
+        Some(_) => ([135, 116, 255], [91, 74, 214], [167, 151, 255]),
+        None => ([91, 99, 121], [57, 63, 80], [130, 139, 164]),
+    }
+}
+
+fn inside_rounded_square(x: i32, y: i32, inset: i32, radius: i32) -> bool {
+    let min = inset;
+    let max = 63 - inset;
+    if x < min || y < min || x > max || y > max {
+        return false;
+    }
+    let center_x = x.clamp(min + radius, max - radius);
+    let center_y = y.clamp(min + radius, max - radius);
+    let dx = x - center_x;
+    let dy = y - center_y;
+    dx * dx + dy * dy <= radius * radius
+}
+
 fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
     const SIZE: usize = 64;
     let mut rgba = vec![0_u8; SIZE * SIZE * 4];
-    let center = (SIZE as i32 - 1) / 2;
+    let (top, bottom, border) = tray_palette(percent);
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let dx = x as i32 - center;
-            let dy = y as i32 - center;
-            if dx * dx + dy * dy <= 30 * 30 {
-                let offset = (y * SIZE + x) * 4;
-                rgba[offset..offset + 4].copy_from_slice(&[117, 100, 245, 255]);
+            let x = x as i32;
+            let y = y as i32;
+            if !inside_rounded_square(x, y, 1, 13) {
+                continue;
             }
+            let offset = (y as usize * SIZE + x as usize) * 4;
+            let is_border = !inside_rounded_square(x, y, 3, 11);
+            let color = if is_border {
+                border
+            } else {
+                let ratio = y as u16;
+                [
+                    ((top[0] as u16 * (63 - ratio) + bottom[0] as u16 * ratio) / 63) as u8,
+                    ((top[1] as u16 * (63 - ratio) + bottom[1] as u16 * ratio) / 63) as u8,
+                    ((top[2] as u16 * (63 - ratio) + bottom[2] as u16 * ratio) / 63) as u8,
+                ]
+            };
+            rgba[offset..offset + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
         }
     }
 
@@ -87,27 +127,33 @@ fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
         2 => 5,
         _ => 3,
     };
-    let gap = scale;
+    let gap = match text.len() {
+        1 => 0,
+        2 => 3,
+        _ => 2,
+    };
     let text_width = text.len() as i32 * 5 * scale + (text.len().saturating_sub(1) as i32 * gap);
     let start_x = (SIZE as i32 - text_width) / 2;
     let start_y = (SIZE as i32 - 7 * scale) / 2;
-    for (index, character) in text.chars().enumerate() {
-        let rows = glyph(character);
-        let glyph_x = start_x + index as i32 * (5 * scale + gap);
-        for (row, bits) in rows.iter().enumerate() {
-            for column in 0..5 {
-                if bits & (1 << (4 - column)) == 0 {
-                    continue;
-                }
-                for offset_y in 0..scale {
-                    for offset_x in 0..scale {
-                        let x = glyph_x + column * scale + offset_x;
-                        let y = start_y + row as i32 * scale + offset_y;
-                        if x < 0 || y < 0 || x >= SIZE as i32 || y >= SIZE as i32 {
-                            continue;
+    for (shadow_offset, color) in [(1, [34, 28, 70, 170]), (0, [255, 255, 255, 255])] {
+        for (index, character) in text.chars().enumerate() {
+            let rows = glyph(character);
+            let glyph_x = start_x + index as i32 * (5 * scale + gap);
+            for (row, bits) in rows.iter().enumerate() {
+                for column in 0..5 {
+                    if bits & (1 << (4 - column)) == 0 {
+                        continue;
+                    }
+                    for offset_y in 0..scale {
+                        for offset_x in 0..scale {
+                            let x = glyph_x + column * scale + offset_x + shadow_offset;
+                            let y = start_y + row as i32 * scale + offset_y + shadow_offset;
+                            if x < 0 || y < 0 || x >= SIZE as i32 || y >= SIZE as i32 {
+                                continue;
+                            }
+                            let offset = (y as usize * SIZE + x as usize) * 4;
+                            rgba[offset..offset + 4].copy_from_slice(&color);
                         }
-                        let offset = (y as usize * SIZE + x as usize) * 4;
-                        rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
                     }
                 }
             }
@@ -152,8 +198,17 @@ pub fn run() {
             }
 
             let show_item = MenuItem::with_id(app, "show", "打开工作台", true, None::<&str>)?;
+            let email_item = CheckMenuItem::with_id(
+                app,
+                "codex-email-toggle",
+                "Codex完成邮件（未配置）",
+                true,
+                false,
+                None::<&str>,
+            )?;
+            app.manage(email::EmailTrayMenuItem(email_item.clone()));
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &email_item, &quit_item])?;
             let initial_quota = codex::latest_tray_quota();
             let initial_icon = quota_tray_icon(
                 initial_quota
@@ -172,6 +227,19 @@ pub fn run() {
                             let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
+                    }
+                    "codex-email-toggle" => {
+                        let state = app.state::<DatabaseState>();
+                        let current = email::status_for_state(&state);
+                        if email::set_enabled_for_state(&state, !current.enabled).is_err() {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                                let _ = window.eval("window.location.hash='#/settings'");
+                            }
+                        }
+                        email::sync_tray_menu(app, &state);
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -216,7 +284,10 @@ pub fn run() {
             ensure_parent(&path).map_err(std::io::Error::other)?;
             let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
             app.manage(state.clone());
+            email::initialize_for_state(&state).map_err(std::io::Error::other)?;
+            email::sync_tray_menu(app.handle(), &state);
             let history_state = state.clone();
+            let history_app = app.handle().clone();
             std::thread::spawn(move || {
                 if let Err(error) = parity::sync_feature_parity_for_state(&history_state) {
                     eprintln!("启动时同步 PC/APP 对照矩阵失败：{error}");
@@ -233,40 +304,60 @@ pub fn run() {
                 if let Err(error) = suggestions::sync_task_suggestions_for_state(&history_state) {
                     eprintln!("启动时提取任务建议失败：{error}");
                 }
+                if let Err(error) = notifications::sync_codex_notifications_for_state(&history_state) {
+                    eprintln!("启动时同步 Codex 完成提醒失败：{error}");
+                }
+                if let Err(error) = email::process_due_deliveries_for_state(&history_state) {
+                    eprintln!("启动时处理 Codex 完成邮件失败：{error}");
+                }
+                email::sync_tray_menu(&history_app, &history_state);
             });
+            let notification_state = state.clone();
+            let notification_app = app.handle().clone();
+            std::thread::spawn(move || loop {
+                if let Err(error) = notifications::sync_codex_notifications_for_state(&notification_state) {
+                    eprintln!("同步 Codex 完成提醒失败：{error}");
+                }
+                if let Err(error) = email::process_due_deliveries_for_state(&notification_state) {
+                    eprintln!("处理 Codex 完成邮件失败：{error}");
+                }
+                email::sync_tray_menu(&notification_app, &notification_state);
+                std::thread::sleep(std::time::Duration::from_secs(15));
+            });
+            let maintenance_state = state.clone();
             std::thread::spawn(move || loop {
                 let now = chrono::Local::now();
                 let maintenance_date = now.format("%Y-%m-%d").to_string();
-                if let Err(error) = audit::ensure_weekly_audit_for_state(&state) {
+                if let Err(error) = audit::ensure_weekly_audit_for_state(&maintenance_state) {
                     eprintln!("自动周检或漏跑补偿失败：{error}");
                 }
                 if let Err(error) = tauri::async_runtime::block_on(
-                    content::ensure_content_for_date(state.clone(), now.date_naive()),
+                    content::ensure_content_for_date(maintenance_state.clone(), now.date_naive()),
                 ) {
                     eprintln!("自动补齐当天内容失败：{error}");
                 }
-                let last_maintenance = state.connect().ok().and_then(|connection| {
+                let last_maintenance = maintenance_state.connect().ok().and_then(|connection| {
                     connection.query_row("SELECT value FROM app_meta WHERE key='last_daily_maintenance_date'", [], |row| row.get::<_, String>(0)).ok()
                 });
                 if now.hour() >= 22 && last_maintenance.as_deref() != Some(&maintenance_date) {
                     let mut failed = false;
                     for result in [
-                        codex::scan_codex_sessions_for_state(&state).map(|_| ()),
-                        git::scan_git_repositories_for_state(&state).map(|_| ()),
-                        reports::ensure_scheduled_reports(&state).map(|_| ()),
-                        knowledge::sync_knowledge_for_state(&state).map(|_| ()),
-                        suggestions::sync_task_suggestions_for_state(&state).map(|_| ()),
+                        codex::scan_codex_sessions_for_state(&maintenance_state).map(|_| ()),
+                        git::scan_git_repositories_for_state(&maintenance_state).map(|_| ()),
+                        reports::ensure_scheduled_reports(&maintenance_state).map(|_| ()),
+                        knowledge::sync_knowledge_for_state(&maintenance_state).map(|_| ()),
+                        suggestions::sync_task_suggestions_for_state(&maintenance_state).map(|_| ()),
                     ] {
                         if let Err(error) = result { failed = true; eprintln!("每日维护失败：{error}"); }
                     }
                     if !failed {
-                        if let Ok(connection) = state.connect() {
+                        if let Ok(connection) = maintenance_state.connect() {
                             let _ = connection.execute("INSERT INTO app_meta(key,value) VALUES('last_daily_maintenance_date',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&maintenance_date]);
                         }
                     }
                     let tomorrow = now.date_naive() + Duration::days(1);
                     if let Err(error) = tauri::async_runtime::block_on(
-                        content::ensure_content_for_date(state.clone(), tomorrow),
+                        content::ensure_content_for_date(maintenance_state.clone(), tomorrow),
                     ) {
                         eprintln!("生成第二天内容标题失败：{error}");
                     }
@@ -288,6 +379,14 @@ pub fn run() {
             database::save_task,
             database::delete_task,
             suggestions::sync_task_suggestions,
+            tapd::tapd_status,
+            tapd::save_tapd_credentials,
+            tapd::clear_tapd_credentials,
+            tapd::test_tapd_connection,
+            tapd::sync_tapd_items,
+            tapd::list_tapd_items,
+            tapd::list_tapd_codex_jobs,
+            tapd::start_tapd_codex_job,
             database::token_summary,
             database::list_conversation_metrics,
             database::set_conversation_project,
@@ -300,6 +399,19 @@ pub fn run() {
             content::update_content_status,
             codex::scan_codex_sessions,
             codex::codex_quota,
+            codex_video::codex_cli_status,
+            codex_video::content_video_job,
+            codex_video::start_content_video_job,
+            notifications::sync_codex_notifications,
+            notifications::list_notifications,
+            notifications::mark_notification_read,
+            notifications::mark_all_notifications_read,
+            email::email_notification_status,
+            email::save_qq_email_config,
+            email::delete_qq_email_config,
+            email::test_qq_email,
+            email::set_codex_email_enabled,
+            email::retry_failed_emails,
             git::scan_git_repositories,
             git::git_scan_configuration,
             git::save_git_scan_configuration,
@@ -341,6 +453,9 @@ pub fn run() {
             videos::sync_video_pipeline,
             videos::list_video_jobs,
             videos::save_video_job_type,
+            vip::vip_status,
+            vip::activate_vip,
+            vip::deactivate_vip,
             toolchain::scan_toolchains,
             toolchain::list_toolchains,
             audit::run_weekly_audit,
@@ -371,10 +486,25 @@ mod tray_tests {
             .rgba()
             .chunks_exact(4)
             .any(|pixel| pixel == [255, 255, 255, 255]));
-        assert!(icon
+        let opaque_pixels = icon
             .rgba()
             .chunks_exact(4)
-            .any(|pixel| pixel == [117, 100, 245, 255]));
+            .filter(|pixel| pixel[3] == 255)
+            .count();
+        assert!(opaque_pixels > 3_400, "托盘背景应接近填满 64px 画布");
+    }
+
+    #[test]
+    fn tray_icon_uses_clear_low_quota_warning_without_changing_digits() {
+        let low = quota_tray_icon(Some(5));
+        let normal = quota_tray_icon(Some(55));
+        assert_ne!(low.rgba(), normal.rgba(), "低额度应使用更醒目的暖色背景");
+        let white_pixels = low
+            .rgba()
+            .chunks_exact(4)
+            .filter(|pixel| *pixel == [255, 255, 255, 255])
+            .count();
+        assert!(white_pixels > 500, "单个数字应占据足够大的可视面积");
     }
 
     #[test]

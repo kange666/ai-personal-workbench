@@ -124,32 +124,54 @@ fn local_drafts(date: NaiveDate, generation_round: usize) -> Vec<ContentDraft> {
         .collect()
 }
 
-fn reasoning_concepts() -> [ReasoningConcept; 5] {
-    [
-        ReasoningConcept { category: "真假话推理", title: "三个人里，谁在说谎？", hook: "只有一个人说谎，你能在十秒内找出他吗？", premise: "深夜的旧校舍里，A、B、C 被带进推理审判室。馆主说明：三人中只有一个人在说谎，另外两人都说真话。", options: "A：B 在说谎。\nB：C 在说谎。\nC：A 和 B 之中，只有一个人在说谎。", answer: "B 在说谎。", reasoning: "假设 A 说谎，那么 B 说真话会推出 C 说谎，出现两个说谎者。假设 C 说谎，也会与 A、B 的证词冲突。只有假设 B 说谎时，A 的话为真、C 的话也为真，满足唯一说谎者条件。", scene: "谜题审判室，三名学生并排站立，馆主在前景侧面，证词卡片位置清晰。", cover: "谁在说谎？" },
-        ReasoningConcept { category: "生死门", title: "三扇门，你会选哪一扇？", hook: "三扇门只有一扇能活，你会选哪扇？", premise: "主角被困在古堡门厅，必须从三扇门中选一扇离开。", options: "左门：门后是毒蛇房。\n中门：门后是燃烧的火海。\n右门：门后是三个月没吃饭的猛兽。", answer: "选择右门。", reasoning: "三个月没有进食的猛兽无法继续存活，因此右门描述的危险已经失效。左门和中门仍是即时危险。", scene: "古堡门厅，三扇门横向展开，蛇影、火焰和猛兽剪影分别对应三个选项。", cover: "哪扇门能活？" },
-        ReasoningConcept { category: "犯罪推理", title: "三个人中，谁偷了宝石？", hook: "只有一句是真话，宝石到底是谁偷的？", premise: "博物馆的蓝宝石失窃，现场只有学生 A、女仆 B 和商人 C。已知三句证词中只有一句是真话。", options: "A：不是我偷的。\nB：是 C 偷的。\nC：B 在冤枉我。", answer: "A 偷了宝石。", reasoning: "如果 A 是窃贼，A 的否认是假话，B 指认 C 也是假话，C 说自己被冤枉是真话，恰好只有一句真话。换成 B 或 C 都会产生两句真话。", scene: "证词展示板，三人半身像围绕蓝宝石，逐条证词用卡片呈现。", cover: "谁偷了宝石？" },
-        ReasoningConcept { category: "身份判断", title: "两位公主，谁才是真的？", hook: "她们长得一模一样，但只有一位公主会说真话。", premise: "王座前站着两位外表相同的公主。真公主一定说真话，冒牌货一定说假话。", options: "左边：右边是假的。\n右边：我们的身份相同。", answer: "左边是真公主。", reasoning: "如果左边是真公主，那么右边确实是假冒者；右边所说“身份相同”是假的，条件完全成立。反过来假设右边是真公主，她的证词就要求两人身份相同，与只有一位真公主矛盾。", scene: "宫廷审问室，两位公主左右站立，服装一明一暗，馆主在前方观察。", cover: "谁是真公主？" },
-        ReasoningConcept { category: "逻辑排除", title: "三杯水，哪一杯有毒？", hook: "三句话只有一句是真的，你敢选哪杯？", premise: "桌上有 A、B、C 三杯水，其中只有一杯有毒。杯前的三句话只有一句是真话。", options: "A 杯前：毒在 B 杯。\nB 杯前：毒不在 B 杯。\nC 杯前：毒不在 A 杯。", answer: "A 杯有毒。", reasoning: "毒在 A 杯时，A 的提示是假、B 的提示是真、C 的提示是假，恰好一句真话。毒在 B 或 C 杯都会让两句提示同时为真。", scene: "暗色长桌上的三杯水，A、B、C 标记清晰，背后是低饱和证据墙。", cover: "哪杯水有毒？" },
-    ]
-}
+const REASONING_BATCH_COUNT: usize = 5;
 
-fn alternate_reasoning_concepts() -> [ReasoningConcept; 5] {
+fn reasoning_concept_batches() -> [[ReasoningConcept; 5]; REASONING_BATCH_COUNT] {
     [
-        ReasoningConcept { category: "真假话推理", title: "三名社员中，谁拿走了钥匙？", hook: "三句话只有一句是真的，钥匙到底在谁手里？", premise: "活动室的钥匙不见了，A、B、C 三名社员中只有一人拿走钥匙。馆主确认：三句证词中只有一句是真话。", options: "A：钥匙是 B 拿的。\nB：我没有拿钥匙。\nC：A 没有拿钥匙。", answer: "A 拿走了钥匙。", reasoning: "如果 A 拿走钥匙，A 的指认是假话，B 的否认是真话，C 说 A 没拿是假话，恰好一句真话。钥匙在 B 或 C 手里时都会出现两句真话。", scene: "旧校舍活动室，三名社员围绕空钥匙盒，证词卡片悬浮在各自身旁。", cover: "谁拿了钥匙？" },
-        ReasoningConcept { category: "生死门", title: "午夜三条通道，哪一条可以通过？", hook: "三条通道都很危险，但午夜只有一条已经失效。", premise: "主角被困在地下设施，必须从三条通道中选择一条。现在是午夜十二点。", options: "A 通道：两分钟后会被水淹没。\nB 通道：白天由聚光装置产生高温。\nC 通道：充满无色有毒气体。", answer: "选择 B 通道。", reasoning: "B 通道的危险依赖白天的强光，现在是午夜，聚光装置无法产生描述中的高温。A 和 C 的危险不受昼夜影响。", scene: "地下设施的三岔路口，水位警报、熄灭的聚光装置和气体警示分别对应三个选项。", cover: "午夜走哪条路？" },
-        ReasoningConcept { category: "犯罪推理", title: "是谁拿走了档案袋？", hook: "只有一句真话，档案袋藏在谁那里？", premise: "办公室的档案袋被人拿走，现场只有 A、B、C。已知三人中只有一人说真话。", options: "A：不是我拿的。\nB：是 A 拿的。\nC：B 没有拿。", answer: "B 拿走了档案袋。", reasoning: "如果 B 拿走档案袋，A 的否认是真话，B 对 A 的指认是假话，C 说 B 没拿也是假话，恰好一句真话。换成 A 或 C 都会出现两句真话。", scene: "昏暗办公室与空文件柜，三名职员站在证据板前，黄色档案袋作为中心线索。", cover: "谁拿了档案？" },
-        ReasoningConcept { category: "身份判断", title: "三个人中，谁才是真医生？", hook: "只有真正的医生说真话，你能认出他吗？", premise: "诊所里出现三名自称医生的人。只有一人是真医生，而且真医生说真话，另外两名冒牌者都说假话。", options: "A：我是真医生。\nB：A 不是真医生。\nC：B 是真医生。", answer: "A 是真医生。", reasoning: "A 为真医生时，A 的话为真，B 对 A 的否认是假，C 对 B 的指认也是假，条件成立。若 B 或 C 是真医生，至少会让一名冒牌者说出真话，产生矛盾。", scene: "夜间诊所候诊区，三人穿着不同细节的白色制服，馆主检查证件与证词。", cover: "谁是真医生？" },
-        ReasoningConcept { category: "逻辑排除", title: "三个标签全贴错，先开哪只箱子？", hook: "苹果、橙子和混合水果，三个标签全部错误。", premise: "桌上有三只箱子，标签分别写着“苹果”“橙子”“混合”，但三个标签全部贴错。你只能从一只箱子里拿出一个水果。", options: "A：先开标着“苹果”的箱子。\nB：先开标着“橙子”的箱子。\nC：先开标着“混合”的箱子。", answer: "先开标着“混合”的箱子。", reasoning: "因为所有标签都错，标着“混合”的箱子一定只装一种水果。取出一个就能确定它的真实类别，再利用另外两个错误标签依次确定剩余箱子。", scene: "谜题教室的长桌上放着三只木箱，错误标签清晰，苹果和橙子作为推理道具。", cover: "先开哪只箱子？" },
+        [
+            ReasoningConcept { category: "数字规律", title: "2、6、12、20，下一项是多少？", hook: "这不是简单加法，你能看出数字背后的结构吗？", premise: "馆主在黑板上写下数列：2、6、12、20、？。每一项都由它所在的位置决定。", options: "A：28\nB：30\nC：32", answer: "B，下一项是 30。", reasoning: "这组数依次是 1×2、2×3、3×4、4×5，因此下一项是 5×6，也就是 30。也可以观察相邻差值为 4、6、8，下一次应增加 10。", scene: "谜题教室黑板，数字逐项亮起，下面同步出现乘法结构与差值箭头。", cover: "下一项是多少？" },
+            ReasoningConcept { category: "称重逻辑", title: "9枚硬币中有1枚较轻，最少称几次？", hook: "没有砝码，天平只能用两次，你能找出那枚轻硬币吗？", premise: "9 枚外观相同的硬币中有 1 枚较轻。你有一架没有砝码的天平，需要保证找出它。", options: "A：2 次\nB：3 次\nC：4 次", answer: "A，最少称 2 次。", reasoning: "先把硬币分成三组，每组 3 枚，称其中两组。平衡则轻币在第三组，不平衡则在较轻的一组。再从目标组三枚中取两枚相称，一次就能确定轻币。", scene: "九枚硬币分成三组摆在天平前，两次称重路径用清晰分支图展示。", cover: "两次找出轻硬币" },
+            ReasoningConcept { category: "空间想象", title: "涂色立方体切成27块，几块有两面颜色？", hook: "只看边，不看角，这道空间题很容易多数或少数。", premise: "一个大立方体六个面全部涂色，再平均切成 3×3×3 共 27 个小立方体。", options: "A：8 块\nB：12 块\nC：18 块", answer: "B，有 12 块。", reasoning: "恰好两面涂色的小块只在大立方体的棱上，但不能是八个角。每条棱中间有 1 块，共有 12 条棱，因此答案是 12。", scene: "透明三维立方体逐层拆开，十二条棱的中间小方块用金色高亮。", cover: "到底有几块？" },
+            ReasoningConcept { category: "策略博弈", title: "21颗棋子轮流拿，怎样保证自己拿到最后一颗？", hook: "每次只能拿1到3颗，先手真的一定能赢吗？", premise: "桌上有 21 颗棋子，两人轮流拿，每次只能拿 1、2 或 3 颗，拿到最后一颗的人获胜，你是先手。", options: "A：第一次拿 1 颗\nB：第一次拿 2 颗\nC：第一次拿 3 颗", answer: "A，第一次拿 1 颗。", reasoning: "先拿 1 颗后剩下 20 颗。此后对方拿几颗，你就补到两人这一轮合计拿 4 颗。这样会依次留下 16、12、8、4，最后一轮由你拿完。", scene: "二十一颗棋子排成一列，每四颗组成一组，先手与对手的拿取过程分色显示。", cover: "先手怎样稳赢？" },
+            ReasoningConcept { category: "实验推理", title: "三个开关控制一盏灯，只进房间一次怎么判断？", hook: "你只能进房间一次，但灯泡会留下第二种线索。", premise: "门外有 A、B、C 三个开关，房间内只有一盏灯，三个开关中只有一个控制它。你在门外可以任意操作，但只能进房间一次。", options: "A：依次快速开关三个\nB：开 A 一会儿后关掉，再开 B\nC：同时打开 A 和 B", answer: "B，利用亮度和温度判断。", reasoning: "先打开 A 几分钟再关掉，然后打开 B 并进入房间。灯亮说明 B 控制；灯灭但灯泡温热说明 A 控制；灯灭且冰凉说明 C 控制。", scene: "门外三个开关与门内灯泡分屏展示，亮、热、冷三种结果形成判断表。", cover: "只进门一次" },
+        ],
+        [
+            ReasoningConcept { category: "经典过桥", title: "四个人过桥，最快需要多少分钟？", hook: "手电筒只有一支，最慢的人会决定答案吗？", premise: "四个人过桥分别需要 1、2、7、10 分钟。桥上最多两人，必须带手电筒，同行按较慢者计时。", options: "A：17 分钟\nB：19 分钟\nC：21 分钟", answer: "A，最快 17 分钟。", reasoning: "1和2先过桥用2分钟，1返回用1分钟；7和10一起过桥用10分钟，2返回用2分钟；最后1和2一起过桥用2分钟，总计17分钟。", scene: "夜间窄桥与四名角色，手电筒往返路线按五个步骤依次点亮。", cover: "最快几分钟？" },
+            ReasoningConcept { category: "概率选择", title: "三扇门选中一扇后，主持人开空门，要换吗？", hook: "剩下两扇门看似各一半，其实概率并没有重新开始。", premise: "三扇门后只有一辆车。你先选一扇，知道答案的主持人从另外两扇中打开一扇空门，并允许你换到最后一扇。", options: "A：换门\nB：不换\nC：概率完全一样", answer: "A，换门胜率是三分之二。", reasoning: "第一次选中车的概率只有三分之一，不换就保持三分之一。第一次选错的概率是三分之二，主持人排除另一扇空门后，这三分之二全部集中到剩下那扇门，所以换门更有利。", scene: "三扇门与一辆车的概率分支图，第一次选择和主持人排除过程分步展示。", cover: "到底要不要换？" },
+            ReasoningConcept { category: "分类逻辑", title: "三个水果箱标签全错，先开哪一箱？", hook: "只允许拿出一个水果，却能修正三个错误标签。", premise: "三个箱子分别贴着“苹果”“橙子”“混合”，但三个标签全部贴错。你只能从一个箱子中拿出一个水果。", options: "A：苹果箱\nB：橙子箱\nC：混合箱", answer: "C，先开标着“混合”的箱子。", reasoning: "因为标签全错，“混合”箱一定只装一种水果。拿出一个就能确定它的真实类别，再结合另外两个标签也必然错误，便能依次确定剩余箱子。", scene: "三只木箱并排放置，错误标签、苹果与橙子用逻辑连线逐步交换位置。", cover: "先开哪一箱？" },
+            ReasoningConcept { category: "状态规划", title: "狼、羊和菜怎样安全渡河？", hook: "船每次只能带一样东西，任何一步错了都会出事。", premise: "农夫要把狼、羊和菜运过河。船一次只能带农夫和一样东西；农夫不在时，狼会吃羊，羊会吃菜。", options: "A：先带狼\nB：先带羊\nC：先带菜", answer: "B，必须先带羊。", reasoning: "先带羊过河，空船回来；再带狼过去，把羊带回；然后带菜过去，空船回来；最后带羊过去。每一步都不会让不能单独相处的两样东西留在一起。", scene: "河流两岸俯视图，狼、羊、菜和小船按七个状态逐格移动。", cover: "第一步带谁？" },
+            ReasoningConcept { category: "组合计数", title: "10个人每两人握一次手，一共握几次？", hook: "不是10乘9，因为每次握手都被你数了两遍。", premise: "房间里有 10 个人，每两个人之间都恰好握手一次，没有人和自己握手。", options: "A：45 次\nB：90 次\nC：100 次", answer: "A，一共 45 次。", reasoning: "每个人可以和另外 9 人握手，先得到 10×9=90。但每次握手会分别从两个人的角度被计算一次，所以要除以2，结果是45。", scene: "十个人围成圆形，人物之间的连线逐步出现，并用成对计数动画消除重复。", cover: "一共握手几次？" },
+        ],
+        [
+            ReasoningConcept { category: "序列观察", title: "1、11、21、1211、111221，下一项是什么？", hook: "不要计算大小，只要把上一行读出来。", premise: "黑板上出现数列：1、11、21、1211、111221、？。后一个数字是在描述前一个数字。", options: "A：312211\nB：122211\nC：311221", answer: "A，下一项是 312211。", reasoning: "111221 可以读作“三个1、两个2、一个1”，依次写成 31、22、11，合起来就是312211。", scene: "数字被按连续相同字符分组，三个1、两个2、一个1分别用不同颜色框选。", cover: "你会读这串数字吗？" },
+            ReasoningConcept { category: "时间测量", title: "两根燃烧不均的绳子，怎样量出45分钟？", hook: "每根都烧60分钟，但不能从长度判断时间。", premise: "两根绳子从一端烧完都需要 60 分钟，但燃烧速度处处不均匀。没有钟表，怎样准确量出 45 分钟？", options: "A：一根折成四段\nB：一根两头点燃，另一根先点一头\nC：两根都只点一头", answer: "B，同时利用两头燃烧。", reasoning: "同时点燃第一根的两端和第二根的一端。第一根30分钟烧完时，立刻点燃第二根的另一端；第二根剩余部分从两端燃烧，15分钟后烧完，总计45分钟。", scene: "两根粗细不均的绳子分上下摆放，点火位置和30加15分钟时间轴清晰显示。", cover: "怎样量出45分钟？" },
+            ReasoningConcept { category: "天平推理", title: "8个球中有1个较重，两次称重能找出吗？", hook: "关键不是四对四，而是先分成三组。", premise: "8 个外观相同的球中有 1 个更重。你有一架没有砝码的天平，最多称两次。", options: "A：可以\nB：不可以\nC：至少需要三次", answer: "A，可以在两次内找到。", reasoning: "先取3个对3个。若不平衡，重球在较重的3个中，再取其中2个相称即可确定；若平衡，重球在剩下2个中，第二次把它们相称即可。", scene: "八个球按3、3、2分组，第一次称重后分成平衡与不平衡两条路径。", cover: "两次能找出来吗？" },
+            ReasoningConcept { category: "年龄代数", title: "父亲年龄是儿子4倍，20年后是2倍，现在多大？", hook: "只需要一个未知数，就能算出两个人的年龄。", premise: "现在父亲的年龄是儿子的 4 倍；20 年后，父亲的年龄将是儿子的 2 倍。", options: "A：父40岁、子10岁\nB：父36岁、子9岁\nC：父48岁、子12岁", answer: "A，父亲40岁，儿子10岁。", reasoning: "设儿子现在x岁，父亲就是4x岁。20年后有4x+20=2(x+20)，解得x=10，因此父亲40岁。", scene: "父子两条年龄时间轴从现在延伸到20年后，倍数关系在两端分别标注。", cover: "父子现在几岁？" },
+            ReasoningConcept { category: "任务排程", title: "两个人完成三项工作，最快需要多久？", hook: "最后一项必须等前两项完成，谁先空闲并不重要。", premise: "工作 A 需要2小时，B需要1小时，C需要3小时；C必须等A和B都完成后才能开始。两个人可以同时工作。", options: "A：4小时\nB：5小时\nC：6小时", answer: "B，最快需要5小时。", reasoning: "开始时两人分别做A和B。B在1小时后完成，但C仍要等待A；第2小时A完成后立即开始C，再用3小时，所以总时间是5小时。", scene: "双泳道甘特图展示两个人的任务安排，C的起点与A、B完成节点相连。", cover: "最快需要多久？" },
+        ],
+        [
+            ReasoningConcept { category: "位置推理", title: "A、B、C坐三个位，谁坐中间？", hook: "三个条件只用到两个，就能锁定全部位置。", premise: "三个座位从左到右编号1、2、3。A坐在B左边，C不坐两端，每人恰好一个座位。", options: "A：A坐中间\nB：B坐中间\nC：C坐中间", answer: "C，C坐在中间。", reasoning: "C不坐两端，所以只能坐2号位。剩下1号和3号给A、B，又因为A在B左边，因此A坐1号、B坐3号。", scene: "三个编号座位横向排列，人物卡片根据条件逐步落位。", cover: "谁坐在中间？" },
+            ReasoningConcept { category: "日历推理", title: "如果后天是星期日，今天星期几？", hook: "不要被“后天”绕进去，沿时间线倒推两格。", premise: "馆主只告诉你一句话：后天是星期日。需要判断今天是星期几。", options: "A：星期四\nB：星期五\nC：星期六", answer: "B，今天是星期五。", reasoning: "后天是星期日，那么明天是星期六，再往前一天，今天就是星期五。", scene: "一周日历卡片横向排开，从星期日向左回退两格并高亮星期五。", cover: "今天星期几？" },
+            ReasoningConcept { category: "容积规划", title: "只有5升和3升水壶，怎样量出4升水？", hook: "先留下2升，再用它控制第二次倒水。", premise: "水源无限，但只有一个5升壶和一个3升壶，壶上没有刻度，需要准确量出4升水。", options: "A：先装满5升壶\nB：先装满3升壶\nC：无法完成", answer: "A，先装满5升壶。", reasoning: "5升壶倒满3升壶后剩2升；清空3升壶，把这2升倒进去；再装满5升壶，向3升壶补1升，此时5升壶中恰好剩4升。", scene: "两个透明水壶按四个步骤排列，水位与每次剩余容量用数字标注。", cover: "怎样量出4升？" },
+            ReasoningConcept { category: "开关规律", title: "100扇门反复开关，最后几扇开着？", hook: "只有因数个数为奇数的门，最终状态会改变。", premise: "100扇门开始都关闭。第1轮切换所有门，第2轮切换编号为2倍数的门，依此类推，第100轮只切换第100扇门。", options: "A：10扇\nB：25扇\nC：50扇", answer: "A，最后有10扇门开着。", reasoning: "第n扇门会在n的每个因数对应轮次被切换。因数通常成对出现，只有完全平方数有一个重复的平方根因数，切换次数为奇数。1到100共有1²到10²十个平方数。", scene: "一百扇门组成网格，因数成对消除，最后十个完全平方数编号亮起。", cover: "最后开着几扇？" },
+            ReasoningConcept { category: "真假话推理", title: "A说B在说谎，B说C在说谎，谁是唯一说谎者？", hook: "三个人中只有一个说谎，第三句话决定答案。", premise: "A、B、C三人中只有一个说谎。A说“B在说谎”，B说“C在说谎”，C说“A和B中只有一个说谎”。", options: "A：A\nB：B\nC：C", answer: "B，B是唯一说谎者。", reasoning: "若B说谎，则C说真话，说明A和B中恰有一个说谎；A说B在说谎也是真话，条件成立。假设A或C说谎都会额外推出第二个说谎者。", scene: "审判室内三名角色与证词卡片，真假状态通过逐项假设表验证。", cover: "谁是说谎者？" },
+        ],
+        [
+            ReasoningConcept { category: "时间角度", title: "3点30分时，时针和分针夹角是多少？", hook: "时针不会停在3上，它已经走过了半格。", premise: "一只正常运行的钟表显示3点30分，需要计算时针与分针之间较小的夹角。", options: "A：75度\nB：90度\nC：105度", answer: "A，夹角是75度。", reasoning: "分针在6的位置，也就是180度；时针每小时走30度，3点30分时位于3和4中间，即105度。两者相差75度。", scene: "钟面刻度清晰，时针从3向4移动半格，两条半径与角度扇形同步出现。", cover: "夹角真是90度吗？" },
+            ReasoningConcept { category: "数阵规律", title: "2和3得到8，4和5得到24，6和7得到多少？", hook: "每一行都先相乘，再补上第一个数。", premise: "数阵前两行分别是“2、3、8”和“4、5、24”，第三行是“6、7、？”，三行遵循同一规则。", options: "A：42\nB：48\nC：54", answer: "B，答案是48。", reasoning: "每行第三个数等于前两个数相乘后再加第一个数：2×3+2=8，4×5+4=24，因此6×7+6=48。", scene: "三行数阵写在发光方格中，乘号和加号按步骤浮现。", cover: "问号应该填几？" },
+            ReasoningConcept { category: "递归策略", title: "4层汉诺塔最少移动多少次？", hook: "每增加一层，移动次数都会翻倍再加一。", premise: "三根柱子上有4个大小不同的圆盘，需要把整塔移到另一根柱子；每次只能移动一个盘，且大盘不能放在小盘上。", options: "A：12次\nB：15次\nC：16次", answer: "B，最少15次。", reasoning: "先用7次把上面3个盘移到辅助柱，再移动最大盘1次，最后再用7次把3个盘移到目标柱，共15次。规律是2的层数次方减1。", scene: "四层圆盘在三根柱子之间移动，7加1加7的三个阶段分色呈现。", cover: "最少移动几次？" },
+            ReasoningConcept { category: "概率计算", title: "掷两枚骰子，点数和为7的概率是多少？", hook: "一共有36种结果，其中只有6种刚好凑成7。", premise: "同时掷两枚公平的六面骰子，计算两个点数之和等于7的概率。", options: "A：六分之一\nB：七分之一\nC：十二分之一", answer: "A，概率是六分之一。", reasoning: "两枚骰子共有6×6=36种等可能结果。和为7的组合是1+6、2+5、3+4、4+3、5+2、6+1，共6种，因此概率是6/36，也就是1/6。", scene: "六乘六结果方格矩阵中，和为7的六条对角组合被高亮。", cover: "和为7有多难？" },
+            ReasoningConcept { category: "逻辑排序", title: "甲比乙快，丙比甲慢但比乙快，谁排第二？", hook: "把每句话变成箭头，顺序立刻清楚。", premise: "三人比赛，已知甲比乙快；丙比甲慢，但丙又比乙快。没有并列。", options: "A：甲\nB：乙\nC：丙", answer: "C，丙排第二。", reasoning: "甲比乙快得到甲在乙前；丙比甲慢得到甲在丙前；丙比乙快得到丙在乙前。合并就是甲、丙、乙，所以丙第二。", scene: "三名选手与速度箭头逐条出现，最终排列在一条终点线上。", cover: "谁排在第二？" },
+        ],
     ]
 }
 
 fn local_reasoning_drafts(date: NaiveDate, generation_round: usize) -> Vec<ContentDraft> {
-    let concepts = if (date.ordinal() as usize + generation_round) % 2 == 0 {
-        reasoning_concepts()
-    } else {
-        alternate_reasoning_concepts()
-    };
+    let batch_index = (date.ordinal() as usize + generation_round) % REASONING_BATCH_COUNT;
+    let concepts = reasoning_concept_batches()
+        .into_iter()
+        .nth(batch_index)
+        .expect("逻辑思维题库批次必须存在");
     concepts.into_iter().map(|concept| ContentDraft {
         category: concept.category.to_string(),
         title: concept.title.to_string(),
@@ -308,7 +330,12 @@ fn next_generation_round(
             rows.collect::<Result<HashSet<_>, _>>()
                 .map_err(|error| error.to_string())?
         };
-        let current_round = (0..2)
+        let search_rounds = if content_type == "reasoning" {
+            REASONING_BATCH_COUNT
+        } else {
+            2
+        };
+        let current_round = (0..search_rounds)
             .max_by_key(|round| {
                 local_titles_for_round(date, content_type, *round)
                     .intersection(&existing_titles)
@@ -476,10 +503,37 @@ mod tests {
         let drafts = local_reasoning_drafts(date, 0);
         assert_eq!(5, drafts.len());
         let titles: HashSet<_> = drafts.iter().map(|item| item.title.as_str()).collect();
+        let categories: HashSet<_> = drafts.iter().map(|item| item.category.as_str()).collect();
         assert_eq!(5, titles.len());
+        assert_eq!(5, categories.len());
         assert!(drafts
             .iter()
             .all(|item| item.script.contains("答案是：") && item.storyboard.contains("10 秒思考")));
+    }
+
+    #[test]
+    fn reasoning_batches_cover_multiple_logic_dimensions_without_title_repeats() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let mut all_titles = HashSet::new();
+        let mut all_categories = HashSet::new();
+        for round in 0..REASONING_BATCH_COUNT {
+            let drafts = local_reasoning_drafts(date, round);
+            assert_eq!(5, drafts.len());
+            assert_eq!(
+                5,
+                drafts
+                    .iter()
+                    .map(|item| item.category.as_str())
+                    .collect::<HashSet<_>>()
+                    .len()
+            );
+            for draft in drafts {
+                assert!(all_titles.insert(draft.title));
+                all_categories.insert(draft.category);
+            }
+        }
+        assert_eq!(25, all_titles.len());
+        assert!(all_categories.len() >= 20);
     }
 
     #[test]

@@ -10,7 +10,6 @@ const demoTasks: WorkTask[] = [
   { id: "task-1", title: "完成工作台正式版基础界面", project: "AI 个人工作台", scope: "day", status: "doing", priority: "P0", plannedDate: "2026-08-03", progress: 60, note: "完成 B 布局、双主题和任务基础链路。", source: "manual", createdAt: "2026-08-03T09:20:00+08:00", updatedAt: "2026-08-03T10:24:00+08:00" },
   { id: "task-2", title: "整理本周开发总结", project: "客户端升级", scope: "week", status: "todo", priority: "P1", weekStart: "2026-08-03", progress: 20, note: "汇总本周完成事项与遗留问题。", source: "manual", createdAt: "2026-08-03T09:40:00+08:00", updatedAt: "2026-08-03T09:40:00+08:00" },
   { id: "task-3", title: "补充部署异常处理说明", project: "自动部署", scope: "day", status: "overdue", priority: "P1", plannedDate: "2026-08-02", progress: 30, note: "保留原计划日期，等待确认是否顺延。", source: "manual", createdAt: "2026-08-02T16:20:00+08:00", updatedAt: "2026-08-02T16:20:00+08:00" },
-  { id: "task-4", title: "沉淀 Token 解析规则", project: "AI 个人工作台", scope: "project", status: "draft", priority: "P2", startDate: "2026-08-04", endDate: "2026-08-08", progress: 0, note: "从 Codex 对话提取，确认后进入正式任务。", source: "conversation", createdAt: "2026-08-03T10:10:00+08:00", updatedAt: "2026-08-03T10:10:00+08:00" },
   { id: "task-5", title: "核对 DeepSeek 接口字段", project: "AI 个人工作台", scope: "day", status: "done", priority: "P1", plannedDate: "2026-08-03", progress: 100, note: "确认兼容 Chat Completions 和 JSON 输出。", source: "manual", createdAt: "2026-08-03T08:30:00+08:00", updatedAt: "2026-08-03T10:30:00+08:00", completedAt: "2026-08-03T10:30:00+08:00" },
 ];
 
@@ -18,9 +17,9 @@ function readTasks(): WorkTask[] {
   try {
     const value = localStorage.getItem(TASKS_KEY);
     const stored = value ? JSON.parse(value) as WorkTask[] : structuredClone(demoTasks);
-    return stored.map((task) => ({ ...task, progress: task.progress ?? (task.status === "done" ? 100 : 0) }));
+    return stored.filter((task) => task.id !== "task-4").map((task) => ({ ...task, progress: task.progress ?? (task.status === "done" ? 100 : 0) }));
   } catch {
-    return structuredClone(demoTasks);
+    return structuredClone(demoTasks).filter((task) => task.id !== "task-4");
   }
 }
 

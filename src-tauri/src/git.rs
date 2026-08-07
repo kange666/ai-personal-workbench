@@ -48,6 +48,7 @@ pub struct RepositoryAsset {
     pub inference_status: String,
     pub manually_confirmed: bool,
     pub last_scanned_at: String,
+    pub updated_at: String,
     pub health_level: String,
     pub health_summary: String,
     pub commit_count: i64,
@@ -622,11 +623,15 @@ pub fn list_repository_assets(
                     a.install_command,a.start_command,a.test_command,a.build_command,a.command_source,
                     a.remote_url,a.default_branch,a.has_uncommitted_changes,a.inference_status,
                     a.manually_confirmed,a.last_scanned_at,
+                    COALESCE(NULLIF(MAX(
+                      COALESCE((SELECT MAX(c.committed_at) FROM git_commits c WHERE c.repository_path=a.path),''),
+                      COALESCE((SELECT MAX(c.updated_at) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%'),'')
+                    ),''),a.updated_at) AS activity_updated_at,
                     COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证'),
                     COALESCE((SELECT h.summary FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'尚未执行健康检查'),
                     (SELECT COUNT(*) FROM git_commits c WHERE c.repository_path=a.path),
                     (SELECT COUNT(*) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%')
-             FROM repository_assets a ORDER BY a.has_uncommitted_changes DESC,a.name COLLATE NOCASE",
+             FROM repository_assets a ORDER BY datetime(activity_updated_at) DESC,a.name COLLATE NOCASE",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
@@ -649,10 +654,11 @@ pub fn list_repository_assets(
                 inference_status: row.get(14)?,
                 manually_confirmed: row.get::<_, i64>(15)? != 0,
                 last_scanned_at: row.get(16)?,
-                health_level: row.get(17)?,
-                health_summary: row.get(18)?,
-                commit_count: row.get(19)?,
-                conversation_count: row.get(20)?,
+                updated_at: row.get(17)?,
+                health_level: row.get(18)?,
+                health_summary: row.get(19)?,
+                commit_count: row.get(20)?,
+                conversation_count: row.get(21)?,
             })
         })
         .map_err(|error| error.to_string())?;

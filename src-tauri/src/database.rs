@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, MAIN_DB};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 22;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -485,6 +485,16 @@ impl DatabaseState {
                    project_root TEXT NOT NULL DEFAULT '',
                    failure_reason TEXT NOT NULL DEFAULT '',
                    manually_confirmed_type INTEGER NOT NULL DEFAULT 0,
+                   content_idea_id TEXT,
+                   skill_name TEXT NOT NULL DEFAULT '',
+                   codex_thread_id TEXT,
+                   codex_output TEXT NOT NULL DEFAULT '',
+                   cli_log_path TEXT NOT NULL DEFAULT '',
+                   progress_percent INTEGER NOT NULL DEFAULT 0,
+                   progress_message TEXT NOT NULL DEFAULT '',
+                   last_progress_at TEXT,
+                   started_at TEXT,
+                   completed_at TEXT,
                    created_at TEXT NOT NULL,
                    updated_at TEXT NOT NULL
                  );
@@ -538,7 +548,65 @@ impl DatabaseState {
                    details_json TEXT NOT NULL DEFAULT '{}',
                    checked_at TEXT,
                    FOREIGN KEY(audit_id) REFERENCES weekly_audits(id) ON DELETE CASCADE
-                 );",
+                 );
+                 CREATE TABLE IF NOT EXISTS notifications (
+                   id TEXT PRIMARY KEY,
+                   kind TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   body TEXT NOT NULL DEFAULT '',
+                   output TEXT NOT NULL DEFAULT '',
+                   source_id TEXT,
+                   route TEXT NOT NULL DEFAULT '/',
+                   is_read INTEGER NOT NULL DEFAULT 0,
+                   created_at TEXT NOT NULL,
+                   read_at TEXT
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read,created_at);
+                 CREATE TABLE IF NOT EXISTS email_deliveries (
+                   notification_id TEXT PRIMARY KEY,
+                   status TEXT NOT NULL,
+                   attempts INTEGER NOT NULL DEFAULT 0,
+                   next_attempt_at TEXT,
+                   sent_at TEXT,
+                   last_error TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   FOREIGN KEY(notification_id) REFERENCES notifications(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_email_deliveries_due ON email_deliveries(status,next_attempt_at);
+                  CREATE TABLE IF NOT EXISTS tapd_work_items (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    status_label TEXT NOT NULL DEFAULT '',
+                    priority TEXT NOT NULL DEFAULT '',
+                    owner TEXT NOT NULL DEFAULT '',
+                    creator TEXT NOT NULL DEFAULT '',
+                    iteration_id TEXT NOT NULL DEFAULT '',
+                    begin_date TEXT NOT NULL DEFAULT '',
+                    due_date TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    modified_at TEXT NOT NULL DEFAULT '',
+                    source_url TEXT NOT NULL DEFAULT '',
+                    synced_at TEXT NOT NULL
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_tapd_items_type_status ON tapd_work_items(item_type,status);
+                  CREATE TABLE IF NOT EXISTS tapd_codex_jobs (
+                    id TEXT PRIMARY KEY,
+                    item_id TEXT NOT NULL,
+                    repository_path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    thread_id TEXT,
+                    output TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(item_id) REFERENCES tapd_work_items(id) ON DELETE CASCADE
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_tapd_codex_jobs_item ON tapd_codex_jobs(item_id,created_at);",
             )
             .map_err(|error| error.to_string())?;
         for migration in [
@@ -558,6 +626,17 @@ impl DatabaseState {
             "ALTER TABLE git_commits ADD COLUMN author_email TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE tasks ADD COLUMN source_id TEXT",
             "ALTER TABLE content_ideas ADD COLUMN content_type TEXT NOT NULL DEFAULT 'tech'",
+            "ALTER TABLE notifications ADD COLUMN output TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE video_jobs ADD COLUMN content_idea_id TEXT",
+            "ALTER TABLE video_jobs ADD COLUMN skill_name TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE video_jobs ADD COLUMN codex_thread_id TEXT",
+            "ALTER TABLE video_jobs ADD COLUMN codex_output TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE video_jobs ADD COLUMN cli_log_path TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE video_jobs ADD COLUMN started_at TEXT",
+            "ALTER TABLE video_jobs ADD COLUMN completed_at TEXT",
+            "ALTER TABLE video_jobs ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE video_jobs ADD COLUMN progress_message TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE video_jobs ADD COLUMN last_progress_at TEXT",
         ] {
             let _ = connection.execute(migration, []);
         }
@@ -574,6 +653,27 @@ impl DatabaseState {
                 [],
             )
             .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "INSERT INTO app_meta(key,value) VALUES('codex_notifications_started_at',?1)
+                 ON CONFLICT(key) DO NOTHING",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+        for (key, value) in [
+            ("codex_email_enabled", "0"),
+            ("codex_email_after_time", "17:40"),
+            ("codex_email_enabled_at", ""),
+            ("codex_email_config_status", "unconfigured"),
+            ("codex_email_last_error", ""),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO app_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO NOTHING",
+                    [key, value],
+                )
+                .map_err(|error| error.to_string())?;
+        }
         connection
             .execute(
                 "INSERT INTO app_meta(key,value) VALUES('schema_version',?1)
@@ -930,6 +1030,34 @@ mod migration_tests {
             )
             .unwrap();
         assert!(repository_assets_exists);
+        let email_deliveries_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_deliveries')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(email_deliveries_exists);
+        upgraded
+            .execute(
+                "INSERT INTO notifications(id,kind,title,created_at) VALUES('codex-complete-test','codex_complete','测试完成','2026-08-07T10:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let inserted = upgraded
+            .execute(
+                "INSERT OR IGNORE INTO email_deliveries(notification_id,status,created_at,updated_at) VALUES('codex-complete-test','pending','2026-08-07T10:00:00Z','2026-08-07T10:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let duplicate = upgraded
+            .execute(
+                "INSERT OR IGNORE INTO email_deliveries(notification_id,status,created_at,updated_at) VALUES('codex-complete-test','pending','2026-08-07T10:00:01Z','2026-08-07T10:00:01Z')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+        assert_eq!(duplicate, 0);
         drop(upgraded);
 
         let backups = backup_files(&directory);

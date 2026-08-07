@@ -8,6 +8,7 @@ import { useWorkbenchStore } from "../stores/workbench";
 import type { TaskScope, TaskSource, WorkTask } from "../types/workbench";
 
 const emit = defineEmits<{ "new-task": [] }>();
+defineProps<{ embedded?: boolean }>();
 const store = useWorkbenchStore();
 const route = useRoute();
 const scope = ref<TaskScope>("day");
@@ -48,8 +49,8 @@ watch([() => route.query.task, () => store.tasks.length], () => { const id = Str
 </script>
 
 <template>
-  <div class="view tasks-view">
-    <header class="page-header"><div><h1>任务中心</h1><p>统一管理每日、每周与项目任务；自动建议需确认后才进入正式计划</p></div><div><button class="button secondary" :disabled="syncing" @click="syncSuggestions">{{ syncing ? '整理中…' : '↻ 整理建议' }}</button><button class="button secondary" @click="searchOpen = !searchOpen">⌕ 搜索</button><button class="button primary" @click="selectedTask = null; editorOpen = true">＋ 新增任务</button></div></header>
+  <div class="view tasks-view" :class="{ embedded }">
+    <header class="page-header" :class="{ 'embedded-task-header': embedded }"><div><h1 v-if="!embedded">任务中心</h1><h2 v-else>任务管理</h2><p>统一管理每日、每周与项目任务；自动建议需确认后才进入正式计划</p></div><div><button class="button secondary" :disabled="syncing" @click="syncSuggestions">{{ syncing ? '整理中…' : '↻ 整理建议' }}</button><button class="button secondary" @click="searchOpen = !searchOpen">⌕ 搜索</button><button class="button primary" @click="selectedTask = null; editorOpen = true">＋ 新增任务</button></div></header>
     <div v-if="message" class="scan-message">{{ message }}</div>
     <div v-if="searchOpen" class="inline-search"><span>⌕</span><input v-model="searchQuery" autofocus placeholder="搜索任务标题、项目或备注"><button class="icon-button" @click="searchQuery = ''; searchOpen = false">×</button></div>
     <nav class="scope-tabs"><button v-for="[value,label] in scopeTabs" :key="value" :class="{ active: scope === value && status !== 'draft' }" @click="scope = value; status='all'">{{ label }} <b>{{ store.tasksByScope(value).length }}</b></button><button :class="{ active: status === 'draft' }" @click="scope = 'project'; status = 'draft'">任务建议 <b>{{ store.tasks.filter(t => t.status === 'draft').length }}</b></button></nav>

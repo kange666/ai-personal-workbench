@@ -41,6 +41,47 @@ export interface CodexQuotaSnapshot {
   secondary?: CodexQuotaWindow;
 }
 
+export interface CodexCliStatus {
+  installed: boolean;
+  authenticated: boolean;
+  version: string;
+  executablePath: string;
+  message: string;
+}
+
+export interface WorkbenchNotification {
+  id: string;
+  kind: "codex_complete";
+  title: string;
+  body: string;
+  output: string;
+  sourceId?: string;
+  route: string;
+  isRead: boolean;
+  createdAt: string;
+  readAt?: string;
+}
+
+export interface NotificationSyncSummary {
+  filesScanned: number;
+  notificationsCreated: number;
+}
+
+export interface EmailNotificationStatus {
+  configured: boolean;
+  enabled: boolean;
+  state: "unconfigured" | "unverified" | "disabled" | "ready" | "error";
+  maskedEmail: string;
+  afterTime: string;
+  lastError: string;
+  retryingCount: number;
+  failedCount: number;
+}
+
+export interface VipStatus {
+  active: boolean;
+}
+
 export interface GitScanSummary {
   repositoriesFound: number;
   commitsImported: number;
@@ -66,6 +107,7 @@ export interface RepositoryAsset {
   inferenceStatus: string;
   manuallyConfirmed: boolean;
   lastScannedAt: string;
+  updatedAt: string;
   healthLevel: string;
   healthSummary: string;
   commitCount: number;
@@ -89,6 +131,59 @@ export interface RepositoryAssetDetails {
   conversations: Array<{ id: string; title: string; updatedAt: string; archived: boolean }>;
   commits: Array<{ hash: string; subject: string; committedAt: string }>;
   commitPlan?: CommitPlan;
+}
+
+export interface TapdStatus {
+  configured: boolean;
+  source: string;
+  authMode: "token" | "basic";
+  workspaceId: string;
+  workspaceName: string;
+  owner: string;
+  lastSyncedAt?: string;
+  itemCount: number;
+  warnings: string[];
+}
+
+export interface TapdWorkItem {
+  id: string;
+  workspaceId: string;
+  itemType: "bug" | "task" | "story";
+  title: string;
+  description: string;
+  status: string;
+  statusLabel: string;
+  priority: string;
+  owner: string;
+  creator: string;
+  iterationId: string;
+  beginDate: string;
+  dueDate: string;
+  createdAt: string;
+  modifiedAt: string;
+  sourceUrl: string;
+  syncedAt: string;
+}
+
+export interface TapdSyncSummary {
+  bugs: number;
+  tasks: number;
+  stories: number;
+  total: number;
+  warnings: string[];
+  syncedAt: string;
+}
+
+export interface TapdCodexJob {
+  id: string;
+  itemId: string;
+  repositoryPath: string;
+  status: "running" | "completed" | "failed";
+  threadId?: string;
+  output: string;
+  errorMessage: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CommitPlanGroup {
@@ -369,7 +464,7 @@ export interface FeatureParity {
   featureName: string;
   pcPage: string;
   appPage: string;
-  parityStatus: "pending" | "static-aligned" | "confirmed" | "different";
+  parityStatus: "pending" | "static-aligned" | "confirmed" | "different" | "pc-only" | "app-only";
   evidence: string[];
   intentionalDifference: boolean;
   manuallyConfirmed: boolean;
@@ -380,10 +475,16 @@ export interface FeatureParity {
 
 export interface ParitySyncSummary {
   featureCount: number;
+  pcFeatureCount: number;
+  appFeatureCount: number;
+  matchedCount: number;
+  pcOnlyCount: number;
+  appOnlyCount: number;
   contractCount: number;
   regressionCount: number;
   alignedCount: number;
   pendingCount: number;
+  sourceMessage: string;
 }
 
 export interface ToolchainInstallation {
@@ -445,6 +546,7 @@ export interface VideoItem {
   modifiedAt: string;
   status: "final" | "output" | "render";
   coverPath?: string;
+  collection: "human-weakness" | "tech" | "reasoning";
 }
 
 export interface VideoJobDeliverable {
@@ -458,12 +560,22 @@ export interface VideoJobDeliverable {
 export interface VideoJob {
   id: string;
   title: string;
-  videoType: "tech" | "reasoning" | "product-demo";
-  status: "complete" | "needs-attention";
-  currentStage: "script" | "render" | "cover" | "publish" | "delivery";
+  videoType: "human-weakness" | "tech" | "reasoning";
+  status: "queued" | "running" | "finalizing" | "complete" | "needs-attention" | "failed";
+  currentStage: "selection" | "codex" | "script" | "assets" | "voice" | "composition" | "quality" | "render" | "finalizing" | "failed" | "cover" | "publish" | "delivery";
+  progressPercent: number;
+  progressMessage: string;
+  lastProgressAt?: string;
   projectRoot: string;
   failureReason: string;
   manuallyConfirmedType: boolean;
+  contentIdeaId?: string;
+  skillName: string;
+  codexThreadId?: string;
+  codexOutput: string;
+  cliLogPath: string;
+  startedAt?: string;
+  completedAt?: string;
   createdAt: string;
   updatedAt: string;
   deliverables: VideoJobDeliverable[];
@@ -475,7 +587,7 @@ export interface VideoPipelineSummary {
   needsAttentionCount: number;
   techSamples: number;
   reasoningSamples: number;
-  productSamples: number;
+  humanWeaknessSamples: number;
 }
 
 export interface VideoDeliverable {
@@ -564,6 +676,62 @@ export async function getCodexQuota(): Promise<CodexQuotaSnapshot> {
   return invoke<CodexQuotaSnapshot>("codex_quota");
 }
 
+export async function getCodexCliStatus(): Promise<CodexCliStatus> {
+  return invoke<CodexCliStatus>("codex_cli_status");
+}
+
+export async function syncCodexNotifications(): Promise<NotificationSyncSummary> {
+  return invoke<NotificationSyncSummary>("sync_codex_notifications");
+}
+
+export async function listNotifications(limit = 30): Promise<WorkbenchNotification[]> {
+  return invoke<WorkbenchNotification[]>("list_notifications", { limit });
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  await invoke("mark_notification_read", { id });
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  await invoke("mark_all_notifications_read");
+}
+
+export async function getEmailNotificationStatus(): Promise<EmailNotificationStatus> {
+  return invoke<EmailNotificationStatus>("email_notification_status");
+}
+
+export async function saveQqEmailConfig(email: string, authCode: string): Promise<void> {
+  await invoke("save_qq_email_config", { email, authCode });
+}
+
+export async function deleteQqEmailConfig(): Promise<void> {
+  await invoke("delete_qq_email_config");
+}
+
+export async function testQqEmail(): Promise<string> {
+  return invoke<string>("test_qq_email");
+}
+
+export async function setCodexEmailEnabled(enabled: boolean): Promise<EmailNotificationStatus> {
+  return invoke<EmailNotificationStatus>("set_codex_email_enabled", { enabled });
+}
+
+export async function retryFailedEmails(): Promise<EmailNotificationStatus> {
+  return invoke<EmailNotificationStatus>("retry_failed_emails");
+}
+
+export async function getVipStatus(): Promise<VipStatus> {
+  return invoke<VipStatus>("vip_status");
+}
+
+export async function activateVip(code: string): Promise<VipStatus> {
+  return invoke<VipStatus>("activate_vip", { code });
+}
+
+export async function deactivateVip(): Promise<VipStatus> {
+  return invoke<VipStatus>("deactivate_vip");
+}
+
 export async function scanGitRepositories(): Promise<GitScanSummary> {
   return invoke<GitScanSummary>("scan_git_repositories");
 }
@@ -590,6 +758,38 @@ export async function saveRepositoryAsset(asset: RepositoryAssetUpdate): Promise
 
 export async function generateCommitPlan(path: string): Promise<CommitPlan> {
   return invoke<CommitPlan>("generate_commit_plan", { path });
+}
+
+export async function getTapdStatus(): Promise<TapdStatus> {
+  return invoke<TapdStatus>("tapd_status");
+}
+
+export async function saveTapdCredentials(authMode: "token" | "basic", apiUser: string, apiPassword: string, accessToken: string, owner: string): Promise<void> {
+  await invoke("save_tapd_credentials", { authMode, apiUser, apiPassword, accessToken, owner });
+}
+
+export async function clearTapdCredentials(): Promise<void> {
+  await invoke("clear_tapd_credentials");
+}
+
+export async function testTapdConnection(): Promise<string> {
+  return invoke<string>("test_tapd_connection");
+}
+
+export async function syncTapdItems(): Promise<TapdSyncSummary> {
+  return invoke<TapdSyncSummary>("sync_tapd_items");
+}
+
+export async function listTapdItems(): Promise<TapdWorkItem[]> {
+  return invoke<TapdWorkItem[]>("list_tapd_items");
+}
+
+export async function listTapdCodexJobs(): Promise<TapdCodexJob[]> {
+  return invoke<TapdCodexJob[]>("list_tapd_codex_jobs");
+}
+
+export async function startTapdCodexJob(itemId: string, repositoryPath: string): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("start_tapd_codex_job", { itemId, repositoryPath });
 }
 
 export async function getTokenSummary(): Promise<TokenSummary> {
@@ -786,6 +986,14 @@ export async function listVideoJobs(): Promise<VideoJob[]> {
 
 export async function saveVideoJobType(id: string, videoType: VideoJob["videoType"]): Promise<void> {
   await invoke("save_video_job_type", { selection: { id, videoType } });
+}
+
+export async function getContentVideoJob(ideaId: string): Promise<VideoJob | null> {
+  return invoke<VideoJob | null>("content_video_job", { ideaId });
+}
+
+export async function startContentVideoJob(ideaId: string): Promise<VideoJob> {
+  return invoke<VideoJob>("start_content_video_job", { ideaId });
 }
 
 export async function revealLocalFile(path: string): Promise<void> {

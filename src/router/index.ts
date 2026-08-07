@@ -1,16 +1,17 @@
 import { createRouter, createWebHashHistory } from "vue-router";
 import DashboardView from "../views/DashboardView.vue";
-import TasksView from "../views/TasksView.vue";
 import CalendarView from "../views/CalendarView.vue";
 import ReportsView from "../views/ReportsView.vue";
 import TokensView from "../views/TokensView.vue";
 import KnowledgeView from "../views/KnowledgeView.vue";
 import ContentView from "../views/ContentView.vue";
 import SettingsView from "../views/SettingsView.vue";
+import TapdView from "../views/TapdView.vue";
 import TestingView from "../views/TestingView.vue";
 import WorkRecordsView from "../views/WorkRecordsView.vue";
 import VideoCenterView from "../views/VideoCenterView.vue";
 import ProjectsView from "../views/ProjectsView.vue";
+import { getVipStatus, isTauriRuntime } from "../services/backend";
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -18,16 +19,26 @@ const router = createRouter({
     { path: "/", name: "dashboard", component: DashboardView, meta: { title: "工作台" } },
     { path: "/work-records", name: "work-records", component: WorkRecordsView, meta: { title: "工作记录" } },
     { path: "/projects", name: "projects", component: ProjectsView, meta: { title: "项目资产" } },
-    { path: "/tasks", name: "tasks", component: TasksView, meta: { title: "任务中心" } },
-    { path: "/calendar", name: "calendar", component: CalendarView, meta: { title: "日历与甘特" } },
+    { path: "/tasks", redirect: (to) => ({ path: "/calendar", query: { ...to.query, tab: "tasks" } }) },
+    { path: "/calendar", name: "calendar", component: CalendarView, meta: { title: "工作日历" } },
     { path: "/reports", name: "reports", component: ReportsView, meta: { title: "报告中心" } },
     { path: "/tokens", name: "tokens", component: TokensView, meta: { title: "Token 分析" } },
     { path: "/knowledge", name: "knowledge", component: KnowledgeView, meta: { title: "知识库" } },
-    { path: "/content", name: "content", component: ContentView, meta: { title: "内容工坊" } },
-    { path: "/videos", name: "videos", component: VideoCenterView, meta: { title: "视频中心" } },
+    { path: "/content", name: "content", component: ContentView, meta: { title: "内容工坊", requiresVip: true } },
+    { path: "/videos", name: "videos", component: VideoCenterView, meta: { title: "视频中心", requiresVip: true } },
     { path: "/testing", name: "testing", component: TestingView, meta: { title: "测试中心" } },
+    { path: "/tapd", name: "tapd", component: TapdView, meta: { title: "TAPD 工作" } },
     { path: "/settings", name: "settings", component: SettingsView, meta: { title: "设置" } },
   ],
+});
+
+router.beforeEach(async (to) => {
+  if (!to.meta.requiresVip) return true;
+  if (!isTauriRuntime()) return { path: "/settings", query: { vip: "required" } };
+  try {
+    if ((await getVipStatus()).active) return true;
+  } catch { /* 设置页会显示可操作的 VIP 入口 */ }
+  return { path: "/settings", query: { vip: "required" } };
 });
 
 router.afterEach((to) => {

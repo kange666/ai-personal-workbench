@@ -177,7 +177,7 @@ pub fn run_weekly_audit_for_state(
         } else {
             "failed"
         },
-        &format!("{parities} 个核心功能已建矩阵，{unverified} 个接口/浏览器验证尚未执行"),
+        &format!("{parities} 个全量功能条目已建矩阵，{unverified} 个接口/浏览器验证尚未执行"),
         json!({"features":parities,"unverified":unverified}),
         &checked_at,
     )?;

@@ -26,6 +26,7 @@ pub struct VideoItem {
     modified_at: String,
     status: String,
     cover_path: Option<String>,
+    collection: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,12 +65,28 @@ pub struct VideoJob {
     video_type: String,
     status: String,
     current_stage: String,
+    progress_percent: i64,
+    progress_message: String,
+    last_progress_at: Option<String>,
     project_root: String,
     failure_reason: String,
     manually_confirmed_type: bool,
+    content_idea_id: Option<String>,
+    skill_name: String,
+    codex_thread_id: Option<String>,
+    codex_output: String,
+    cli_log_path: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
     created_at: String,
     updated_at: String,
     deliverables: Vec<VideoJobDeliverable>,
+}
+
+impl VideoJob {
+    pub(crate) fn status(&self) -> &str {
+        &self.status
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,7 +97,7 @@ pub struct VideoPipelineSummary {
     needs_attention_count: usize,
     tech_samples: usize,
     reasoning_samples: usize,
-    product_samples: usize,
+    human_weakness_samples: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,7 +107,7 @@ pub struct SaveVideoType {
     video_type: String,
 }
 
-fn creation_root() -> Result<PathBuf, String> {
+pub(crate) fn creation_root() -> Result<PathBuf, String> {
     let profile =
         env::var_os("USERPROFILE").ok_or_else(|| "无法读取 Windows 用户目录。".to_string())?;
     Ok(PathBuf::from(profile).join("Documents").join("视频创作"))
@@ -276,6 +293,41 @@ fn project_root_for_video(video_path: &Path) -> Result<PathBuf, String> {
     } else {
         root
     };
+    let has_delivery_metadata = |directory: &Path| {
+        fs::read_dir(directory).ok().is_some_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    return false;
+                }
+                matches!(
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "publish.md"
+                        | "publishing.md"
+                        | "script.md"
+                        | "完整脚本.md"
+                        | "copy.md"
+                        | "title.txt"
+                )
+            })
+        })
+    };
+    let mut candidate = video_path.parent();
+    while let Some(directory) = candidate {
+        if !directory.starts_with(&base) {
+            break;
+        }
+        if has_delivery_metadata(directory) {
+            return Ok(directory.to_path_buf());
+        }
+        if directory == base {
+            break;
+        }
+        candidate = directory.parent();
+    }
     let relative = video_path.strip_prefix(&base).unwrap_or(video_path);
     let first = relative.components().find_map(|value| match value {
         Component::Normal(name) => Some(name),
@@ -289,14 +341,20 @@ fn project_root_for_video(video_path: &Path) -> Result<PathBuf, String> {
 
 fn classify_video_type(title: &str, project_root: &Path) -> &'static str {
     let text = format!("{} {}", title, project_root.display()).to_lowercase();
-    if text.contains("reasoning") || text.contains("推理") || text.contains("who-lied") {
-        "reasoning"
-    } else if text.contains("codex")
-        || text.contains("工作台")
-        || text.contains("分析器")
-        || text.contains("产品")
+    if text.contains("human-weakness")
+        || text.contains("人性弱点")
+        || text.contains("人性的弱点")
+        || text.contains("海绵宝宝")
+        || text.contains("spongebob")
     {
-        "product-demo"
+        "human-weakness"
+    } else if text.contains("reasoning")
+        || text.contains("推理")
+        || text.contains("逻辑")
+        || text.contains("who-lied")
+        || text.contains("绳子")
+    {
+        "reasoning"
     } else {
         "tech"
     }
@@ -337,9 +395,50 @@ fn deliverable_quality(item: &VideoDeliverable) -> String {
     format!("文件可读 · {:.1} MB", size as f64 / 1_048_576_f64)
 }
 
+fn normalized_project_root(value: &str) -> String {
+    value
+        .trim_start_matches(r"\\?\")
+        .replace('/', r"\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+fn content_job_for_root(
+    state: &DatabaseState,
+    project_root: &str,
+) -> Result<Option<String>, String> {
+    let connection = state.connect()?;
+    let mut statement = connection
+        .prepare("SELECT id,project_root FROM video_jobs WHERE content_idea_id IS NOT NULL")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let expected = normalized_project_root(project_root);
+    for row in rows {
+        let (id, root) = row.map_err(|error| error.to_string())?;
+        if normalized_project_root(&root) == expected {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
 pub fn sync_video_pipeline_for_state(
     state: &DatabaseState,
 ) -> Result<VideoPipelineSummary, String> {
+    state.connect()?.execute(
+        "UPDATE video_jobs SET video_type='tech',manually_confirmed_type=0 WHERE video_type='product-demo'",
+        [],
+    ).map_err(|error| error.to_string())?;
+    let stale_before = (Utc::now() - chrono::Duration::minutes(15)).to_rfc3339();
+    let recovered_at = Utc::now().to_rfc3339();
+    state.connect()?.execute(
+        "UPDATE video_jobs SET status='needs-attention',current_stage='interrupted',progress_message='上次制作已中断，可以重新启动',failure_reason='应用退出后未检测到继续运行的制作进程。',updated_at=?1,last_progress_at=?1 WHERE content_idea_id IS NOT NULL AND status IN ('queued','running','finalizing') AND updated_at<?2",
+        params![recovered_at,stale_before],
+    ).map_err(|error| error.to_string())?;
     let videos = list_local_videos()?;
     let mut roots = HashSet::new();
     let now = Utc::now().to_rfc3339();
@@ -349,7 +448,8 @@ pub fn sync_video_pipeline_for_state(
             continue;
         }
         let (automatic_status, stage) = stage_for(&details.deliverables);
-        let id = format!("video-job:{}", details.project_root.to_lowercase());
+        let id = content_job_for_root(state, &details.project_root)?
+            .unwrap_or_else(|| format!("video-job:{}", details.project_root.to_lowercase()));
         let previous = state
             .connect()?
             .query_row(
@@ -385,9 +485,35 @@ pub fn sync_video_pipeline_for_state(
             .filter(|item| !item.available)
             .map(|item| item.label.clone())
             .collect::<Vec<_>>();
+        let ready_count = details
+            .deliverables
+            .iter()
+            .filter(|item| item.available)
+            .count() as i64;
+        let progress_percent = if automatic_status == "complete" {
+            100
+        } else {
+            (ready_count * 25).clamp(0, 95)
+        };
+        let progress_message = if automatic_status == "complete" {
+            "四项交付已验收".to_string()
+        } else if ready_count > 0 {
+            format!("已找到 {ready_count}/4 项交付")
+        } else {
+            "等待开始制作".to_string()
+        };
         state.connect()?.execute(
-            "INSERT INTO video_jobs(id,title,video_type,status,current_stage,project_root,failure_reason,manually_confirmed_type,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET title=excluded.title,video_type=?3,status=excluded.status,current_stage=excluded.current_stage,project_root=excluded.project_root,failure_reason=excluded.failure_reason,manually_confirmed_type=?8,updated_at=excluded.updated_at",
-            params![id,video.project,video_type,automatic_status,stage,details.project_root,missing.join("、"),manually_confirmed,created_at,now],
+            "INSERT INTO video_jobs(id,title,video_type,status,current_stage,progress_percent,progress_message,last_progress_at,project_root,failure_reason,manually_confirmed_type,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(id) DO UPDATE SET title=CASE WHEN video_jobs.content_idea_id IS NOT NULL THEN COALESCE((SELECT title FROM content_ideas WHERE id=video_jobs.content_idea_id),video_jobs.title) ELSE excluded.title END,video_type=?3,
+             status=CASE WHEN video_jobs.status IN ('queued','running') THEN video_jobs.status ELSE excluded.status END,
+             current_stage=CASE WHEN video_jobs.status IN ('queued','running') THEN video_jobs.current_stage ELSE excluded.current_stage END,
+             progress_percent=CASE WHEN video_jobs.status IN ('queued','running') THEN video_jobs.progress_percent ELSE excluded.progress_percent END,
+             progress_message=CASE WHEN video_jobs.status IN ('queued','running') THEN video_jobs.progress_message ELSE excluded.progress_message END,
+             last_progress_at=CASE WHEN video_jobs.status IN ('queued','running') THEN video_jobs.last_progress_at ELSE excluded.last_progress_at END,
+             project_root=excluded.project_root,
+             failure_reason=CASE WHEN video_jobs.status IN ('queued','running') THEN video_jobs.failure_reason ELSE excluded.failure_reason END,
+             manually_confirmed_type=?11,updated_at=excluded.updated_at",
+            params![id,video.project,video_type,automatic_status,stage,progress_percent,progress_message,now,details.project_root,missing.join("、"),manually_confirmed,created_at,now],
         ).map_err(|error| error.to_string())?;
         state
             .connect()?
@@ -418,16 +544,16 @@ pub fn sync_video_pipeline_for_state(
             .iter()
             .filter(|item| item.video_type == "reasoning" && item.status == "complete")
             .count(),
-        product_samples: jobs
+        human_weakness_samples: jobs
             .iter()
-            .filter(|item| item.video_type == "product-demo" && item.status == "complete")
+            .filter(|item| item.video_type == "human-weakness" && item.status == "complete")
             .count(),
     })
 }
 
 pub fn list_video_jobs_for_state(state: &DatabaseState) -> Result<Vec<VideoJob>, String> {
     let connection = state.connect()?;
-    let mut statement = connection.prepare("SELECT id,title,video_type,status,current_stage,project_root,failure_reason,manually_confirmed_type,created_at,updated_at FROM video_jobs ORDER BY updated_at DESC,title").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT id,title,video_type,status,current_stage,progress_percent,progress_message,last_progress_at,project_root,failure_reason,manually_confirmed_type,content_idea_id,skill_name,codex_thread_id,codex_output,cli_log_path,started_at,completed_at,created_at,updated_at FROM video_jobs ORDER BY updated_at DESC,title").map_err(|error| error.to_string())?;
     let base = statement
         .query_map([], |row| {
             Ok((
@@ -436,11 +562,21 @@ pub fn list_video_jobs_for_state(state: &DatabaseState) -> Result<Vec<VideoJob>,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
+                row.get::<_, i64>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, i64>(7)?,
+                row.get::<_, Option<String>>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, String>(15)?,
+                row.get::<_, Option<String>>(16)?,
+                row.get::<_, Option<String>>(17)?,
+                row.get::<_, String>(18)?,
+                row.get::<_, String>(19)?,
             ))
         })
         .map_err(|error| error.to_string())?
@@ -453,9 +589,19 @@ pub fn list_video_jobs_for_state(state: &DatabaseState) -> Result<Vec<VideoJob>,
         video_type,
         status,
         current_stage,
+        progress_percent,
+        progress_message,
+        last_progress_at,
         project_root,
         failure_reason,
         confirmed,
+        content_idea_id,
+        skill_name,
+        codex_thread_id,
+        codex_output,
+        cli_log_path,
+        started_at,
+        completed_at,
         created_at,
         updated_at,
     ) in base
@@ -480,15 +626,45 @@ pub fn list_video_jobs_for_state(state: &DatabaseState) -> Result<Vec<VideoJob>,
             video_type,
             status,
             current_stage,
+            progress_percent,
+            progress_message,
+            last_progress_at,
             project_root,
             failure_reason,
             manually_confirmed_type: confirmed != 0,
+            content_idea_id,
+            skill_name,
+            codex_thread_id,
+            codex_output,
+            cli_log_path,
+            started_at,
+            completed_at,
             created_at,
             updated_at,
             deliverables,
         });
     }
-    Ok(jobs)
+    let content_roots = jobs
+        .iter()
+        .filter(|item| item.content_idea_id.is_some())
+        .map(|item| normalized_project_root(&item.project_root))
+        .collect::<HashSet<_>>();
+    Ok(jobs
+        .into_iter()
+        .filter(|item| {
+            item.content_idea_id.is_some()
+                || !content_roots.contains(&normalized_project_root(&item.project_root))
+        })
+        .collect())
+}
+
+pub(crate) fn video_job_by_id_for_state(
+    state: &DatabaseState,
+    id: &str,
+) -> Result<Option<VideoJob>, String> {
+    Ok(list_video_jobs_for_state(state)?
+        .into_iter()
+        .find(|job| job.id == id))
 }
 
 #[tauri::command]
@@ -508,8 +684,8 @@ pub fn save_video_job_type(
     state: tauri::State<'_, DatabaseState>,
     selection: SaveVideoType,
 ) -> Result<(), String> {
-    if !["tech", "reasoning", "product-demo"].contains(&selection.video_type.as_str()) {
-        return Err("视频类型仅支持科技探索、推理案例和产品演示。".into());
+    if !["human-weakness", "tech", "reasoning"].contains(&selection.video_type.as_str()) {
+        return Err("视频合集仅支持人性的弱点、AI未来观察局和谜题推演社。".into());
     }
     state.connect()?.execute(
         "UPDATE video_jobs SET video_type=?2,manually_confirmed_type=1,updated_at=?3 WHERE id=?1",
@@ -536,8 +712,10 @@ fn text_file_score(path: &Path, kind: &str) -> i32 {
             _ => 0,
         },
         "publish" => match name.as_str() {
+            "publish.md" => 125,
             "发布信息.md" => 120,
             "发布文案.md" => 115,
+            "publishing.md" => 115,
             "文案包.md" => 110,
             _ if name.contains("发布")
                 || name.contains("配文")
@@ -717,6 +895,7 @@ pub fn list_local_videos() -> Result<Vec<VideoItem>, String> {
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
                 .into();
             let (project, project_root) = project_for(&canonical, &canonical_root);
+            let collection = classify_video_type(&project, &project_root).to_string();
             let cover = covers
                 .entry(project_root.clone())
                 .or_insert_with(|| find_cover(&project_root))
@@ -742,6 +921,7 @@ pub fn list_local_videos() -> Result<Vec<VideoItem>, String> {
                 modified_at: modified.to_rfc3339(),
                 status: video_status(&file_name, &canonical),
                 cover_path: cover.map(|value| value.to_string_lossy().to_string()),
+                collection,
                 file_name,
             });
         }
@@ -842,6 +1022,16 @@ mod tests {
     }
 
     #[test]
+    fn windows_long_path_and_regular_path_share_one_project_key() {
+        let regular = r"C:\Users\11429\Documents\视频创作\项目A";
+        let long = r"\\?\C:\Users\11429\Documents\视频创作\项目A\";
+        assert_eq!(
+            normalized_project_root(regular),
+            normalized_project_root(long)
+        );
+    }
+
+    #[test]
     fn details_include_four_delivery_entries() {
         let videos = list_local_videos().expect("视频目录应当可以扫描");
         let item = videos.first().expect("至少应有一个本地视频");
@@ -867,6 +1057,51 @@ mod tests {
     }
 
     #[test]
+    fn spongebob_project_uses_publish_markdown_and_human_weakness_collection() {
+        let videos = list_local_videos().expect("视频目录应当可以扫描");
+        let item = videos
+            .iter()
+            .find(|item| item.project == "human-weakness-spongebob-preview")
+            .expect("应当找到海绵宝宝主题视频");
+        assert_eq!(item.collection, "human-weakness");
+        let details = video_project_details(item.path.clone()).expect("应当读取海绵宝宝项目详情");
+        let publish = details
+            .deliverables
+            .iter()
+            .find(|entry| entry.kind == "publish")
+            .expect("应当包含发布内容");
+        assert_eq!(publish.file_name.as_deref(), Some("PUBLISH.md"));
+        assert!(publish
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("越批评，他为什么越不改")));
+    }
+
+    #[test]
+    fn dated_series_video_uses_its_nearest_delivery_folder() {
+        let videos = list_local_videos().expect("视频目录应当可以扫描");
+        let item = videos
+            .iter()
+            .find(|item| {
+                item.path.contains("daily-human-weakness-series")
+                    && item.file_name.eq_ignore_ascii_case("final.mp4")
+            })
+            .expect("应当找到每日人性弱点系列成片");
+        let details = video_project_details(item.path.clone()).expect("应当读取本期作品详情");
+        assert!(details.project_root.ends_with(r"outputs\2026-08-07"));
+        let publish = details
+            .deliverables
+            .iter()
+            .find(|entry| entry.kind == "publish")
+            .expect("应当包含发布内容");
+        assert_eq!(publish.file_name.as_deref(), Some("PUBLISH.md"));
+        assert!(publish
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("你越有道理，他越不想帮")));
+    }
+
+    #[test]
     fn pipeline_has_complete_samples_for_all_three_video_types() {
         let path = std::env::temp_dir().join(format!(
             "workbench-video-pipeline-{}.sqlite3",
@@ -876,7 +1111,7 @@ mod tests {
         let summary = sync_video_pipeline_for_state(&state).unwrap();
         assert!(summary.tech_samples > 0, "缺少完整科技探索样例");
         assert!(summary.reasoning_samples > 0, "缺少完整推理样例");
-        assert!(summary.product_samples > 0, "缺少完整产品演示样例");
+        assert!(summary.human_weakness_samples > 0, "缺少完整人性的弱点样例");
         assert!(summary.complete_count >= 3);
         drop(state);
         let _ = std::fs::remove_file(path);

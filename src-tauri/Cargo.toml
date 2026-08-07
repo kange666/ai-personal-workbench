@@ -1,6 +1,6 @@
 [package]
 name = "ai-personal-workbench"
-version = "1.2.0"
+version = "1.3.0"
 description = "AI 个人工作台本地桌面程序"
 authors = ["Local User"]
 edition = "2021"
@@ -21,9 +21,10 @@ rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tauri-plugin-autostart = "2"
 base64 = "0.22"
+lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 
 [features]
 default = ["custom-protocol"]

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
-const HISTORY_SUMMARY_VERSION: &str = "10";
+const HISTORY_SUMMARY_VERSION: &str = "13";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +107,7 @@ struct ConversationFact {
     id: String,
     date: String,
     project: String,
+    source_path: String,
     archived: bool,
     requests: Vec<String>,
     outcome: String,
@@ -116,6 +117,7 @@ struct ConversationFact {
 struct GitFact {
     date: String,
     project: String,
+    repository_path: String,
     subject: String,
     file_count: i64,
     additions: i64,
@@ -531,6 +533,137 @@ fn git_importance(commit: &GitFact) -> i64 {
     kind_score + commit.file_count * 10 + commit.additions.min(2_000) / 5
 }
 
+fn is_f_drive_project(path: &str) -> bool {
+    path.trim()
+        .trim_start_matches(r"\\?\")
+        .replace('/', r"\")
+        .to_ascii_lowercase()
+        .starts_with(r"f:\")
+}
+
+fn weekly_feature_text(item: &str) -> String {
+    let mut value = item.trim().to_string();
+    if value.len() >= 13 {
+        let prefix = &value.as_bytes()[..10];
+        if prefix[4] == b'-'
+            && prefix[7] == b'-'
+            && prefix
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+        {
+            value = value
+                .chars()
+                .skip(11)
+                .collect::<String>()
+                .trim()
+                .to_string();
+        }
+    }
+    if let Some(index) = value.find("（Git") {
+        value.truncate(index);
+    }
+    value = value
+        .replace("（归档记录）", "")
+        .trim_start_matches("完成任务：")
+        .trim_start_matches("推进任务：")
+        .trim()
+        .to_string();
+    plain_summary_text(&value, 100)
+}
+
+fn weekly_feature_category(item: &str) -> &'static str {
+    let lower = item.to_lowercase();
+    if ["流程", "审批", "签章", "签名", "任务流"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        "流程审批"
+    } else if ["消息", "通知", "提醒", "路由"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        "消息与通知"
+    } else if ["报表", "报告", "文件", "附件", "预览"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        "报表与文件"
+    } else if ["用户", "部门", "权限", "角色", "登录"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        "用户与权限"
+    } else if ["地图", "设备", "传感", "报警", "nfc", "标识"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        "地图与设备"
+    } else if [
+        "页面", "表单", "列表", "详情", "弹窗", "抽屉", "布局", "样式",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
+    {
+        "页面与交互"
+    } else if ["部署", "构建", "发布", "docker", "jenkins"]
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        "构建与部署"
+    } else {
+        "其他功能"
+    }
+}
+
+fn f_drive_weekly_summary(
+    project_work: &BTreeMap<String, Vec<String>>,
+    f_drive_projects: &HashSet<String>,
+) -> Vec<String> {
+    let mut lines = vec![
+        "## F盘项目周功能汇总".to_string(),
+        String::new(),
+        "> 仅汇总 F:\\ 下项目，按本周功能成果二次归类；不展示具体日期和过程日志。".to_string(),
+        String::new(),
+    ];
+    let mut project_count = 0usize;
+    for (project, work_items) in project_work {
+        if !f_drive_projects.contains(project) {
+            continue;
+        }
+        let mut groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        let mut seen = HashSet::new();
+        for item in work_items {
+            let summary = weekly_feature_text(item);
+            if summary.is_empty() || !seen.insert(summary.clone()) {
+                continue;
+            }
+            groups
+                .entry(weekly_feature_category(&summary))
+                .or_default()
+                .push(summary);
+        }
+        if groups.is_empty() {
+            continue;
+        }
+        project_count += 1;
+        lines.push(format!("### {project}"));
+        lines.push(String::new());
+        for (category, items) in groups {
+            lines.push(format!("#### {category}"));
+            lines.extend(items.into_iter().take(6).map(|item| format!("- {item}")));
+            lines.push(String::new());
+        }
+    }
+    if project_count == 0 {
+        lines.push("- 本周没有识别到 F:\\ 下项目的功能开发成果。".to_string());
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
 fn report_period(
     report_type: &str,
     reference: NaiveDate,
@@ -708,6 +841,25 @@ fn build_content(
             .or_default()
             .push(format!("{date}{summary}{archive}"));
     }
+    let f_drive_projects = conversations
+        .iter()
+        .filter(|item| is_f_drive_project(&item.source_path))
+        .map(|item| item.project.clone())
+        .chain(
+            git_facts
+                .iter()
+                .filter(|item| is_f_drive_project(&item.repository_path))
+                .map(|item| item.project.clone()),
+        )
+        .chain(
+            tasks
+                .iter()
+                .filter(|item| is_f_drive_project(&item.project))
+                .map(|item| project_label(&item.project)),
+        )
+        .collect::<HashSet<_>>();
+    let f_drive_summary =
+        (report_type == "weekly").then(|| f_drive_weekly_summary(&project_work, &f_drive_projects));
     if project_work.is_empty() {
         lines.push("- 当前周期没有可归类的项目工作。".to_string());
     } else {
@@ -733,6 +885,10 @@ fn build_content(
         while lines.last().is_some_and(String::is_empty) {
             lines.pop();
         }
+    }
+    if let Some(summary) = f_drive_summary {
+        lines.push(String::new());
+        lines.extend(summary);
     }
     lines.extend([String::new(), "## 问题与风险".to_string(), String::new()]);
     let risks: Vec<&TaskFact> = pending
@@ -959,10 +1115,11 @@ fn generate_for_date(
         let mut statement = connection
             .prepare(
                 "SELECT title,project,status,note FROM tasks
-             WHERE (planned_date BETWEEN ?1 AND ?2)
+             WHERE status NOT IN ('draft','cancelled')
+               AND ((planned_date BETWEEN ?1 AND ?2)
                 OR (week_start BETWEEN ?1 AND ?2)
                 OR (start_date <= ?2 AND end_date >= ?1)
-                OR (substr(completed_at,1,10) BETWEEN ?1 AND ?2)
+                OR (substr(completed_at,1,10) BETWEEN ?1 AND ?2))
              ORDER BY priority,status,updated_at DESC",
             )
             .map_err(|error| error.to_string())?;
@@ -993,7 +1150,7 @@ fn generate_for_date(
     let (conversations, message_count) = {
         let mut statement = connection.prepare(
             "SELECT c.id,COALESCE(NULLIF(c.title,''),'未命名会话'),COALESCE(NULLIF(c.project_override,''),COALESCE(NULLIF(c.cwd,''),'未归类项目')),
-               c.archived,date(m.event_time,'localtime'),m.role,m.content
+               COALESCE(c.cwd,''),c.archived,date(m.event_time,'localtime'),m.role,m.content
              FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
              WHERE m.event_time IS NOT NULL AND date(m.event_time,'localtime') BETWEEN ?1 AND ?2
              ORDER BY date(m.event_time,'localtime'),m.event_time,m.source_index",
@@ -1004,10 +1161,11 @@ fn generate_for_date(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)? != 0,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)? != 0,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
@@ -1015,7 +1173,7 @@ fn generate_for_date(
         let mut indexes: HashMap<String, usize> = HashMap::new();
         let mut messages = 0i64;
         for row in rows {
-            let (id, _title, project, archived, date, role, content) =
+            let (id, _title, project, source_path, archived, date, role, content) =
                 row.map_err(|error| error.to_string())?;
             messages += 1;
             let key = format!("{id}\n{date}");
@@ -1024,6 +1182,7 @@ fn generate_for_date(
                     id: id.clone(),
                     date: date.clone(),
                     project: project_label(&project),
+                    source_path: source_path.clone(),
                     archived,
                     requests: Vec::new(),
                     outcome: String::new(),
@@ -1061,7 +1220,7 @@ fn generate_for_date(
     let git_facts = {
         let mut statement = connection
             .prepare(
-                "SELECT date(gc.committed_at,'localtime'),gr.name,gc.subject,gc.file_count,gc.additions,gc.deletions
+                "SELECT date(gc.committed_at,'localtime'),gr.name,gr.path,gc.subject,gc.file_count,gc.additions,gc.deletions
                  FROM git_commits gc JOIN git_repositories gr ON gr.path=gc.repository_path
                  WHERE date(gc.committed_at,'localtime') BETWEEN ?1 AND ?2
                    AND (gr.user_name='' OR lower(trim(gc.author_name))=lower(trim(gr.user_name)))
@@ -1073,10 +1232,11 @@ fn generate_for_date(
                 Ok(GitFact {
                     date: row.get(0)?,
                     project: row.get(1)?,
-                    subject: row.get(2)?,
-                    file_count: row.get(3)?,
-                    additions: row.get(4)?,
-                    deletions: row.get(5)?,
+                    repository_path: row.get(2)?,
+                    subject: row.get(3)?,
+                    file_count: row.get(4)?,
+                    additions: row.get(5)?,
+                    deletions: row.get(6)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -1784,6 +1944,7 @@ mod tests {
                 id: "conversation-1".to_string(),
                 date: date.to_string(),
                 project: "APP".to_string(),
+                source_path: r"F:\TB-project\APP".to_string(),
                 archived: true,
                 requests: vec!["开发安全会议页面".to_string()],
                 outcome: "列表和详情已完成".to_string(),
@@ -1817,6 +1978,7 @@ mod tests {
                 id: "conversation-1".to_string(),
                 date: "2026-07-31".to_string(),
                 project: "client".to_string(),
+                source_path: r"F:\TB-project\client".to_string(),
                 archived: false,
                 requests: vec!["开发案例分享模块".to_string()],
                 outcome: "已完成案例分享列表和详情功能".to_string(),
@@ -1825,6 +1987,7 @@ mod tests {
                 GitFact {
                     date: "2026-07-31".to_string(),
                     project: "client".to_string(),
+                    repository_path: r"F:\TB-project\client".to_string(),
                     subject: "feat(safe/caseShare): 新增案例分享管理模块".to_string(),
                     file_count: 6,
                     additions: 1815,
@@ -1833,6 +1996,7 @@ mod tests {
                 GitFact {
                     date: "2026-07-31".to_string(),
                     project: "client".to_string(),
+                    repository_path: r"F:\TB-project\client".to_string(),
                     subject: "refactor(e2e): 移除自动化测试文件".to_string(),
                     file_count: 33,
                     additions: 62,
@@ -1849,6 +2013,18 @@ mod tests {
         );
         assert!(content.contains("新增案例分享管理模块（Git，6 个文件，+1815/-10）"));
         assert!(!content.contains("自动化测试文件"));
+        let summary = content
+            .split("## F盘项目周功能汇总")
+            .nth(1)
+            .expect("周报应包含 F 盘项目汇总")
+            .split("## 问题与风险")
+            .next()
+            .unwrap();
+        assert!(summary.contains("### client"));
+        assert!(summary.contains("#### 其他功能"));
+        assert!(summary.contains("新增案例分享管理模块"));
+        assert!(!summary.contains("2026-07-31"));
+        assert!(!summary.contains("+1815/-10"));
     }
 
     #[test]
@@ -1869,6 +2045,7 @@ mod tests {
                 id: "conversation".to_string(),
                 date: "2026-08-03".to_string(),
                 project: "client".to_string(),
+                source_path: r"F:\TB-project\client".to_string(),
                 archived: false,
                 requests: vec![request.to_string()],
                 outcome: outcome.to_string(),
@@ -1896,6 +2073,7 @@ mod tests {
             id: "conversation".to_string(),
             date: "2026-08-03".to_string(),
             project: "个人工作台".to_string(),
+            source_path: r"C:\Users\11429\Documents\个人工作台".to_string(),
             archived: false,
             requests: vec!["优化报告".to_string()],
             outcome: "核心筛选和作者归属的 10 项后端测试已全部通过；已提升历史报告生成版本"

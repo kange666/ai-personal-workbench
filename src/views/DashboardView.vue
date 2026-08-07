@@ -7,7 +7,7 @@ import ActivityTrendChart from "../components/ActivityTrendChart.vue";
 import WorkTimeDrawer from "../components/WorkTimeDrawer.vue";
 import { useWorkbenchStore } from "../stores/workbench";
 import type { WorkTask } from "../types/workbench";
-import { getDailyActivity, getHistoryCoverage, getTokenTrend, getWorkSummary, isTauriRuntime, listReports, listTestRuns, type DailyActivity, type HistoryCoverage, type ReportRecord, type TestRun, type TokenTrendPoint, type WorkSummary } from "../services/backend";
+import { getDailyActivity, getHistoryCoverage, getTokenTrend, getWorkSummary, isTauriRuntime, listNotifications, listReports, listTestRuns, type DailyActivity, type HistoryCoverage, type ReportRecord, type TestRun, type TokenTrendPoint, type WorkSummary, type WorkbenchNotification } from "../services/backend";
 
 defineEmits<{ "new-task": [] }>();
 const store = useWorkbenchStore();
@@ -22,6 +22,7 @@ const activityTrend = ref<DailyActivity[]>([]);
 const reports = ref<ReportRecord[]>([]);
 const recentTests = ref<TestRun[]>([]);
 const history = ref<HistoryCoverage | null>(null);
+const completionMessages = ref<WorkbenchNotification[]>([]);
 const emptyWorkSummary = (): WorkSummary => ({ startDate: todayIso, endDate: todayIso, totalMinutes: 0, estimatedMinutes: 0, manualMinutes: 0, hasManualCorrections: false, byProject: [], byType: [], daily: [] });
 const todayWork = ref<WorkSummary>(emptyWorkSummary());
 const weekWork = ref<WorkSummary>(emptyWorkSummary());
@@ -47,6 +48,8 @@ function compactToken(value: number) {
 }
 function compactHours(value: number) { const hours = Math.floor(value / 60); const minutes = value % 60; return `${hours ? `${hours}h` : ""}${minutes ? `${minutes}m` : !hours ? "0m" : ""}`; }
 function openSearch() { window.dispatchEvent(new CustomEvent("open-workbench-search")); }
+function openCompletionMessage(item:WorkbenchNotification) { window.dispatchEvent(new CustomEvent("open-workbench-notification", { detail:item })); }
+function notificationTime(value:string) { const date=new Date(value); return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("zh-CN", {month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(date); }
 function toggleFocus() {
   focusing.value = !focusing.value;
   window.clearInterval(focusTimer);
@@ -58,7 +61,7 @@ onMounted(async () => {
   if (!isTauriRuntime()) return;
   try {
     const activityStart = new Date(); activityStart.setDate(activityStart.getDate() - 6);
-    [tokenTrend.value, activityTrend.value, reports.value, history.value, recentTests.value] = await Promise.all([getTokenTrend(7), getDailyActivity(activityStart.toLocaleDateString("sv-SE"), todayIso), listReports(), getHistoryCoverage(), listTestRuns()]);
+    [tokenTrend.value, activityTrend.value, reports.value, history.value, recentTests.value, completionMessages.value] = await Promise.all([getTokenTrend(7), getDailyActivity(activityStart.toLocaleDateString("sv-SE"), todayIso), listReports(), getHistoryCoverage(), listTestRuns(), listNotifications(5)]);
     const todayDate = new Date(); const monday = new Date(todayDate); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
     weekWork.value = await getWorkSummary(monday.toLocaleDateString("sv-SE"), todayIso, true);
     todayWork.value = await getWorkSummary(todayIso, todayIso, false);
@@ -73,6 +76,13 @@ onBeforeUnmount(() => window.clearInterval(focusTimer));
     <header class="page-header"><div><h1>工作台</h1><p>汇总今天最重要的工作与提醒</p></div><div><button class="button secondary" @click="openSearch">⌕ 搜索</button><button class="button primary" @click="$emit('new-task')">＋ 新增任务</button></div></header>
     <section class="welcome-strip"><div><b>早上好，今天有 {{ store.pendingCount }} 项任务需要处理</b><p>工作数据已保存在本机，逾期任务与 AI 草稿仍需人工确认。</p></div><div><RouterLink class="button primary link-button" to="/tasks">查看今日计划</RouterLink><button class="button secondary" @click="toggleFocus">{{ focusing ? `暂停 ${focusText}` : '开始专注' }}</button></div></section>
     <section class="metric-grid"><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:todayIso,end:todayIso,title:'今日工时明细'}"><span>今日工时</span><b>{{ compactHours(todayWork.totalMinutes) }}</b><p>{{ todayWork.hasManualCorrections ? '手工修正优先' : '估算工时' }} · 查看明细</p></article><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:weekWork.startDate,end:weekWork.endDate,title:'本周工时明细'}"><span>本周工时</span><b>{{ compactHours(weekWork.totalMinutes) }}</b><p>{{ weekWork.byProject.length }} 个项目 · 查看分布</p></article><article class="clickable-card" tabindex="0" @click="router.push('/tasks')"><span>今日任务</span><b>{{ store.todayTasks.length }}<small> 项</small></b><p class="success-text">● 已完成 {{ store.todayTasks.filter(t => t.status === 'done').length }} 项</p></article><article class="clickable-card" tabindex="0" @click="router.push('/tokens')"><span>今日 Token</span><b>{{ compactToken(todayToken) }}</b><p>只反映 AI 使用量</p></article></section>
+    <section class="dashboard-notifications panel">
+      <div class="panel-head"><div><h2>Codex 完成消息</h2><p>{{ completionMessages.filter(item=>!item.isRead).length }} 条未读 · 点击查看完成明细与完整输出</p></div></div>
+      <div class="dashboard-notification-list">
+        <button v-for="item in completionMessages.slice(0,3)" :key="item.id" :class="{unread:!item.isRead}" @click="openCompletionMessage(item)"><i></i><span><b>{{ item.title.replace(/^Codex 任务已完成：/, '') }}</b><small>{{ item.body }}</small></span><em>{{ notificationTime(item.createdAt) }}</em></button>
+        <p v-if="!completionMessages.length" class="panel-empty">暂无完成消息。Codex 对话任务结束后会自动显示在这里。</p>
+      </div>
+    </section>
     <section class="dashboard-grid">
       <article class="panel today-panel dashboard-task-panel"><div class="panel-head"><div><h2>今日任务与本周任务</h2><p>本周完成 {{ store.weekTasks.filter(t=>t.status==='done').length }}/{{ store.weekTasks.length }} · {{ weekTaskRate }}%</p></div><RouterLink to="/tasks">查看全部 →</RouterLink></div><div class="week-task-progress"><i :style="{width:`${weekTaskRate}%`}"></i></div><div class="dashboard-task-columns"><section><h3>今天 · {{ todayLabel }}</h3><TaskRow v-for="task in visibleTodayTasks" :key="task.id" :task="task" @toggle="store.toggleTask" @confirm="store.confirmTask" @postpone="store.postponeTask" @edit="selectedTask = $event" /><p v-if="!visibleTodayTasks.length">今天没有任务。</p></section><section><h3>本周</h3><TaskRow v-for="task in visibleWeekTasks" :key="task.id" :task="task" @toggle="store.toggleTask" @confirm="store.confirmTask" @postpone="store.postponeTask" @edit="selectedTask = $event" /><p v-if="!visibleWeekTasks.length">本周没有任务。</p></section></div></article>
       <article class="panel project-panel"><div class="panel-head"><div><h2>本周项目投入</h2><p>{{ projectProgress.length }} 个活跃项目 · 工时为估算/修正口径</p></div><RouterLink to="/work-records">工作记录 →</RouterLink></div><div v-for="item in projectProgress" :key="item.name" class="project-progress"><span><b>{{ item.name }}</b><em>{{ compactHours(item.minutes) }} · {{ item.progress }}%</em></span><div><i :style="{ width: `${item.progress}%` }"></i></div></div><p v-if="!projectProgress.length" class="panel-empty">本周暂无可估算的本地活动。</p></article>
@@ -89,4 +99,6 @@ onBeforeUnmount(() => window.clearInterval(focusTimer));
 <style scoped>
 .dashboard-task-panel{overflow:hidden}.week-task-progress{height:3px;background:var(--surface-2)}.week-task-progress i{display:block;height:100%;background:var(--success)}.dashboard-task-columns{display:grid;grid-template-columns:1fr 1fr;height:180px}.dashboard-task-columns>section{min-width:0;border-right:1px solid var(--line);overflow:hidden}.dashboard-task-columns>section:last-child{border-right:0}.dashboard-task-columns h3{height:28px;margin:0;padding:8px 14px 0;color:var(--muted);font-size:10px}.dashboard-task-columns p{padding:12px 14px;color:var(--muted)}
 .dashboard-result-columns{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 16px 14px}.dashboard-result-columns>a{min-height:130px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:10px;color:inherit;text-decoration:none;display:flex;flex-direction:column;gap:6px}.dashboard-result-columns b{color:var(--primary)}.dashboard-result-columns span{font-size:10px;line-height:1.45}.dashboard-result-columns em{font-style:normal;color:var(--muted);font-size:10px}.dashboard-risk{cursor:pointer}.dashboard-risk.test>i{background:var(--primary)}
+.dashboard-notifications{margin-bottom:12px;overflow:hidden}.dashboard-notifications .panel-head{height:54px}.dashboard-notification-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--line)}.dashboard-notification-list>button{min-width:0;min-height:76px;border:0;border-right:1px solid var(--line);background:transparent;color:inherit;padding:11px 14px;display:grid;grid-template-columns:8px minmax(0,1fr);gap:9px;text-align:left;position:relative}.dashboard-notification-list>button:last-child{border-right:0}.dashboard-notification-list>button:hover{background:var(--primary-soft)}.dashboard-notification-list>button>i{width:7px;height:7px;margin-top:5px;border-radius:50%;background:var(--line)}.dashboard-notification-list>button.unread>i{background:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}.dashboard-notification-list span{min-width:0;display:flex;flex-direction:column;gap:6px}.dashboard-notification-list b,.dashboard-notification-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dashboard-notification-list small{color:var(--muted)}.dashboard-notification-list em{position:absolute;right:12px;bottom:8px;color:var(--muted);font-size:9px;font-style:normal}.dashboard-notification-list>.panel-empty{grid-column:1/4;margin:0;padding:22px 16px}
+@media(max-width:1050px){.dashboard-notification-list{grid-template-columns:1fr}.dashboard-notification-list>button{border-right:0;border-bottom:1px solid var(--line)}}
 </style>
