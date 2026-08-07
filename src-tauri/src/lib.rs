@@ -307,21 +307,33 @@ pub fn run() {
                 if let Err(error) = notifications::sync_codex_notifications_for_state(&history_state) {
                     eprintln!("启动时同步 Codex 完成提醒失败：{error}");
                 }
-                if let Err(error) = email::process_due_deliveries_for_state(&history_state) {
-                    eprintln!("启动时处理 Codex 完成邮件失败：{error}");
-                }
                 email::sync_tray_menu(&history_app, &history_state);
             });
             let notification_state = state.clone();
-            let notification_app = app.handle().clone();
             std::thread::spawn(move || loop {
                 if let Err(error) = notifications::sync_codex_notifications_for_state(&notification_state) {
                     eprintln!("同步 Codex 完成提醒失败：{error}");
                 }
-                if let Err(error) = email::process_due_deliveries_for_state(&notification_state) {
-                    eprintln!("处理 Codex 完成邮件失败：{error}");
+                std::thread::sleep(std::time::Duration::from_secs(15));
+            });
+            let email_state = state.clone();
+            let email_app = app.handle().clone();
+            std::thread::spawn(move || loop {
+                let task_state = email_state.clone();
+                match tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(
+                    move || email::process_due_deliveries_for_state(&task_state),
+                )) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        email::record_worker_error_for_state(&email_state, &error);
+                        eprintln!("处理 Codex 完成邮件失败：{error}");
+                    }
+                    Err(error) => {
+                        email::record_worker_error_for_state(&email_state, &error.to_string());
+                        eprintln!("邮件后台任务异常结束：{error}");
+                    }
                 }
-                email::sync_tray_menu(&notification_app, &notification_state);
+                email::sync_tray_menu(&email_app, &email_state);
                 std::thread::sleep(std::time::Duration::from_secs(15));
             });
             let maintenance_state = state.clone();

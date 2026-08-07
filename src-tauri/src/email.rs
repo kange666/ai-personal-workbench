@@ -220,13 +220,6 @@ pub fn status_for_state(state: &DatabaseState) -> EmailNotificationStatus {
 pub fn initialize_for_state(state: &DatabaseState) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     set_meta(state, "codex_email_runtime_started_at", &now)?;
-    state
-        .connect()?
-        .execute(
-            "UPDATE email_deliveries SET status='skipped_disabled',last_error='工作台上次退出前尚未开始发送，本次启动不补发',updated_at=?1 WHERE status='pending'",
-            [&now],
-        )
-        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -420,7 +413,7 @@ fn due_deliveries(state: &DatabaseState) -> Result<Vec<DeliveryMessage>, String>
     let now = Utc::now().to_rfc3339();
     let mut statement = connection
         .prepare(
-            "SELECT d.notification_id,n.title,n.body,n.output,COALESCE(n.source_id,''),COALESCE((SELECT project FROM conversations c WHERE c.id=n.source_id LIMIT 1),''),n.created_at,d.attempts FROM email_deliveries d JOIN notifications n ON n.id=d.notification_id WHERE d.status IN ('pending','retrying') AND (d.next_attempt_at IS NULL OR d.next_attempt_at<=?1) ORDER BY d.created_at LIMIT 5",
+            "SELECT d.notification_id,n.title,n.body,n.output,COALESCE(n.source_id,''),COALESCE((SELECT project_override FROM conversations c WHERE c.id=n.source_id LIMIT 1),''),n.created_at,d.attempts FROM email_deliveries d JOIN notifications n ON n.id=d.notification_id WHERE d.status IN ('pending','retrying') AND (d.next_attempt_at IS NULL OR d.next_attempt_at<=?1) ORDER BY d.created_at LIMIT 5",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
@@ -494,6 +487,10 @@ pub fn process_due_deliveries_for_state(state: &DatabaseState) -> Result<usize, 
         }
     }
     Ok(sent)
+}
+
+pub fn record_worker_error_for_state(state: &DatabaseState, error: &str) {
+    let _ = set_meta(state, "codex_email_last_error", &friendly_send_error(error));
 }
 
 pub fn sync_tray_menu(app: &AppHandle, state: &DatabaseState) {
@@ -813,6 +810,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "skipped_disabled");
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_preserves_eligible_pending_deliveries() {
+        let (directory, state) = test_state("startup-pending");
+        let connection = state.connect().unwrap();
+        connection.execute("INSERT INTO notifications(id,kind,title,created_at) VALUES('codex-complete-pending','codex_complete','测试','2026-08-07T10:00:00Z')", []).unwrap();
+        connection.execute("INSERT INTO email_deliveries(notification_id,status,attempts,next_attempt_at,created_at,updated_at) VALUES('codex-complete-pending','pending',0,NULL,'2026-08-07T10:00:00Z','2026-08-07T10:00:00Z')", []).unwrap();
+        drop(connection);
+
+        initialize_for_state(&state).unwrap();
+        let status: String = state
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM email_deliveries WHERE notification_id='codex-complete-pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn due_delivery_reads_project_override_from_conversation() {
+        let (directory, state) = test_state("project-override");
+        let connection = state.connect().unwrap();
+        connection.execute("INSERT INTO conversations(id,source_file,title,project_override,imported_at) VALUES('session-1','session.jsonl','会话标题','个人工作台','2026-08-07T10:00:00Z')", []).unwrap();
+        connection.execute("INSERT INTO notifications(id,kind,title,source_id,created_at) VALUES('codex-complete-project','codex_complete','测试','session-1','2026-08-07T10:00:00Z')", []).unwrap();
+        connection.execute("INSERT INTO email_deliveries(notification_id,status,attempts,next_attempt_at,created_at,updated_at) VALUES('codex-complete-project','pending',0,NULL,'2026-08-07T10:00:00Z','2026-08-07T10:00:00Z')", []).unwrap();
+        drop(connection);
+
+        let deliveries = due_deliveries(&state).unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].project, "个人工作台");
 
         std::fs::remove_dir_all(directory).unwrap();
     }
