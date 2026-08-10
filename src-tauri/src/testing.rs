@@ -1,9 +1,11 @@
-use crate::database::DatabaseState;
+use crate::{codex_video, database::DatabaseState};
 use chrono::{DateTime, Local, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::SystemTime;
@@ -64,6 +66,17 @@ pub struct TestRun {
     pub source_report_path: Option<String>,
     pub output_excerpt: String,
     pub error_message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRecommendation {
+    menu_id: String,
+    project: String,
+    menu_name: String,
+    changed_files: Vec<String>,
+    reason: String,
+    recommended_mode: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -339,6 +352,110 @@ pub fn list_test_menus(state: tauri::State<'_, DatabaseState>) -> Result<Vec<Tes
     let mut menus = client_menus(&state)?;
     menus.extend(app_menus(&state)?);
     Ok(menus)
+}
+
+fn git_changed_paths(root: &Path) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for args in [
+        vec!["status", "--porcelain=v1", "--untracked-files=all"],
+        vec!["diff", "--name-only", "HEAD~1..HEAD"],
+    ] {
+        let mut command = codex_video::hidden_command(Path::new("git"));
+        command.current_dir(root).args(args);
+        let Ok(output) = command.output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let value = if line.len() > 3 && line.as_bytes().get(2) == Some(&b' ') {
+                &line[3..]
+            } else {
+                line
+            };
+            let path = value
+                .rsplit(" -> ")
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .replace('\\', "/");
+            if !path.is_empty() {
+                paths.insert(path);
+            }
+        }
+    }
+    paths
+}
+
+fn menu_changed_files(menu: &TestMenu, root: &Path, changes: &BTreeSet<String>) -> Vec<String> {
+    let source = menu.source_path.replace('\\', "/").to_lowercase();
+    let parent = source
+        .rsplit_once('/')
+        .map(|value| value.0)
+        .unwrap_or(&source);
+    let source_content = fs::read_to_string(root.join(&menu.source_path))
+        .unwrap_or_default()
+        .to_lowercase();
+    changes
+        .iter()
+        .filter(|changed| {
+            let normalized = changed.to_lowercase();
+            normalized == source
+                || normalized.starts_with(&format!("{parent}/"))
+                || normalized
+                    .rsplit('/')
+                    .next()
+                    .and_then(|file| file.split('.').next())
+                    .is_some_and(|stem| stem.len() > 3 && source_content.contains(stem))
+        })
+        .cloned()
+        .collect()
+}
+
+#[tauri::command]
+pub fn recommend_tests_from_git(
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<Vec<TestRecommendation>, String> {
+    let client_changes = git_changed_paths(&client_root());
+    let app_changes = git_changed_paths(&app_root());
+    let menus = client_menus(&state)?.into_iter().chain(app_menus(&state)?);
+    let mut recommendations = Vec::new();
+    for menu in menus {
+        let (root, changes) = if menu.project == "client" {
+            (client_root(), &client_changes)
+        } else {
+            (app_root(), &app_changes)
+        };
+        let changed_files = menu_changed_files(&menu, &root, changes);
+        if changed_files.is_empty() {
+            continue;
+        }
+        recommendations.push(TestRecommendation {
+            menu_id: menu.id,
+            project: menu.project.clone(),
+            menu_name: menu.name,
+            reason: format!(
+                "检测到 {} 个与该页面直接相关的 Git 变更",
+                changed_files.len()
+            ),
+            recommended_mode: if menu.project == "APP" {
+                "source-style"
+            } else {
+                "mock"
+            }
+            .into(),
+            changed_files,
+        });
+    }
+    recommendations.sort_by(|a, b| {
+        b.changed_files
+            .len()
+            .cmp(&a.changed_files.len())
+            .then(a.menu_name.cmp(&b.menu_name))
+    });
+    Ok(recommendations)
 }
 
 #[tauri::command]

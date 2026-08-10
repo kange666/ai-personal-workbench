@@ -6,6 +6,52 @@ export interface DatabaseHealth {
   schemaVersion: number;
 }
 
+export interface BackupEntry {
+  path: string;
+  fileName: string;
+  kind: "daily" | "manual" | "export" | "pre-restore" | "migration";
+  createdAt: string;
+  sizeBytes: number;
+}
+
+export interface BackupStatus {
+  databasePath: string;
+  backupDirectory: string;
+  backups: BackupEntry[];
+}
+
+export interface UpdateStatus {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  publishedAt: string;
+  releaseUrl: string;
+  installerUrl: string;
+  portableUrl: string;
+  checkedAt: string;
+  message: string;
+}
+
+export interface QuickCapture {
+  id: string;
+  kind: "note" | "idea" | "url";
+  content: string;
+  sourceUrl: string;
+  status: "inbox" | "archived";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DailyCheckin {
+  date: string;
+  energy?: number;
+  mood: string;
+  exerciseMinutes: number;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CodexScanSummary {
   filesScanned: number;
   normalFilesScanned: number;
@@ -39,6 +85,10 @@ export interface CodexQuotaSnapshot {
   planType?: string;
   primary?: CodexQuotaWindow;
   secondary?: CodexQuotaWindow;
+  sourceFile?: string;
+  sourceModifiedAt?: string;
+  freshness: "fresh" | "recent" | "stale" | "";
+  selectionReason: string;
 }
 
 export interface CodexCliStatus {
@@ -51,7 +101,7 @@ export interface CodexCliStatus {
 
 export interface WorkbenchNotification {
   id: string;
-  kind: "codex_complete";
+  kind: "codex_complete" | "codex_task" | "tapd_item";
   title: string;
   body: string;
   output: string;
@@ -60,6 +110,9 @@ export interface WorkbenchNotification {
   isRead: boolean;
   createdAt: string;
   readAt?: string;
+  reviewStatus: "pending" | "accepted" | "follow_up";
+  reviewNote: string;
+  reviewedAt?: string;
 }
 
 export interface NotificationSyncSummary {
@@ -170,6 +223,7 @@ export interface TapdSyncSummary {
   tasks: number;
   stories: number;
   total: number;
+  notificationsCreated: number;
   warnings: string[];
   syncedAt: string;
 }
@@ -182,6 +236,14 @@ export interface TapdCodexJob {
   threadId?: string;
   output: string;
   errorMessage: string;
+  baselineHead: string;
+  baselineWorktree: string;
+  resultHead: string;
+  changedFiles: string[];
+  testSummary: string;
+  reviewStatus: "pending" | "accepted" | "changes_requested";
+  reviewNote: string;
+  reviewedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -311,6 +373,8 @@ export interface DailyActivity {
   testsPassed: number;
   knowledgeCount: number;
   taskActivityCount: number;
+  quickCaptureCount: number;
+  completedVideoCount: number;
 }
 
 export interface WorkspaceSearchResult {
@@ -668,6 +732,98 @@ export async function databaseHealth(): Promise<DatabaseHealth> {
   return invoke<DatabaseHealth>("database_health");
 }
 
+export interface VideoPublishRecord {
+  id: string;
+  videoJobId: string;
+  title: string;
+  videoType: VideoJob["videoType"];
+  platform: string;
+  status: "ready" | "published";
+  publishUrl: string;
+  publishedAt?: string;
+  views: number;
+  likes: number;
+  comments: number;
+  favorites: number;
+  notes: string;
+  updatedAt: string;
+}
+
+export type SaveVideoPublishRecord = Omit<VideoPublishRecord, "id" | "title" | "videoType" | "updatedAt">;
+
+export interface KnowledgeVersion {
+  id: string;
+  knowledgeId: string;
+  versionNumber: number;
+  title: string;
+  content: string;
+  tags: string;
+  changeSource: "manual_edit" | "auto_sync";
+  createdAt: string;
+}
+
+export interface KnowledgeCodexJob {
+  id: string;
+  knowledgeId: string;
+  repositoryPath: string;
+  instruction: string;
+  status: "running" | "completed" | "failed";
+  threadId?: string;
+  output: string;
+  errorMessage: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TestRecommendation {
+  menuId: string;
+  project: string;
+  menuName: string;
+  changedFiles: string[];
+  reason: string;
+  recommendedMode: TestRun["mode"];
+}
+
+export async function getBackupStatus(): Promise<BackupStatus> {
+  return invoke<BackupStatus>("backup_status");
+}
+
+export async function createDatabaseBackup(): Promise<BackupEntry> {
+  return invoke<BackupEntry>("create_database_backup");
+}
+
+export async function exportDatabaseBackup(): Promise<BackupEntry> {
+  return invoke<BackupEntry>("export_database_backup");
+}
+
+export async function restoreDatabaseBackup(path: string): Promise<BackupStatus> {
+  return invoke<BackupStatus>("restore_database_backup", { path });
+}
+
+export async function checkForUpdates(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("check_for_updates");
+}
+
+export async function listQuickCaptures(includeArchived = false): Promise<QuickCapture[]> {
+  return invoke<QuickCapture[]>("list_quick_captures", { includeArchived });
+}
+
+export async function saveQuickCapture(input: Pick<QuickCapture,"kind"|"content"|"sourceUrl">): Promise<QuickCapture> {
+  return invoke<QuickCapture>("save_quick_capture", { input });
+}
+
+export async function archiveQuickCapture(id: string): Promise<void> {
+  await invoke("archive_quick_capture", { id });
+}
+
+export async function getDailyCheckin(date: string): Promise<DailyCheckin | null> {
+  return invoke<DailyCheckin | null>("get_daily_checkin", { date });
+}
+
+export async function saveDailyCheckin(checkin: DailyCheckin): Promise<DailyCheckin> {
+  return invoke<DailyCheckin>("save_daily_checkin", { checkin });
+}
+
 export async function scanCodexSessions(): Promise<CodexScanSummary> {
   return invoke<CodexScanSummary>("scan_codex_sessions");
 }
@@ -694,6 +850,10 @@ export async function markNotificationRead(id: string): Promise<void> {
 
 export async function markAllNotificationsRead(): Promise<void> {
   await invoke("mark_all_notifications_read");
+}
+
+export async function reviewNotification(id: string, decision: "accepted" | "follow_up", note = ""): Promise<void> {
+  await invoke("review_notification", { id, decision, note });
 }
 
 export async function getEmailNotificationStatus(): Promise<EmailNotificationStatus> {
@@ -788,8 +948,20 @@ export async function listTapdCodexJobs(): Promise<TapdCodexJob[]> {
   return invoke<TapdCodexJob[]>("list_tapd_codex_jobs");
 }
 
-export async function startTapdCodexJob(itemId: string, repositoryPath: string): Promise<TapdCodexJob> {
-  return invoke<TapdCodexJob>("start_tapd_codex_job", { itemId, repositoryPath });
+export async function startTapdCodexJob(itemId: string, repositoryPath: string, additionalNote = ""): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("start_tapd_codex_job", { itemId, repositoryPath, additionalNote });
+}
+
+export async function continueTapdCodexJob(id: string, note: string): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("continue_tapd_codex_job", { id, note });
+}
+
+export async function runTapdCodexJobTests(id: string): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("run_tapd_codex_job_tests", { id });
+}
+
+export async function reviewTapdCodexJob(id: string, decision: "accepted" | "changes_requested", note = ""): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("review_tapd_codex_job", { review: { id, decision, note } });
 }
 
 export async function getTokenSummary(): Promise<TokenSummary> {
@@ -884,6 +1056,18 @@ export async function deleteKnowledge(id: string): Promise<void> {
   await invoke("delete_knowledge", { id });
 }
 
+export async function listKnowledgeVersions(knowledgeId: string): Promise<KnowledgeVersion[]> {
+  return invoke<KnowledgeVersion[]>("list_knowledge_versions", { knowledgeId });
+}
+
+export async function listKnowledgeCodexJobs(knowledgeId?: string): Promise<KnowledgeCodexJob[]> {
+  return invoke<KnowledgeCodexJob[]>("list_knowledge_codex_jobs", { knowledgeId });
+}
+
+export async function startKnowledgeCodexJob(knowledgeId: string, repositoryPath: string, instruction = ""): Promise<KnowledgeCodexJob> {
+  return invoke<KnowledgeCodexJob>("start_knowledge_codex_job", { knowledgeId, repositoryPath, instruction });
+}
+
 export async function getAiStatus(): Promise<AiStatus> {
   return invoke<AiStatus>("ai_status");
 }
@@ -910,6 +1094,10 @@ export async function askKnowledge(question: string): Promise<KnowledgeAnswer> {
 
 export async function listTestMenus(): Promise<TestMenu[]> {
   return invoke<TestMenu[]>("list_test_menus");
+}
+
+export async function recommendTestsFromGit(): Promise<TestRecommendation[]> {
+  return invoke<TestRecommendation[]>("recommend_tests_from_git");
 }
 
 export async function listTestRuns(menuId?: string): Promise<TestRun[]> {
@@ -986,6 +1174,14 @@ export async function listVideoJobs(): Promise<VideoJob[]> {
 
 export async function saveVideoJobType(id: string, videoType: VideoJob["videoType"]): Promise<void> {
   await invoke("save_video_job_type", { selection: { id, videoType } });
+}
+
+export async function listVideoPublishRecords(): Promise<VideoPublishRecord[]> {
+  return invoke<VideoPublishRecord[]>("list_video_publish_records");
+}
+
+export async function saveVideoPublishRecord(record: SaveVideoPublishRecord): Promise<void> {
+  await invoke("save_video_publish_record", { record });
 }
 
 export async function getContentVideoJob(ideaId: string): Promise<VideoJob | null> {

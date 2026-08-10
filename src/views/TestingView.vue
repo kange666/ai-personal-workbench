@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
-import { ensureWeeklyAudit, isTauriRuntime, listFeatureParity, listTestMenus, listTestRuns, listToolchains, listWeeklyAudits, readTestReport, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestRun, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
+import { ensureWeeklyAudit, isTauriRuntime, listFeatureParity, listTestMenus, listTestRuns, listToolchains, listWeeklyAudits, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestRecommendation, type TestRun, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
 
 const demoMenus: TestMenu[] = [
@@ -13,6 +13,7 @@ const store = useWorkbenchStore();
 const route = useRoute();
 const menus = ref<TestMenu[]>(isTauriRuntime() ? [] : demoMenus);
 const runs = ref<TestRun[]>(isTauriRuntime() ? [] : demoRuns);
+const recommendations = ref<TestRecommendation[]>([]);
 const parities = ref<FeatureParity[]>([]);
 const activeSection = ref<"menus" | "parity" | "audit">("menus");
 const selectedParity = ref<FeatureParity | null>(null);
@@ -131,12 +132,18 @@ function openConfig(menu: TestMenu) {
   mode.value = menu.project === "APP" ? "source-style" : "mock";
   account.value = ""; token.value = ""; useEnvironmentToken.value = true; error.value = ""; message.value = "";
 }
+function openRecommendation(item:TestRecommendation) {
+  const menu=menus.value.find(value=>value.id===item.menuId);
+  if (!menu) return;
+  openConfig(menu);
+  mode.value=item.recommendedMode;
+}
 async function refresh() {
   if (!isTauriRuntime()) return;
   const paritySummary = await syncFeatureParity();
   paritySourceMessage.value = paritySummary.sourceMessage;
   await ensureWeeklyAudit();
-  [menus.value, runs.value, parities.value, toolchains.value, audits.value] = await Promise.all([listTestMenus(), listTestRuns(), listFeatureParity(), listToolchains(), listWeeklyAudits()]);
+  [menus.value, runs.value, parities.value, toolchains.value, audits.value, recommendations.value] = await Promise.all([listTestMenus(), listTestRuns(), listFeatureParity(), listToolchains(), listWeeklyAudits(), recommendTestsFromGit()]);
   if (!toolchains.value.installations.length) toolchains.value = await scanToolchains();
 }
 async function runAudit() {
@@ -220,6 +227,7 @@ onMounted(async () => {
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
     <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">菜单自动化测试</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button><button :class="{active:activeSection==='audit'}" @click="activeSection='audit'">系统周检与工具链</button></div>
     <section v-if="activeSection==='menus'" class="metric-grid testing-metrics"><article class="clickable-card" @click="statusFilter='all'"><span>菜单 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article></section>
+    <section v-if="activeSection==='menus' && recommendations.length" class="panel test-recommendations"><header><div><b>根据 Git 变更推荐测试</b><p>读取 client / APP 当前工作区和最近一次提交，只推荐能与现有菜单源码直接对应的测试。</p></div><span>{{ recommendations.length }} 项</span></header><div><article v-for="item in recommendations.slice(0,8)" :key="item.menuId"><span class="project-badge" :class="item.project.toLowerCase()">{{ item.project }}</span><div><b>{{ item.menuName }}</b><small>{{ item.reason }} · {{ item.changedFiles.slice(0,2).join('、') }}</small></div><button class="button primary small" @click="openRecommendation(item)">按建议测试</button></article></div></section>
     <section v-if="activeSection==='menus'" class="panel testing-panel">
       <div class="testing-toolbar"><label>⌕<input v-model="query" placeholder="搜索菜单名称、路由或源码路径"></label><select v-model="projectFilter"><option value="all">全部项目</option><option value="client">client</option><option value="APP">APP</option></select><select v-model="statusFilter"><option value="all">全部状态</option><option value="tested">已测试</option><option value="untested">未测试</option><option value="passed">最近通过</option><option value="failed">最近未通过</option></select><select v-model="typeFilter"><option value="all">全部能力</option><option value="functional">已有功能用例</option><option value="style">页面 / 样式检查</option></select></div>
       <div class="testing-note"><b>执行边界</b><span>当前读取 client {{ projectCounts.client }} 个已有菜单用例、APP {{ projectCounts.app }} 个 pages.json 注册页面。项目目录不存在时列表为空；真实接口测试可能创建、修改和清理 E2E 前缀测试数据，默认不启用。</span></div>
@@ -261,6 +269,7 @@ onMounted(async () => {
 <style scoped>
 .testing-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 .testing-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}.testing-tabs button.active{background:var(--primary);color:#fff}
+.test-recommendations{margin-bottom:14px;padding:16px}.test-recommendations>header{display:flex;justify-content:space-between;gap:12px}.test-recommendations header p{margin:5px 0 0;color:var(--muted)}.test-recommendations>header>span{color:var(--primary);font-weight:800}.test-recommendations>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.test-recommendations article{min-width:0;padding:10px;border:1px solid var(--line);border-radius:9px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;background:var(--surface-2)}.test-recommendations article>div{min-width:0;display:flex;flex-direction:column;gap:5px}.test-recommendations article small{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .parity-panel{padding:18px}.parity-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0}.parity-overview button{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:var(--muted);cursor:pointer}.parity-overview button:hover,.parity-overview button.active{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 8%,var(--surface))}.parity-overview b{font-size:22px;color:var(--text)}
 .parity-toolbar{display:grid;grid-template-columns:minmax(280px,1fr) 180px 170px auto;gap:10px;align-items:center;margin-bottom:12px}.parity-toolbar label{display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}.parity-toolbar input{width:100%;padding:10px 0;border:0;background:transparent;color:var(--text);outline:0}.parity-toolbar select{padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text)}.parity-toolbar>span{color:var(--muted);font-size:12px;text-align:right}
 .parity-table-wrap{max-height:610px;overflow:auto;border:1px solid var(--line);border-radius:11px}.parity-table{width:100%;border-collapse:collapse}.parity-table th{position:sticky;top:0;z-index:1;padding:11px 12px;background:var(--surface-2);color:var(--muted);text-align:left;font-size:12px}.parity-table td{padding:12px;border-top:1px solid var(--line);vertical-align:middle}.parity-table tbody tr{cursor:pointer}.parity-table tbody tr:hover{background:color-mix(in srgb,var(--primary) 5%,transparent)}.parity-table td:first-child{min-width:180px}.parity-table td:first-child small,.parity-table td:first-child b{display:block}.parity-table td:first-child small{margin-bottom:5px;color:var(--muted)}.parity-table td:nth-child(2),.parity-table td:nth-child(3){max-width:270px}.parity-table td:nth-child(2) span,.parity-table td:nth-child(3) span{display:block;overflow:hidden;color:var(--muted);font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.parity-table span.missing{color:var(--warning)}

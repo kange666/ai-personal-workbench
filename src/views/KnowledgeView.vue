@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { askKnowledge, deleteKnowledge, isTauriRuntime, listKnowledge, saveKnowledge, syncKnowledge, type KnowledgeAnswer, type KnowledgeItem } from "../services/backend";
+import { askKnowledge, deleteKnowledge, isTauriRuntime, listKnowledge, listKnowledgeCodexJobs, listKnowledgeVersions, listRepositoryAssets, saveKnowledge, startKnowledgeCodexJob, syncKnowledge, type KnowledgeAnswer, type KnowledgeCodexJob, type KnowledgeItem, type KnowledgeVersion, type RepositoryAsset } from "../services/backend";
 
 const now = new Date().toISOString();
 const demos: KnowledgeItem[] = [
@@ -24,6 +24,14 @@ const editingId = ref("");
 const error = ref("");
 const message = ref("");
 const syncing = ref(false);
+const detailOpen = ref(false);
+const detailItem = ref<KnowledgeItem | null>(null);
+const versions = ref<KnowledgeVersion[]>([]);
+const codexJobs = ref<KnowledgeCodexJob[]>([]);
+const repositories = ref<RepositoryAsset[]>([]);
+const selectedRepository = ref("");
+const codexInstruction = ref("");
+const sending = ref(false);
 const form = reactive({ kind: "decision" as KnowledgeItem["kind"], title: "", content: "", project: "", tags: "", confirmed: true });
 const kindMeta: Record<KnowledgeItem["kind"], { label: string; icon: string }> = {
   decision: { label: "技术决策", icon: "◆" }, experience: { label: "实现经验", icon: "!" }, risk: { label: "避坑指南", icon: "△" }, skill: { label: "操作规范", icon: "#" },
@@ -70,6 +78,23 @@ async function remove(item: KnowledgeItem) {
   if (isTauriRuntime()) await deleteKnowledge(item.id);
   items.value = items.value.filter((value) => value.id !== item.id);
 }
+async function openKnowledgeTools(item: KnowledgeItem) {
+  detailItem.value = item; detailOpen.value = true; error.value = "";
+  if (!isTauriRuntime()) return;
+  try {
+    [versions.value, codexJobs.value, repositories.value] = await Promise.all([listKnowledgeVersions(item.id), listKnowledgeCodexJobs(item.id), listRepositoryAssets()]);
+    selectedRepository.value ||= repositories.value[0]?.path ?? "";
+  } catch (cause) { error.value = String(cause); }
+}
+async function sendToCodex() {
+  if (!detailItem.value || !selectedRepository.value) return;
+  sending.value = true; error.value = "";
+  try {
+    const job = await startKnowledgeCodexJob(detailItem.value.id, selectedRepository.value, codexInstruction.value);
+    codexJobs.value.unshift(job); message.value = "已发送给 Codex。完成后会进入首页结果待审箱，并弹出 Windows 通知。";
+  } catch (cause) { error.value = String(cause); }
+  finally { sending.value = false; }
+}
 async function ask() {
   asked.value = query.value.trim(); aiAnswer.value = null;
   if (!asked.value || !isTauriRuntime()) return;
@@ -93,8 +118,9 @@ onMounted(() => { void refresh(); });
     <section v-if="asked" class="panel knowledge-answer"><div><b>✦ {{ isTauriRuntime() ? 'DeepSeek 知识回答' : '本地知识回答' }}</b><button @click="asked = ''; aiAnswer = null">×</button></div><p v-if="aiLoading">正在依据已确认知识生成回答…</p><p v-else-if="aiAnswer">{{ aiAnswer.answer }}</p><p v-else-if="answerSources.length">根据已确认知识：{{ answerSources.map(item => item.content).join('；') }}</p><p v-else>没有找到足够相关的已确认知识。可以换一组关键词，或先新增一条知识。</p><template v-if="aiAnswer"><small v-for="(item,index) in aiAnswer.sources" :key="item.id">[{{ index + 1 }}] {{ item.title }}</small></template><template v-else><small v-for="item in answerSources" :key="item.id">[{{ sourceText(item) }}] {{ item.title }}</small></template></section>
     <section class="knowledge-layout">
       <aside class="panel category-panel"><b>知识分类</b><button :class="{ active: activeKind === 'all' }" @click="activeKind = 'all'">◇ 全部知识 <em>{{ items.length }}</em></button><button v-for="(meta,kind) in kindMeta" :key="kind" :class="{ active: activeKind === kind }" @click="activeKind = kind"><span>{{ meta.icon }} {{ meta.label }}</span><em>{{ items.filter(item => item.kind === kind).length }}</em></button></aside>
-      <main><article v-for="item in filtered" :key="item.id" class="panel knowledge-item" :class="{ highlighted: highlightedId === item.id }"><button class="knowledge-kind-icon" title="查看并编辑这条知识" @click="resetForm(item)">{{ kindMeta[item.kind].icon }}</button><div><small>{{ kindMeta[item.kind].label }} · {{ item.project || '未归类项目' }} · {{ statusText(item) }}</small><h2>{{ item.title }}</h2><p class="knowledge-content">{{ item.content }}</p><button class="knowledge-source" :disabled="item.sourceType === 'manual' || !item.sourceId" @click="openSource(item)">{{ item.tags.split(',').filter(Boolean).map(tag => `# ${tag.trim()}`).join('　') }}　↗ {{ sourceText(item) }}</button></div><div class="knowledge-actions"><button title="编辑" @click="resetForm(item)">✎</button><button title="删除" @click="remove(item)">×</button></div></article><p v-if="!filtered.length" class="empty-state">还没有可复用知识。点击“重新提炼知识”即可从全部 Codex 历史生成。</p></main>
+      <main><article v-for="item in filtered" :key="item.id" class="panel knowledge-item" :class="{ highlighted: highlightedId === item.id }"><button class="knowledge-kind-icon" title="查看并编辑这条知识" @click="resetForm(item)">{{ kindMeta[item.kind].icon }}</button><div><small>{{ kindMeta[item.kind].label }} · {{ item.project || '未归类项目' }} · {{ statusText(item) }}</small><h2>{{ item.title }}</h2><p class="knowledge-content">{{ item.content }}</p><button class="knowledge-source" :disabled="item.sourceType === 'manual' || !item.sourceId" @click="openSource(item)">{{ item.tags.split(',').filter(Boolean).map(tag => `# ${tag.trim()}`).join('　') }}　↗ {{ sourceText(item) }}</button></div><div class="knowledge-actions"><button title="版本与发送给 Codex" @click="openKnowledgeTools(item)">↗</button><button title="编辑" @click="resetForm(item)">✎</button><button title="删除" @click="remove(item)">×</button></div></article><p v-if="!filtered.length" class="empty-state">还没有可复用知识。点击“重新提炼知识”即可从全部 Codex 历史生成。</p></main>
     </section>
+    <div v-if="detailOpen" class="editor-backdrop" @click.self="detailOpen = false"><aside class="task-editor knowledge-editor knowledge-tools"><header><div><h2>版本与 Codex 实践</h2><p>{{ detailItem?.title }}</p></div><button class="icon-button" @click="detailOpen = false">×</button></header><section><h3>发送给 Codex</h3><p>选择一个已识别的本地项目，Codex 会参考这条知识执行。不会自动提交或推送。</p><label>目标项目<select v-model="selectedRepository"><option value="">请选择项目</option><option v-for="repo in repositories" :key="repo.path" :value="repo.path">{{ repo.name }} · {{ repo.path }}</option></select></label><label>补充要求（可选）<textarea v-model="codexInstruction" rows="3" placeholder="例如：只检查现有实现并给出改进建议"></textarea></label><button class="button primary" :disabled="sending || !selectedRepository || !detailItem?.confirmed" @click="sendToCodex">{{ sending ? '发送中…' : '发送给 Codex' }}</button><small v-if="detailItem && !detailItem.confirmed">这条知识尚未人工确认，确认后才能发送。</small></section><section><h3>最近执行</h3><article v-for="job in codexJobs" :key="job.id" class="knowledge-job"><b>{{ job.status === 'running' ? '执行中' : job.status === 'completed' ? '已完成' : '失败' }}</b><small>{{ job.repositoryPath }}</small><pre v-if="job.output || job.errorMessage">{{ job.output || job.errorMessage }}</pre></article><p v-if="!codexJobs.length" class="empty-state">还没有发送记录。</p></section><section><h3>历史版本</h3><article v-for="version in versions" :key="version.id" class="knowledge-version"><b>版本 {{ version.versionNumber }} · {{ version.changeSource === 'auto_sync' ? '自动提炼更新' : '人工编辑' }}</b><small>{{ new Date(version.createdAt).toLocaleString('zh-CN') }}</small><details><summary>{{ version.title }}</summary><pre>{{ version.content }}</pre></details></article><p v-if="!versions.length" class="empty-state">当前还没有旧版本；首次修改后会自动保留。</p></section></aside></div>
     <div v-if="editorOpen" class="editor-backdrop" @click.self="editorOpen = false"><aside class="task-editor knowledge-editor"><header><div><h2>{{ editingId ? '编辑知识' : '新增知识' }}</h2><p>内容保存在本机 SQLite 数据库</p></div><button class="icon-button" @click="editorOpen = false">×</button></header><label>类型<select v-model="form.kind"><option v-for="(meta,kind) in kindMeta" :key="kind" :value="kind">{{ meta.label }}</option></select></label><label>标题<input v-model="form.title" placeholder="一句话说明知识主题"></label><label>项目<input v-model="form.project" placeholder="例如：AI 个人工作台"></label><label>内容<textarea v-model="form.content" rows="9" placeholder="记录结论、适用条件和注意事项"></textarea></label><label>标签（英文逗号分隔）<input v-model="form.tags" placeholder="本地优先,Token"></label><label class="confirm-row"><input v-model="form.confirmed" type="checkbox">已人工确认</label><footer><span></span><button class="button secondary" @click="editorOpen = false">取消</button><button class="button primary" @click="persist">保存知识</button></footer></aside></div>
   </div>
 </template>

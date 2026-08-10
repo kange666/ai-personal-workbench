@@ -67,6 +67,8 @@ pub struct DailyActivity {
     pub tests_passed: i64,
     pub knowledge_count: i64,
     pub task_activity_count: i64,
+    pub quick_capture_count: i64,
+    pub completed_video_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1751,7 +1753,9 @@ pub fn daily_activity(
                (SELECT COUNT(*) FROM test_runs WHERE date(started_at,'localtime')=dates.day),
                (SELECT COUNT(*) FROM test_runs WHERE date(started_at,'localtime')=dates.day AND status='passed'),
                (SELECT COUNT(*) FROM knowledge_items WHERE date(updated_at,'localtime')=dates.day),
-               (SELECT COUNT(*) FROM tasks WHERE date(updated_at,'localtime')=dates.day)
+                (SELECT COUNT(*) FROM tasks WHERE date(updated_at,'localtime')=dates.day),
+                (SELECT COUNT(*) FROM quick_captures WHERE date(created_at,'localtime')=dates.day),
+                (SELECT COUNT(*) FROM video_jobs WHERE status='complete' AND date(completed_at,'localtime')=dates.day)
              FROM dates LEFT JOIN messages ON messages.day=dates.day LEFT JOIN tokens ON tokens.day=dates.day
                LEFT JOIN commits ON commits.day=dates.day ORDER BY dates.day",
         )
@@ -1778,6 +1782,8 @@ pub fn daily_activity(
                 tests_passed: row.get(16)?,
                 knowledge_count: row.get(17)?,
                 task_activity_count: row.get(18)?,
+                quick_capture_count: row.get(19)?,
+                completed_video_count: row.get(20)?,
                 work_minutes: 0,
                 estimated_work_minutes: 0,
                 manual_work_minutes: 0,
@@ -2101,6 +2107,10 @@ pub fn generate_report(
     let report = generate_for_date(&state, &report_type, reference)?;
     crate::suggestions::sync_task_suggestions_for_state(&state)?;
     Ok(report)
+}
+
+pub fn refresh_today_daily_for_state(state: &DatabaseState) -> Result<ReportRecord, String> {
+    generate_for_date(state, "daily", Local::now().date_naive())
 }
 
 #[tauri::command]

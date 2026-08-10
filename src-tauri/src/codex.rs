@@ -1,5 +1,5 @@
 use crate::database::DatabaseState;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
@@ -43,6 +43,10 @@ pub struct CodexQuotaSnapshot {
     plan_type: Option<String>,
     primary: Option<CodexQuotaWindow>,
     secondary: Option<CodexQuotaWindow>,
+    source_file: Option<String>,
+    source_modified_at: Option<String>,
+    freshness: String,
+    selection_reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -135,6 +139,10 @@ fn quota_from_event(value: &Value) -> Option<CodexQuotaSnapshot> {
             .map(ToOwned::to_owned),
         primary,
         secondary,
+        source_file: None,
+        source_modified_at: None,
+        freshness: String::new(),
+        selection_reason: String::new(),
     })
 }
 
@@ -166,8 +174,77 @@ fn quota_from_file_tail(path: &Path) -> Option<CodexQuotaSnapshot> {
     None
 }
 
+fn snapshot_captured_millis(snapshot: &CodexQuotaSnapshot) -> i64 {
+    snapshot
+        .captured_at
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.timestamp_millis())
+        .unwrap_or_default()
+}
+
+fn snapshot_has_active_window(snapshot: &CodexQuotaSnapshot, now: i64) -> bool {
+    snapshot
+        .primary
+        .iter()
+        .chain(snapshot.secondary.iter())
+        .any(|window| window.resets_at <= 0 || window.resets_at > now)
+}
+
+fn decorate_quota_snapshot(
+    mut snapshot: CodexQuotaSnapshot,
+    path: &Path,
+    modified: std::time::SystemTime,
+) -> CodexQuotaSnapshot {
+    let now = Utc::now();
+    let captured = snapshot
+        .captured_at
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    let age_seconds = captured
+        .map(|value| now.signed_duration_since(value).num_seconds().max(0))
+        .unwrap_or(i64::MAX);
+    snapshot.source_file = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned);
+    snapshot.source_modified_at = modified
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| DateTime::from_timestamp(duration.as_secs() as i64, 0))
+        .map(|value| value.to_rfc3339());
+    snapshot.freshness = if age_seconds <= 10 * 60 {
+        "fresh"
+    } else if age_seconds <= 24 * 60 * 60 {
+        "recent"
+    } else {
+        "stale"
+    }
+    .into();
+    snapshot.selection_reason = "已排除过期额度周期，并按额度事件时间选择最新快照".into();
+    snapshot
+}
+
+fn latest_quota_snapshot_from_files(
+    mut files: Vec<(std::time::SystemTime, PathBuf)>,
+    now: i64,
+) -> CodexQuotaSnapshot {
+    files.sort_by(|(modified_a, _), (modified_b, _)| modified_b.cmp(modified_a));
+    files
+        .into_iter()
+        .take(50)
+        .filter_map(|(modified, path)| {
+            let snapshot = quota_from_file_tail(&path)?;
+            snapshot_has_active_window(&snapshot, now)
+                .then(|| decorate_quota_snapshot(snapshot, &path, modified))
+        })
+        .max_by_key(snapshot_captured_millis)
+        .unwrap_or_default()
+}
+
 fn latest_quota_snapshot() -> CodexQuotaSnapshot {
-    let mut files = roots()
+    let files = roots()
         .into_iter()
         .filter(|(root, _)| root.exists())
         .flat_map(|(root, _)| {
@@ -186,12 +263,7 @@ fn latest_quota_snapshot() -> CodexQuotaSnapshot {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    files.sort_by(|(modified_a, _), (modified_b, _)| modified_b.cmp(modified_a));
-    files
-        .into_iter()
-        .take(20)
-        .find_map(|(_, path)| quota_from_file_tail(&path))
-        .unwrap_or_default()
+    latest_quota_snapshot_from_files(files, Utc::now().timestamp())
 }
 
 pub(crate) fn latest_tray_quota() -> Option<TrayQuota> {
@@ -516,6 +588,75 @@ mod quota_tests {
         assert_eq!(primary.remaining_percent, 53.0);
         assert_eq!(primary.window_minutes, 10_080);
         assert_eq!(quota.plan_type.as_deref(), Some("prolite"));
+    }
+
+    fn quota_event(timestamp: &str, used_percent: f64, resets_at: i64) -> String {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "primary": {
+                        "used_percent": used_percent,
+                        "window_minutes": 10_080,
+                        "resets_at": resets_at
+                    },
+                    "secondary": null,
+                    "plan_type": "prolite"
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn quota_selection_uses_event_time_instead_of_file_modified_time() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-quota-order-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let stale_file = directory.join("stale-but-touched.jsonl");
+        let latest_file = directory.join("latest-event.jsonl");
+        std::fs::write(
+            &stale_file,
+            quota_event("2026-08-06T23:30:05Z", 71.0, 1_786_935_253),
+        )
+        .unwrap();
+        std::fs::write(
+            &latest_file,
+            quota_event("2026-08-10T03:12:17Z", 0.0, 1_786_935_253),
+        )
+        .unwrap();
+
+        let snapshot = latest_quota_snapshot_from_files(
+            vec![
+                (std::time::SystemTime::now(), stale_file),
+                (UNIX_EPOCH, latest_file),
+            ],
+            1_786_330_000,
+        );
+        assert_eq!(snapshot.primary.unwrap().remaining_percent, 100.0);
+        assert_eq!(snapshot.source_file.as_deref(), Some("latest-event.jsonl"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn quota_selection_ignores_expired_windows() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-quota-expired-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let expired_file = directory.join("expired.jsonl");
+        std::fs::write(
+            &expired_file,
+            quota_event("2026-08-10T03:12:17Z", 71.0, 1_000),
+        )
+        .unwrap();
+        let snapshot = latest_quota_snapshot_from_files(
+            vec![(std::time::SystemTime::now(), expired_file)],
+            2_000,
+        );
+        assert!(!snapshot.available);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

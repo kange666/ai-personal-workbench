@@ -6,11 +6,13 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::Path,
     process::Stdio,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
@@ -90,6 +92,7 @@ pub struct TapdSyncSummary {
     tasks: usize,
     stories: usize,
     total: usize,
+    notifications_created: usize,
     warnings: Vec<String>,
     synced_at: String,
 }
@@ -104,8 +107,24 @@ pub struct TapdCodexJob {
     thread_id: Option<String>,
     output: String,
     error_message: String,
+    baseline_head: String,
+    baseline_worktree: String,
+    result_head: String,
+    changed_files: Vec<String>,
+    test_summary: String,
+    review_status: String,
+    review_note: String,
+    reviewed_at: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TapdJobReview {
+    id: String,
+    decision: String,
+    note: String,
 }
 
 fn credential_entry() -> Result<Entry, String> {
@@ -159,6 +178,19 @@ fn authenticated_request(
     url: String,
 ) -> RequestBuilder {
     let request = client.get(url);
+    if credential.mode() == "token" {
+        request.bearer_auth(credential.access_token.trim())
+    } else {
+        request.basic_auth(&credential.api_user, Some(&credential.api_password))
+    }
+}
+
+fn authenticated_post_request(
+    client: &Client,
+    credential: &TapdCredential,
+    url: String,
+) -> RequestBuilder {
+    let request = client.post(url);
     if credential.mode() == "token" {
         request.bearer_auth(credential.access_token.trim())
     } else {
@@ -396,12 +428,115 @@ fn readable_permission_error(item_type: &str, error: &str) -> String {
     }
 }
 
-fn save_items(state: &DatabaseState, items: &[TapdWorkItem]) -> Result<(), String> {
+#[derive(Debug, Clone)]
+struct TapdItemSnapshot {
+    status_label: String,
+    priority: String,
+    owner: String,
+    due_date: String,
+}
+
+fn item_type_label(item_type: &str) -> &str {
+    match item_type {
+        "bug" => "缺陷",
+        "story" => "需求",
+        _ => "任务",
+    }
+}
+
+fn display_value(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "未设置"
+    } else {
+        value
+    }
+}
+
+fn tapd_change_summary(previous: Option<&TapdItemSnapshot>, item: &TapdWorkItem) -> Option<String> {
+    let label = item_type_label(&item.item_type);
+    let Some(previous) = previous else {
+        return Some(format!("新{label}已分配给你"));
+    };
+    let mut changes = Vec::new();
+    if previous.status_label != item.status_label {
+        changes.push(format!(
+            "状态：{} → {}",
+            display_value(&previous.status_label),
+            display_value(&item.status_label)
+        ));
+    }
+    if previous.priority != item.priority {
+        changes.push(format!(
+            "优先级：{} → {}",
+            display_value(&previous.priority),
+            display_value(&item.priority)
+        ));
+    }
+    if previous.owner != item.owner {
+        changes.push(format!(
+            "负责人：{} → {}",
+            display_value(&previous.owner),
+            display_value(&item.owner)
+        ));
+    }
+    if previous.due_date != item.due_date {
+        changes.push(format!(
+            "截止时间：{} → {}",
+            display_value(&previous.due_date),
+            display_value(&item.due_date)
+        ));
+    }
+    (!changes.is_empty()).then(|| changes.join("；"))
+}
+
+fn tapd_notification_output(item: &TapdWorkItem, change: &str) -> String {
+    format!(
+        "变更：{change}\n类型：{}\n标题：{}\n状态：{}\n优先级：{}\n负责人：{}\n截止时间：{}\n创建人：{}\n\n详细描述：\n{}",
+        item_type_label(&item.item_type),
+        item.title,
+        display_value(&item.status_label),
+        display_value(&item.priority),
+        display_value(&item.owner),
+        display_value(&item.due_date),
+        display_value(&item.creator),
+        if item.description.trim().is_empty() { "TAPD 未填写详细描述。" } else { &item.description },
+    )
+}
+
+fn save_items(
+    state: &DatabaseState,
+    items: &[TapdWorkItem],
+    create_notifications: bool,
+) -> Result<usize, String> {
     let mut connection = state.connect()?;
+    let existing = {
+        let mut statement = connection
+            .prepare("SELECT id,status_label,priority,owner,due_date FROM tapd_work_items WHERE workspace_id=?1")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([WORKSPACE_ID], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    TapdItemSnapshot {
+                        status_label: row.get(1)?,
+                        priority: row.get(2)?,
+                        owner: row.get(3)?,
+                        due_date: row.get(4)?,
+                    },
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|error| error.to_string())?
+    };
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
+    let mut notifications_created = 0;
     for item in items {
+        let change = create_notifications
+            .then(|| tapd_change_summary(existing.get(&item.id), item))
+            .flatten();
         transaction
             .execute(
                 "INSERT INTO tapd_work_items(id,workspace_id,item_type,title,description,status,status_label,priority,owner,creator,iteration_id,begin_date,due_date,created_at,modified_at,source_url,synced_at)
@@ -410,8 +545,41 @@ fn save_items(state: &DatabaseState, items: &[TapdWorkItem]) -> Result<(), Strin
                 params![item.id,item.workspace_id,item.item_type,item.title,item.description,item.status,item.status_label,item.priority,item.owner,item.creator,item.iteration_id,item.begin_date,item.due_date,item.created_at,item.modified_at,item.source_url,item.synced_at],
             )
             .map_err(|error| error.to_string())?;
+        if let Some(change) = change {
+            let version = if item.modified_at.trim().is_empty() {
+                &item.synced_at
+            } else {
+                &item.modified_at
+            };
+            let body = format!(
+                "{} · {} · 状态：{} · 截止：{}",
+                WORKSPACE_NAME,
+                change,
+                display_value(&item.status_label),
+                display_value(&item.due_date)
+            );
+            let inserted = transaction
+                .execute(
+                    "INSERT OR IGNORE INTO notifications(id,kind,title,body,output,source_id,route,is_read,review_status,created_at)
+                     VALUES(?1,'tapd_item',?2,?3,?4,?5,?6,0,'accepted',?7)",
+                    params![
+                        format!("tapd-item:{}:{}:{}", item.item_type, item.id, version),
+                        format!("TAPD {}：{}", item_type_label(&item.item_type), item.title),
+                        body,
+                        tapd_notification_output(item, &change),
+                        item.id,
+                        format!("/tapd?item={}", item.id),
+                        item.synced_at,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            notifications_created += inserted;
+        }
     }
-    transaction.commit().map_err(|error| error.to_string())
+    transaction
+        .commit()
+        .map_err(|error| error.to_string())
+        .map(|_| notifications_created)
 }
 
 fn read_item(state: &DatabaseState, id: &str) -> Result<TapdWorkItem, String> {
@@ -422,22 +590,106 @@ fn read_item(state: &DatabaseState, id: &str) -> Result<TapdWorkItem, String> {
     ).optional().map_err(|error| error.to_string())?.ok_or_else(|| "没有找到该 TAPD 工作项，请先同步。".into())
 }
 
+fn git_output(repository: &Path, args: &[&str]) -> String {
+    let mut command = codex_video::hidden_command(Path::new("git"));
+    command.current_dir(repository).args(args);
+    command
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn worktree_paths(status: &str) -> BTreeSet<String> {
+    status
+        .lines()
+        .filter_map(|line| {
+            let value = line.get(3..)?.trim();
+            let path = value.rsplit(" -> ").next().unwrap_or(value).trim();
+            (!path.is_empty()).then(|| path.replace('\\', "/"))
+        })
+        .collect()
+}
+
+fn git_evidence(repository: &Path, baseline_head: &str) -> (String, Vec<String>) {
+    let result_head = git_output(repository, &["rev-parse", "HEAD"]);
+    let status = git_output(
+        repository,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+    let mut paths = worktree_paths(&status);
+    if !baseline_head.is_empty() && !result_head.is_empty() && baseline_head != result_head {
+        paths.extend(
+            git_output(
+                repository,
+                &[
+                    "diff",
+                    "--name-only",
+                    &format!("{baseline_head}..{result_head}"),
+                ],
+            )
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.replace('\\', "/")),
+        );
+    }
+    (result_head, paths.into_iter().collect())
+}
+
+fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<TapdCodexJob> {
+    let changed_files: String = row.get(12)?;
+    Ok(TapdCodexJob {
+        id: row.get(0)?,
+        item_id: row.get(1)?,
+        repository_path: row.get(2)?,
+        status: row.get(3)?,
+        thread_id: row.get(4)?,
+        output: row.get(5)?,
+        error_message: row.get(6)?,
+        baseline_head: row.get(7)?,
+        baseline_worktree: row.get(8)?,
+        result_head: row.get(9)?,
+        test_summary: row.get(10)?,
+        review_status: row.get(11)?,
+        changed_files: serde_json::from_str(&changed_files).unwrap_or_default(),
+        review_note: row.get(13)?,
+        reviewed_at: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
+    })
+}
+
 fn read_job(state: &DatabaseState, id: &str) -> Result<TapdCodexJob, String> {
     state.connect()?.query_row(
-        "SELECT id,item_id,repository_path,status,thread_id,output,error_message,created_at,updated_at FROM tapd_codex_jobs WHERE id=?1",
+        "SELECT id,item_id,repository_path,status,thread_id,output,error_message,baseline_head,baseline_worktree,result_head,test_summary,review_status,changed_files,review_note,reviewed_at,created_at,updated_at FROM tapd_codex_jobs WHERE id=?1",
         [id],
-        |row| Ok(TapdCodexJob{id:row.get(0)?,item_id:row.get(1)?,repository_path:row.get(2)?,status:row.get(3)?,thread_id:row.get(4)?,output:row.get(5)?,error_message:row.get(6)?,created_at:row.get(7)?,updated_at:row.get(8)?})
+        row_to_job,
     ).map_err(|error| error.to_string())
 }
 
-fn build_codex_prompt(item: &TapdWorkItem, repository_path: &Path) -> String {
+fn build_codex_prompt(
+    item: &TapdWorkItem,
+    repository_path: &Path,
+    additional_note: &str,
+) -> String {
+    let additional_note = additional_note.trim();
+    let supplement = if additional_note.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n用户补充说明（来自工作台）：\n{additional_note}\n\n请同时结合 TAPD 内容和用户补充说明执行。补充说明用于明确背景、范围和验收要求；如果两者存在冲突，不要自行扩大范围，请在最终说明中明确指出。"
+        )
+    };
     format!(
-        "请处理下面这条 TAPD 工作项，并在指定本地项目中完成实现或修复。\n\n项目目录：{}\nTAPD 项目：{}（{}）\n工作项类型：{}\n标题：{}\n状态：{}\n优先级：{}\n处理人：{}\n预计结束：{}\n来源：{}\n\n详细描述：\n{}\n\n执行要求：\n1. 先检查项目现状和相关代码，确认问题根因。\n2. 只修改与该工作项直接相关的文件，遵循项目现有规范。\n3. 完成后运行风险相称的构建或测试。\n4. 不要提交、推送、重置、清理或删除用户现有改动。\n5. 最终用中文说明：做了什么、修改文件、验证结果、仍需人工确认的内容。",
+        "请处理下面这条 TAPD 工作项，并在指定本地项目中完成实现或修复。\n\n项目目录：{}\nTAPD 项目：{}（{}）\n工作项类型：{}\n标题：{}\n状态：{}\n优先级：{}\n处理人：{}\n预计结束：{}\n来源：{}\n\n详细描述：\n{}{}\n\n执行要求：\n1. 先检查项目现状和相关代码，确认问题根因。\n2. 只修改与该工作项直接相关的文件，遵循项目现有规范。\n3. 完成后运行风险相称的构建或测试。\n4. 不要提交、推送、重置、清理或删除用户现有改动。\n5. 最终用中文说明：做了什么、修改文件、验证结果、仍需人工确认的内容。",
         repository_path.display(), WORKSPACE_NAME, WORKSPACE_ID, item.item_type, item.title,
         item.status_label, if item.priority.is_empty(){"未设置"}else{&item.priority},
         if item.owner.is_empty(){DEFAULT_OWNER}else{&item.owner},
         if item.due_date.is_empty(){"未设置"}else{&item.due_date}, item.source_url,
         if item.description.is_empty(){"TAPD 未填写详细描述，请结合标题和代码现状判断。"}else{&item.description},
+        supplement,
     )
 }
 
@@ -451,14 +703,19 @@ fn finish_job(
     error: &str,
 ) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
+    let job = read_job(state, job_id)?;
+    let repository = Path::new(&job.repository_path);
+    let (result_head, changed_files) = git_evidence(repository, &job.baseline_head);
+    let changed_files_json =
+        serde_json::to_string(&changed_files).map_err(|cause| cause.to_string())?;
     state.connect()?.execute(
-        "UPDATE tapd_codex_jobs SET status=?1,thread_id=COALESCE(?2,thread_id),output=?3,error_message=?4,updated_at=?5 WHERE id=?6",
-        params![status,thread_id,output,error,now,job_id],
+        "UPDATE tapd_codex_jobs SET status=?1,thread_id=COALESCE(?2,thread_id),output=?3,error_message=?4,result_head=?5,changed_files=?6,review_status='pending',updated_at=?7 WHERE id=?8",
+        params![status,thread_id,output,error,result_head,changed_files_json,now,job_id],
     ).map_err(|cause| cause.to_string())?;
     let (title, body) = if status == "completed" {
         (
             format!("TAPD 任务已完成：{}", item.title),
-            format!("{} · Codex 已完成处理", WORKSPACE_NAME),
+            format!("{} · Codex 已完成，等待你确认结果", WORKSPACE_NAME),
         )
     } else {
         (
@@ -472,18 +729,21 @@ fn finish_job(
          ON CONFLICT(id) DO UPDATE SET title=excluded.title,body=excluded.body,output=excluded.output,is_read=0,created_at=excluded.created_at,read_at=NULL",
         params![format!("tapd-codex:{job_id}"),title,body,if output.is_empty(){error}else{output},job_id,format!("/tapd?item={}",item.id),now],
     ).map_err(|cause| cause.to_string())?;
+    let _ = crate::codex::scan_codex_sessions_for_state(state);
+    let _ = crate::git::scan_git_repositories_for_state(state);
     Ok(())
 }
 
-fn run_codex_job(
+fn execute_codex_job(
     state: DatabaseState,
     job_id: String,
     item: TapdWorkItem,
     repository_path: String,
+    prompt: String,
+    resume_thread_id: Option<String>,
 ) -> Result<(), String> {
     let repository = Path::new(&repository_path);
     let (cli_path, _) = codex_video::resolve_codex_cli()?;
-    let prompt = build_codex_prompt(&item, repository);
     let job_dir = state
         .path
         .parent()
@@ -498,11 +758,22 @@ fn run_codex_job(
     let mut command = codex_video::hidden_command(&cli_path);
     command
         .args(["--sandbox", "workspace-write", "--cd"])
-        .arg(repository)
-        .args(["exec", "--json", "--skip-git-repo-check"])
-        .arg("--output-last-message")
-        .arg(&last_message_path)
-        .arg("-")
+        .arg(repository);
+    if let Some(thread_id) = resume_thread_id.as_deref() {
+        command
+            .args(["exec", "resume", "--json", "--skip-git-repo-check"])
+            .arg("--output-last-message")
+            .arg(&last_message_path)
+            .arg(thread_id)
+            .arg("-");
+    } else {
+        command
+            .args(["exec", "--json", "--skip-git-repo-check"])
+            .arg("--output-last-message")
+            .arg(&last_message_path)
+            .arg("-");
+    }
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr_file));
@@ -570,6 +841,42 @@ fn run_codex_job(
             error.trim(),
         )
     }
+}
+
+fn run_codex_job(
+    state: DatabaseState,
+    job_id: String,
+    item: TapdWorkItem,
+    repository_path: String,
+    additional_note: String,
+) -> Result<(), String> {
+    let prompt = build_codex_prompt(&item, Path::new(&repository_path), &additional_note);
+    execute_codex_job(state, job_id, item, repository_path, prompt, None)
+}
+
+fn build_codex_follow_up_prompt(note: &str) -> String {
+    format!(
+        "上一轮 TAPD 修改尚未通过人工确认，请继续处理下面的补充要求：\n\n{}\n\n请基于当前项目里上一轮已经产生的修改继续完善，只修改与本次反馈直接相关的内容。完成后运行风险相称的构建或测试；不要提交、推送、重置、清理或删除用户现有改动。最终用中文说明本轮具体修改和验证结果。",
+        note.trim()
+    )
+}
+
+fn run_codex_follow_up_job(
+    state: DatabaseState,
+    job_id: String,
+    item: TapdWorkItem,
+    repository_path: String,
+    thread_id: String,
+    note: String,
+) -> Result<(), String> {
+    execute_codex_job(
+        state,
+        job_id,
+        item,
+        repository_path,
+        build_codex_follow_up_prompt(&note),
+        Some(thread_id),
+    )
 }
 
 #[tauri::command]
@@ -743,7 +1050,8 @@ pub async fn sync_tapd_items(
             warnings.join("；")
         ));
     }
-    save_items(&database, &all)?;
+    let create_notifications = app_meta(&database, "tapd_last_synced_at").is_some();
+    let notifications_created = save_items(&database, &all, create_notifications)?;
     save_permission_warnings(&database, &warnings)?;
     database.connect()?.execute("INSERT INTO app_meta(key,value) VALUES('tapd_last_synced_at',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&synced_at]).map_err(|error| error.to_string())?;
     Ok(TapdSyncSummary {
@@ -751,6 +1059,7 @@ pub async fn sync_tapd_items(
         tasks: tasks.len(),
         stories: stories.len(),
         total: all.len(),
+        notifications_created,
         warnings,
         synced_at,
     })
@@ -794,21 +1103,9 @@ pub fn list_tapd_codex_jobs(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<Vec<TapdCodexJob>, String> {
     let connection = state.connect()?;
-    let mut statement = connection.prepare("SELECT id,item_id,repository_path,status,thread_id,output,error_message,created_at,updated_at FROM tapd_codex_jobs ORDER BY created_at DESC LIMIT 100").map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT id,item_id,repository_path,status,thread_id,output,error_message,baseline_head,baseline_worktree,result_head,test_summary,review_status,changed_files,review_note,reviewed_at,created_at,updated_at FROM tapd_codex_jobs ORDER BY created_at DESC LIMIT 100").map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
-            Ok(TapdCodexJob {
-                id: row.get(0)?,
-                item_id: row.get(1)?,
-                repository_path: row.get(2)?,
-                status: row.get(3)?,
-                thread_id: row.get(4)?,
-                output: row.get(5)?,
-                error_message: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })
+        .query_map([], |row| row_to_job(row))
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
@@ -819,6 +1116,7 @@ pub fn start_tapd_codex_job(
     state: tauri::State<'_, DatabaseState>,
     item_id: String,
     repository_path: String,
+    additional_note: String,
 ) -> Result<TapdCodexJob, String> {
     let database = state.inner().clone();
     let item = read_item(&database, &item_id)?;
@@ -837,6 +1135,9 @@ pub fn start_tapd_codex_job(
     if !known {
         return Err("请选择工作台“项目资产”中已扫描的本地项目。".into());
     }
+    if additional_note.chars().count() > 4_000 {
+        return Err("补充备注不能超过 4000 个字符。".into());
+    }
     let (cli_path, _) = codex_video::resolve_codex_cli()?;
     let login = codex_video::hidden_command(&cli_path)
         .args(["login", "status"])
@@ -847,18 +1148,273 @@ pub fn start_tapd_codex_job(
     }
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    database.connect()?.execute("INSERT INTO tapd_codex_jobs(id,item_id,repository_path,status,thread_id,output,error_message,created_at,updated_at) VALUES(?1,?2,?3,'running',NULL,'','',?4,?4)", params![id,item_id,repository_path,now]).map_err(|error| error.to_string())?;
+    let baseline_head = git_output(repository, &["rev-parse", "HEAD"]);
+    let baseline_worktree = git_output(
+        repository,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+    database.connect()?.execute("INSERT INTO tapd_codex_jobs(id,item_id,repository_path,status,thread_id,output,error_message,baseline_head,baseline_worktree,result_head,changed_files,test_summary,review_status,review_note,reviewed_at,created_at,updated_at) VALUES(?1,?2,?3,'running',NULL,'','',?4,?5,'','[]','','pending','',NULL,?6,?6)", params![id,item_id,repository_path,baseline_head,baseline_worktree,now]).map_err(|error| error.to_string())?;
     let task_state = database.clone();
     let task_id = id.clone();
     let task_repo = repository_path.clone();
+    let task_note = additional_note.trim().to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(error) =
-            run_codex_job(task_state.clone(), task_id.clone(), item.clone(), task_repo)
-        {
+        if let Err(error) = run_codex_job(
+            task_state.clone(),
+            task_id.clone(),
+            item.clone(),
+            task_repo,
+            task_note,
+        ) {
             let _ = finish_job(&task_state, &task_id, &item, "failed", None, "", &error);
         }
     });
     read_job(&database, &id)
+}
+
+#[tauri::command]
+pub fn continue_tapd_codex_job(
+    state: tauri::State<'_, DatabaseState>,
+    id: String,
+    note: String,
+) -> Result<TapdCodexJob, String> {
+    let note = note.trim().to_string();
+    if note.is_empty() {
+        return Err("请先填写需要继续修改的说明。".into());
+    }
+    if note.chars().count() > 4_000 {
+        return Err("继续修改说明不能超过 4000 个字符。".into());
+    }
+
+    let database = state.inner().clone();
+    let job = read_job(&database, &id)?;
+    if job.status != "completed" {
+        return Err("只有已完成的 Codex 结果可以继续修改。".into());
+    }
+    let thread_id = job
+        .thread_id
+        .clone()
+        .ok_or_else(|| "这次执行没有可恢复的 Codex 会话，请重新发送工作项。".to_string())?;
+    let item = read_item(&database, &job.item_id)?;
+    let repository = Path::new(&job.repository_path);
+    if !repository.is_dir() {
+        return Err("原任务对应的本地项目目录不存在。".into());
+    }
+    let (cli_path, _) = codex_video::resolve_codex_cli()?;
+    let login = codex_video::hidden_command(&cli_path)
+        .args(["login", "status"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !login.status.success() {
+        return Err("Codex CLI 尚未登录。".into());
+    }
+
+    let now = Utc::now().to_rfc3339();
+    database
+        .connect()?
+        .execute(
+            "UPDATE tapd_codex_jobs SET status='running',output='',error_message='',test_summary='',review_status='pending',review_note=?1,reviewed_at=NULL,updated_at=?2 WHERE id=?3",
+            params![note, now, id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    let task_state = database.clone();
+    let task_id = id.clone();
+    let task_repo = job.repository_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = run_codex_follow_up_job(
+            task_state.clone(),
+            task_id.clone(),
+            item.clone(),
+            task_repo,
+            thread_id,
+            note,
+        ) {
+            let _ = finish_job(&task_state, &task_id, &item, "failed", None, "", &error);
+        }
+    });
+    read_job(&database, &id)
+}
+
+#[tauri::command]
+pub fn run_tapd_codex_job_tests(
+    state: tauri::State<'_, DatabaseState>,
+    id: String,
+) -> Result<TapdCodexJob, String> {
+    let database = state.inner().clone();
+    let job = read_job(&database, &id)?;
+    if job.status != "completed" {
+        return Err("Codex 尚未完成，暂时不能运行项目测试。".into());
+    }
+    let test_command = database
+        .connect()?
+        .query_row(
+            "SELECT test_command FROM repository_assets WHERE path=?1",
+            [&job.repository_path],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if test_command.trim().is_empty() {
+        return Err("该项目资产尚未配置测试命令，请先在项目资产中确认 testCommand。".into());
+    }
+    let job_dir = database
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("tapd-codex-jobs")
+        .join(&id);
+    fs::create_dir_all(&job_dir).map_err(|error| error.to_string())?;
+    let stdout_path = job_dir.join("project-test-stdout.log");
+    let stderr_path = job_dir.join("project-test-stderr.log");
+    let stdout = File::create(&stdout_path).map_err(|error| error.to_string())?;
+    let stderr = File::create(&stderr_path).map_err(|error| error.to_string())?;
+    let mut command = codex_video::hidden_command(Path::new("cmd"));
+    command
+        .current_dir(&job.repository_path)
+        .args(["/d", "/s", "/c", &test_command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动项目测试失败：{error}"))?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(15 * 60) {
+            let _ = child.kill();
+            return Err(
+                "项目测试超过 15 分钟，已停止。请在项目资产中改用更聚焦的测试命令。".into(),
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
+    };
+    let stdout = fs::read_to_string(stdout_path).unwrap_or_default();
+    let stderr = fs::read_to_string(stderr_path).unwrap_or_default();
+    let excerpt = format!("{}\n{}", stdout, stderr)
+        .chars()
+        .rev()
+        .take(5_000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    let summary = format!(
+        "{}\n命令：{}\n{}",
+        if status.success() {
+            "项目测试通过"
+        } else {
+            "项目测试失败"
+        },
+        test_command,
+        excerpt.trim()
+    );
+    database
+        .connect()?
+        .execute(
+            "UPDATE tapd_codex_jobs SET test_summary=?1,updated_at=?2 WHERE id=?3",
+            params![summary, Utc::now().to_rfc3339(), id],
+        )
+        .map_err(|error| error.to_string())?;
+    read_job(&database, &id)
+}
+
+async fn mark_tapd_bug_resolved(state: &DatabaseState, item: &TapdWorkItem) -> Result<(), String> {
+    if item.item_type != "bug" {
+        return Err(
+            "当前仅支持把 TAPD 缺陷更新为“已解决”；任务和需求需要按各自工作流单独配置完成状态。"
+                .into(),
+        );
+    }
+    if item.status == "resolved" || item.status_label == "已解决" {
+        return Ok(());
+    }
+
+    let (credential, _) = credentials()?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response =
+        authenticated_post_request(&client, &credential, format!("{TAPD_API_ROOT}/bugs"))
+            .form(&[
+                ("workspace_id", WORKSPACE_ID),
+                ("id", item.id.as_str()),
+                ("v_status", "已解决"),
+            ])
+            .send()
+            .await
+            .map_err(|error| format!("更新 TAPD 缺陷状态失败：{error}"))?;
+    let http_status = response.status();
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("解析 TAPD 更新结果失败：{error}"))?;
+    if !http_status.is_success() || body.get("status").and_then(Value::as_i64) != Some(1) {
+        let info = text(body.get("info"));
+        let detail = if info.is_empty() {
+            format!("HTTP {http_status}")
+        } else {
+            info
+        };
+        if detail.to_ascii_lowercase().contains("no permission") {
+            return Err("TAPD 更新失败：个人访问令牌缺少 bug#write 权限，未执行本地归档。".into());
+        }
+        return Err(format!(
+            "TAPD 缺陷无法流转为“已解决”：{detail}；未执行本地归档。"
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    state
+        .connect()?
+        .execute(
+            "UPDATE tapd_work_items SET status='resolved',status_label='已解决',modified_at=?1,synced_at=?1 WHERE id=?2",
+            params![now, item.id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn review_tapd_codex_job(
+    state: tauri::State<'_, DatabaseState>,
+    review: TapdJobReview,
+) -> Result<TapdCodexJob, String> {
+    if !["accepted", "changes_requested"].contains(&review.decision.as_str()) {
+        return Err("无效的确认结论。".into());
+    }
+    let database = state.inner().clone();
+    let job = read_job(&database, &review.id)?;
+    if job.status != "completed" {
+        return Err("只有已完成的 Codex 结果可以确认。".into());
+    }
+    if review.decision == "accepted" {
+        let item = read_item(&database, &job.item_id)?;
+        mark_tapd_bug_resolved(&database, &item).await?;
+        crate::codex::scan_codex_sessions_for_state(&database)?;
+        crate::git::scan_git_repositories_for_state(&database)?;
+        crate::reports::refresh_today_daily_for_state(&database)?;
+        crate::knowledge::sync_knowledge_for_state(&database)?;
+    }
+    let now = Utc::now().to_rfc3339();
+    database
+        .connect()?
+        .execute(
+            "UPDATE tapd_codex_jobs SET review_status=?1,review_note=?2,reviewed_at=?3,updated_at=?3 WHERE id=?4",
+            params![review.decision, review.note.trim(), now, review.id],
+        )
+        .map_err(|error| error.to_string())?;
+    database
+        .connect()?
+        .execute(
+            "UPDATE notifications SET is_read=1,read_at=?1 WHERE id=?2",
+            params![now, format!("tapd-codex:{}", review.id)],
+        )
+        .map_err(|error| error.to_string())?;
+    read_job(&database, &review.id)
 }
 
 #[cfg(test)]
@@ -894,6 +1450,96 @@ mod tests {
     }
 
     #[test]
+    fn tapd_notification_only_reports_new_or_meaningful_changes() {
+        let item = TapdWorkItem {
+            id: "1".into(),
+            workspace_id: WORKSPACE_ID.into(),
+            item_type: "task".into(),
+            title: "整改安全标识".into(),
+            description: "修复页面显示问题".into(),
+            status: "doing".into(),
+            status_label: "进行中".into(),
+            priority: "高".into(),
+            owner: DEFAULT_OWNER.into(),
+            creator: "管理员".into(),
+            iteration_id: String::new(),
+            begin_date: String::new(),
+            due_date: "2026-08-12".into(),
+            created_at: String::new(),
+            modified_at: "2026-08-10T14:00:00Z".into(),
+            source_url: "https://www.tapd.cn".into(),
+            synced_at: "2026-08-10T14:01:00Z".into(),
+        };
+        assert_eq!(
+            tapd_change_summary(None, &item).as_deref(),
+            Some("新任务已分配给你")
+        );
+        let unchanged = TapdItemSnapshot {
+            status_label: item.status_label.clone(),
+            priority: item.priority.clone(),
+            owner: item.owner.clone(),
+            due_date: item.due_date.clone(),
+        };
+        assert!(tapd_change_summary(Some(&unchanged), &item).is_none());
+        let changed = TapdItemSnapshot {
+            status_label: "待处理".into(),
+            priority: item.priority.clone(),
+            owner: item.owner.clone(),
+            due_date: "2026-08-11".into(),
+        };
+        let summary = tapd_change_summary(Some(&changed), &item).unwrap();
+        assert!(summary.contains("状态：待处理 → 进行中"));
+        assert!(summary.contains("截止时间：2026-08-11 → 2026-08-12"));
+    }
+
+    #[test]
+    fn tapd_sync_baseline_does_not_create_history_noise_and_changes_are_deduplicated() {
+        let directory = std::env::temp_dir().join(format!("tapd-notifications-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let mut item = TapdWorkItem {
+            id: "task-1".into(),
+            workspace_id: WORKSPACE_ID.into(),
+            item_type: "task".into(),
+            title: "整改安全标识".into(),
+            description: "修复页面显示问题".into(),
+            status: "open".into(),
+            status_label: "待处理".into(),
+            priority: "高".into(),
+            owner: DEFAULT_OWNER.into(),
+            creator: "管理员".into(),
+            iteration_id: String::new(),
+            begin_date: String::new(),
+            due_date: "2026-08-12".into(),
+            created_at: "2026-08-10T12:00:00Z".into(),
+            modified_at: "2026-08-10T12:00:00Z".into(),
+            source_url: "https://www.tapd.cn".into(),
+            synced_at: "2026-08-10T12:01:00Z".into(),
+        };
+        assert_eq!(save_items(&state, &[item.clone()], false).unwrap(), 0);
+        item.status = "doing".into();
+        item.status_label = "进行中".into();
+        item.modified_at = "2026-08-10T13:00:00Z".into();
+        item.synced_at = "2026-08-10T13:01:00Z".into();
+        assert_eq!(save_items(&state, &[item.clone()], true).unwrap(), 1);
+        assert_eq!(save_items(&state, &[item], true).unwrap(), 0);
+        let notification: (String, String, i64) = state
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT kind,title,is_read FROM notifications LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(notification.0, "tapd_item");
+        assert_eq!(notification.1, "TAPD 任务：整改安全标识");
+        assert_eq!(notification.2, 0);
+        drop(state);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn codex_prompt_forbids_unrequested_git_actions() {
         let item = TapdWorkItem {
             id: "1".into(),
@@ -914,8 +1560,25 @@ mod tests {
             source_url: "https://www.tapd.cn".into(),
             synced_at: String::new(),
         };
-        let prompt = build_codex_prompt(&item, Path::new(r"F:\TB-project\client"));
+        let prompt = build_codex_prompt(
+            &item,
+            Path::new(r"F:\TB-project\client"),
+            "附件弹窗需要支持图片预览，并保持现有权限控制。",
+        );
         assert!(prompt.contains("不要提交、推送、重置、清理或删除"));
         assert!(prompt.contains("安全生产管理"));
+        assert!(prompt.contains("用户补充说明（来自工作台）"));
+        assert!(prompt.contains("附件弹窗需要支持图片预览"));
+        let prompt_without_note =
+            build_codex_prompt(&item, Path::new(r"F:\TB-project\client"), "   ");
+        assert!(!prompt_without_note.contains("用户补充说明（来自工作台）"));
+    }
+
+    #[test]
+    fn codex_follow_up_prompt_contains_review_note_and_safety_boundary() {
+        let prompt = build_codex_follow_up_prompt("按钮仍然会溢出，请限制标题宽度。");
+        assert!(prompt.contains("按钮仍然会溢出"));
+        assert!(prompt.contains("基于当前项目里上一轮已经产生的修改继续完善"));
+        assert!(prompt.contains("不要提交、推送、重置、清理或删除"));
     }
 }

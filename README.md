@@ -81,6 +81,19 @@ npm run dev
 npm run tauri build
 ```
 
+## 一键更新发布
+
+- 设置页使用 Tauri Updater 检查签名更新，安装前自动备份数据库，并显示下载进度。
+- 更新签名私钥保存在当前 Windows 用户的 `.tauri` 目录，不进入 Git；公钥可以随应用公开。
+- 确认版本号和工作区内容后，生成安装版、便携版、签名及兼容下载页的 `release.json`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-signed-release.ps1 -ReleaseNotes "本次更新说明"
+```
+
+- 将生成目录中的安装版、便携版上传到同版本 GitHub Release，并用其中的 `release.json` 更新下载页。
+- 私钥或对应密码丢失后，已安装版本将无法验证后续更新。本机密码文件使用 Windows DPAPI 加密，只能由当前 Windows 用户解密；正式发布前还应把私钥和密码分别配置为 GitHub Actions Secret，不能仅依赖复制该密码文件到其他电脑。
+
 ## 验证命令
 
 ```powershell

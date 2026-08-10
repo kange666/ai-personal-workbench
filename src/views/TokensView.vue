@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import TokenTrendChart from "../components/TokenTrendChart.vue";
 import { getModelTokenMetrics, getProjectTokenMetrics, getTokenSummary, getTokenTrend, isTauriRuntime, listConversationMetrics, scanCodexSessions, scanGitRepositories, setConversationProject, type CodexScanSummary, type ConversationMetric, type GitScanSummary, type ModelTokenMetric, type ProjectTokenMetric, type TokenSummary, type TokenTrendPoint } from "../services/backend";
+import { compactDetailTitle } from "../utils/detailTitle";
 
 type Detail = { kind: "day"; value: TokenTrendPoint } | { kind: "conversation"; value: ConversationMetric } | { kind: "project"; value: ProjectTokenMetric } | { kind: "model"; value: ModelTokenMetric };
 type PeriodMode = "day" | "week" | "month";
@@ -54,7 +55,7 @@ function compact(value: number) { if (value >= 1_000_000_000) return `${(value /
 function percent(value: number) { return `${value.toFixed(1)}%`; }
 function projectName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || path; }
 function openDetail(next: Detail) { detail.value = next; if (next.kind === "conversation") projectEdit.value=projectName(next.value.project); }
-function detailTitle() { if (!detail.value) return ""; if (detail.value.kind === "day") return `${detail.value.value.date} Token 明细`; if (detail.value.kind === "conversation") return detail.value.value.title || "未命名会话"; if (detail.value.kind === "project") return projectName(detail.value.value.project); return detail.value.value.model; }
+function detailTitle() { if (!detail.value) return ""; if (detail.value.kind === "day") return `${detail.value.value.date} Token 明细`; if (detail.value.kind === "conversation") return compactDetailTitle(detail.value.value.title || "未命名会话", projectName(detail.value.value.project)); if (detail.value.kind === "project") return compactDetailTitle(projectName(detail.value.value.project)); return compactDetailTitle(detail.value.value.model); }
 
 async function refresh() {
   if (!isTauriRuntime()) return;

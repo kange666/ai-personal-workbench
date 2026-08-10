@@ -22,6 +22,9 @@ pub struct WorkbenchNotification {
     pub is_read: bool,
     pub created_at: String,
     pub read_at: Option<String>,
+    pub review_status: String,
+    pub review_note: String,
+    pub reviewed_at: Option<String>,
 }
 
 #[derive(Default, Debug, Serialize)]
@@ -373,27 +376,32 @@ pub fn list_notifications(
 ) -> Result<Vec<WorkbenchNotification>, String> {
     let connection = state.connect()?;
     let mut statement = connection
-        .prepare("SELECT n.id,n.kind,n.title,n.body,n.output,n.source_id,n.route,n.is_read,n.created_at,n.read_at,
+        .prepare("SELECT n.id,n.kind,n.title,n.body,n.output,n.source_id,n.route,n.is_read,n.created_at,n.read_at,n.review_status,n.review_note,n.reviewed_at,
                          COALESCE(c.project_override,''),COALESCE(c.cwd,''),COALESCE(c.title,'')
                   FROM notifications n LEFT JOIN conversations c ON c.id=n.source_id
                   ORDER BY n.is_read ASC,n.created_at DESC LIMIT ?1")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([limit.unwrap_or(30).clamp(1, 100)], |row| {
+            let kind = row.get::<_, String>(1)?;
             let original_title = row.get::<_, String>(2)?;
             let body = row.get::<_, String>(3)?;
             let output = row.get::<_, String>(4)?;
             Ok(WorkbenchNotification {
                 id: row.get(0)?,
-                kind: row.get(1)?,
-                title: notification_title(
-                    &row.get::<_, String>(10)?,
-                    &row.get::<_, String>(11)?,
-                    &row.get::<_, String>(12)?,
-                    &body,
-                    &output,
-                    &original_title,
-                ),
+                kind: kind.clone(),
+                title: if kind == "tapd_item" {
+                    original_title.clone()
+                } else {
+                    notification_title(
+                        &row.get::<_, String>(13)?,
+                        &row.get::<_, String>(14)?,
+                        &row.get::<_, String>(15)?,
+                        &body,
+                        &output,
+                        &original_title,
+                    )
+                },
                 body,
                 output,
                 source_id: row.get(5)?,
@@ -401,6 +409,9 @@ pub fn list_notifications(
                 is_read: row.get::<_, i64>(7)? != 0,
                 created_at: row.get(8)?,
                 read_at: row.get(9)?,
+                review_status: row.get(10)?,
+                review_note: row.get(11)?,
+                reviewed_at: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -430,6 +441,27 @@ pub fn mark_all_notifications_read(state: tauri::State<'_, DatabaseState>) -> Re
         .execute(
             "UPDATE notifications SET is_read=1,read_at=?1 WHERE is_read=0",
             [Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn review_notification(
+    state: tauri::State<'_, DatabaseState>,
+    id: String,
+    decision: String,
+    note: String,
+) -> Result<(), String> {
+    if !["accepted", "follow_up"].contains(&decision.as_str()) {
+        return Err("无效的处理结论。".into());
+    }
+    let now = Utc::now().to_rfc3339();
+    state
+        .connect()?
+        .execute(
+            "UPDATE notifications SET review_status=?1,review_note=?2,reviewed_at=?3,is_read=1,read_at=COALESCE(read_at,?3) WHERE id=?4",
+            params![decision, note.trim(), now, id],
         )
         .map_err(|error| error.to_string())?;
     Ok(())

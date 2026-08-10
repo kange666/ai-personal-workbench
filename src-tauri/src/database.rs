@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, MAIN_DB};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 28;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -509,6 +509,24 @@ impl DatabaseState {
                    FOREIGN KEY(video_job_id) REFERENCES video_jobs(id) ON DELETE CASCADE
                  );
                  CREATE INDEX IF NOT EXISTS idx_video_deliverables_job ON video_deliverables(video_job_id,kind);
+                 CREATE TABLE IF NOT EXISTS video_publish_records (
+                   id TEXT PRIMARY KEY,
+                   video_job_id TEXT NOT NULL,
+                   platform TEXT NOT NULL DEFAULT '抖音',
+                   status TEXT NOT NULL DEFAULT 'ready',
+                   publish_url TEXT NOT NULL DEFAULT '',
+                   published_at TEXT,
+                   views INTEGER NOT NULL DEFAULT 0,
+                   likes INTEGER NOT NULL DEFAULT 0,
+                   comments INTEGER NOT NULL DEFAULT 0,
+                   favorites INTEGER NOT NULL DEFAULT 0,
+                   notes TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   FOREIGN KEY(video_job_id) REFERENCES video_jobs(id) ON DELETE CASCADE,
+                   UNIQUE(video_job_id,platform)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_video_publish_records_status ON video_publish_records(status,updated_at DESC);
                  CREATE TABLE IF NOT EXISTS toolchain_installations (
                    id TEXT PRIMARY KEY,
                    tool_name TEXT NOT NULL,
@@ -558,10 +576,59 @@ impl DatabaseState {
                    source_id TEXT,
                    route TEXT NOT NULL DEFAULT '/',
                    is_read INTEGER NOT NULL DEFAULT 0,
+                   review_status TEXT NOT NULL DEFAULT 'pending',
+                   review_note TEXT NOT NULL DEFAULT '',
+                   reviewed_at TEXT,
                    created_at TEXT NOT NULL,
                    read_at TEXT
                  );
                  CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read,created_at);
+                 CREATE TABLE IF NOT EXISTS quick_captures (
+                   id TEXT PRIMARY KEY,
+                   kind TEXT NOT NULL DEFAULT 'note',
+                   content TEXT NOT NULL,
+                   source_url TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT 'inbox',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS knowledge_versions (
+                   id TEXT PRIMARY KEY,
+                   knowledge_id TEXT NOT NULL,
+                   version_number INTEGER NOT NULL,
+                   title TEXT NOT NULL,
+                   content TEXT NOT NULL,
+                   tags TEXT NOT NULL DEFAULT '',
+                   change_source TEXT NOT NULL DEFAULT 'manual',
+                   created_at TEXT NOT NULL,
+                   FOREIGN KEY(knowledge_id) REFERENCES knowledge_items(id) ON DELETE CASCADE,
+                   UNIQUE(knowledge_id,version_number)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_knowledge_versions_item ON knowledge_versions(knowledge_id,version_number DESC);
+                 CREATE TABLE IF NOT EXISTS knowledge_codex_jobs (
+                   id TEXT PRIMARY KEY,
+                   knowledge_id TEXT NOT NULL,
+                   repository_path TEXT NOT NULL,
+                   instruction TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT 'running',
+                   thread_id TEXT,
+                   output TEXT NOT NULL DEFAULT '',
+                   error_message TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   FOREIGN KEY(knowledge_id) REFERENCES knowledge_items(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_knowledge_codex_jobs_item ON knowledge_codex_jobs(knowledge_id,created_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_quick_captures_status ON quick_captures(status,created_at);
+                 CREATE TABLE IF NOT EXISTS daily_checkins (
+                   date TEXT PRIMARY KEY,
+                   energy INTEGER,
+                   mood TEXT NOT NULL DEFAULT '',
+                   exercise_minutes INTEGER NOT NULL DEFAULT 0,
+                   note TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS email_deliveries (
                    notification_id TEXT PRIMARY KEY,
                    status TEXT NOT NULL,
@@ -602,6 +669,14 @@ impl DatabaseState {
                     thread_id TEXT,
                     output TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
+                    baseline_head TEXT NOT NULL DEFAULT '',
+                    baseline_worktree TEXT NOT NULL DEFAULT '',
+                    result_head TEXT NOT NULL DEFAULT '',
+                    changed_files TEXT NOT NULL DEFAULT '',
+                    test_summary TEXT NOT NULL DEFAULT '',
+                    review_status TEXT NOT NULL DEFAULT 'pending',
+                    review_note TEXT NOT NULL DEFAULT '',
+                    reviewed_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(item_id) REFERENCES tapd_work_items(id) ON DELETE CASCADE
@@ -637,6 +712,17 @@ impl DatabaseState {
             "ALTER TABLE video_jobs ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE video_jobs ADD COLUMN progress_message TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE video_jobs ADD COLUMN last_progress_at TEXT",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN baseline_head TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN baseline_worktree TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN result_head TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN changed_files TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN test_summary TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN review_note TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN reviewed_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE notifications ADD COLUMN review_note TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE notifications ADD COLUMN reviewed_at TEXT",
         ] {
             let _ = connection.execute(migration, []);
         }

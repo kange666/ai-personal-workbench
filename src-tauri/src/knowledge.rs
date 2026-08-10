@@ -6,9 +6,16 @@ use crate::{
     },
 };
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::Value;
+use std::{
+    collections::{HashMap, HashSet},
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::Path,
+    process::Stdio,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +45,34 @@ pub struct KnowledgeSyncSummary {
     pub skills: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeVersion {
+    pub id: String,
+    pub knowledge_id: String,
+    pub version_number: i64,
+    pub title: String,
+    pub content: String,
+    pub tags: String,
+    pub change_source: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeCodexJob {
+    pub id: String,
+    pub knowledge_id: String,
+    pub repository_path: String,
+    pub instruction: String,
+    pub status: String,
+    pub thread_id: Option<String>,
+    pub output: String,
+    pub error_message: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Default)]
 struct ConversationKnowledge {
     id: String,
@@ -59,6 +94,51 @@ struct GeneratedKnowledge {
     source_id: String,
     tags: String,
     score: i32,
+}
+
+fn canonical_key(project: &str, title: &str) -> String {
+    format!("{}|{}", project.trim(), title.trim())
+        .to_lowercase()
+        .chars()
+        .filter(|character| {
+            !character.is_whitespace() && !"，。！？、,:：;；()（）[]【】".contains(*character)
+        })
+        .collect()
+}
+
+fn stable_auto_id(project: &str, title: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in canonical_key(project, title).bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("auto:{hash:016x}")
+}
+
+fn save_version(
+    transaction: &rusqlite::Transaction<'_>,
+    knowledge_id: &str,
+    title: &str,
+    content: &str,
+    tags: &str,
+    change_source: &str,
+    created_at: &str,
+) -> Result<(), String> {
+    let version_number: i64 = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(version_number),0)+1 FROM knowledge_versions WHERE knowledge_id=?1",
+            [knowledge_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO knowledge_versions(id,knowledge_id,version_number,title,content,tags,change_source,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![Uuid::new_v4().to_string(),knowledge_id,version_number,title,content,tags,change_source,created_at],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn knowledge_kind(content: &str) -> &'static str {
@@ -733,7 +813,7 @@ fn build_knowledge(fact: &ConversationKnowledge) -> Option<GeneratedKnowledge> {
         tags.push("归档对话".to_string());
     }
     Some(GeneratedKnowledge {
-        id: format!("auto:{}", fact.id),
+        id: stable_auto_id(&fact.project, &title),
         kind,
         title,
         content,
@@ -831,7 +911,23 @@ pub fn sync_knowledge_for_state(state: &DatabaseState) -> Result<KnowledgeSyncSu
             deduplicated.insert(key, item);
         }
     }
-    let mut generated = deduplicated.into_values().collect::<Vec<_>>();
+    let manual_keys = {
+        let mut statement = connection
+            .prepare("SELECT COALESCE(project,''),title FROM knowledge_items WHERE source_type='manual' OR id NOT LIKE 'auto:%'")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.filter_map(Result::ok)
+            .map(|(project, title)| canonical_key(&project, &title))
+            .collect::<HashSet<_>>()
+    };
+    let mut generated = deduplicated
+        .into_values()
+        .filter(|item| !manual_keys.contains(&canonical_key(&item.project, &item.title)))
+        .collect::<Vec<_>>();
     generated.sort_by(|left, right| {
         left.project
             .cmp(&right.project)
@@ -841,18 +937,42 @@ pub fn sync_knowledge_for_state(state: &DatabaseState) -> Result<KnowledgeSyncSu
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "DELETE FROM knowledge_items WHERE id LIKE 'auto:%' AND source_type='conversation'",
-            [],
-        )
-        .map_err(|error| error.to_string())?;
     let now = Utc::now().to_rfc3339();
+    let mut active_ids = HashSet::new();
     for item in generated {
+        active_ids.insert(item.id.clone());
+        let existing = transaction
+            .query_row(
+                "SELECT title,content,tags FROM knowledge_items WHERE id=?1",
+                [&item.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((title, content, tags)) = existing.as_ref() {
+            if title != &item.title || content != &item.content || tags != &item.tags {
+                save_version(
+                    &transaction,
+                    &item.id,
+                    title,
+                    content,
+                    tags,
+                    "auto_sync",
+                    &now,
+                )?;
+            }
+        }
         transaction
             .execute(
                 "INSERT INTO knowledge_items(id,kind,title,content,project,source_type,source_id,tags,confirmed,created_at,updated_at)
-                 VALUES(?1,?2,?3,?4,?5,'conversation',?6,?7,1,?8,?8)",
+                 VALUES(?1,?2,?3,?4,?5,'conversation',?6,?7,1,?8,?8)
+                 ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,title=excluded.title,content=excluded.content,project=excluded.project,source_id=excluded.source_id,tags=excluded.tags,updated_at=excluded.updated_at",
                 params![
                     item.id,
                     item.kind,
@@ -872,6 +992,22 @@ pub fn sync_knowledge_for_state(state: &DatabaseState) -> Result<KnowledgeSyncSu
             "skill" => summary.skills += 1,
             _ => summary.experiences += 1,
         }
+    }
+    let stale_ids = {
+        let mut statement = transaction
+            .prepare("SELECT id FROM knowledge_items WHERE id LIKE 'auto:%' AND source_type='conversation'")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.filter_map(Result::ok)
+            .filter(|id| !active_ids.contains(id))
+            .collect::<Vec<_>>()
+    };
+    for id in stale_ids {
+        transaction
+            .execute("DELETE FROM knowledge_items WHERE id=?1", [id])
+            .map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(summary)
@@ -931,13 +1067,309 @@ pub fn save_knowledge(
         item.created_at = now.clone();
     }
     item.updated_at = now;
-    state.connect()?.execute(
+    let mut connection = state.connect()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let existing = transaction
+        .query_row(
+            "SELECT title,content,tags FROM knowledge_items WHERE id=?1",
+            [&item.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some((title, content, tags)) = existing.as_ref() {
+        if title != &item.title || content != &item.content || tags != &item.tags {
+            save_version(
+                &transaction,
+                &item.id,
+                title,
+                content,
+                tags,
+                "manual_edit",
+                &item.updated_at,
+            )?;
+        }
+    }
+    transaction.execute(
         "INSERT INTO knowledge_items(id,kind,title,content,project,source_type,source_id,tags,confirmed,created_at,updated_at)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
          ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,title=excluded.title,content=excluded.content,project=excluded.project,source_type=excluded.source_type,source_id=excluded.source_id,tags=excluded.tags,confirmed=excluded.confirmed,updated_at=excluded.updated_at",
         params![item.id,item.kind,item.title,item.content,item.project,item.source_type,item.source_id,item.tags,item.confirmed,item.created_at,item.updated_at],
     ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(item)
+}
+
+#[tauri::command]
+pub fn list_knowledge_versions(
+    state: tauri::State<'_, DatabaseState>,
+    knowledge_id: String,
+) -> Result<Vec<KnowledgeVersion>, String> {
+    let connection = state.connect()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id,knowledge_id,version_number,title,content,tags,change_source,created_at
+         FROM knowledge_versions WHERE knowledge_id=?1 ORDER BY version_number DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([knowledge_id], |row| {
+            Ok(KnowledgeVersion {
+                id: row.get(0)?,
+                knowledge_id: row.get(1)?,
+                version_number: row.get(2)?,
+                title: row.get(3)?,
+                content: row.get(4)?,
+                tags: row.get(5)?,
+                change_source: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn knowledge_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeCodexJob> {
+    Ok(KnowledgeCodexJob {
+        id: row.get(0)?,
+        knowledge_id: row.get(1)?,
+        repository_path: row.get(2)?,
+        instruction: row.get(3)?,
+        status: row.get(4)?,
+        thread_id: row.get(5)?,
+        output: row.get(6)?,
+        error_message: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+#[tauri::command]
+pub fn list_knowledge_codex_jobs(
+    state: tauri::State<'_, DatabaseState>,
+    knowledge_id: Option<String>,
+) -> Result<Vec<KnowledgeCodexJob>, String> {
+    let connection = state.connect()?;
+    let query = if knowledge_id.is_some() {
+        "SELECT id,knowledge_id,repository_path,instruction,status,thread_id,output,error_message,created_at,updated_at FROM knowledge_codex_jobs WHERE knowledge_id=?1 ORDER BY created_at DESC"
+    } else {
+        "SELECT id,knowledge_id,repository_path,instruction,status,thread_id,output,error_message,created_at,updated_at FROM knowledge_codex_jobs WHERE ?1 IS NULL ORDER BY created_at DESC LIMIT 100"
+    };
+    let mut statement = connection
+        .prepare(query)
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([knowledge_id], knowledge_job)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn finish_knowledge_job(
+    state: &DatabaseState,
+    job_id: &str,
+    knowledge_id: &str,
+    status: &str,
+    thread_id: Option<&str>,
+    output: &str,
+    error_message: &str,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    let connection = state.connect()?;
+    connection.execute(
+        "UPDATE knowledge_codex_jobs SET status=?2,thread_id=?3,output=?4,error_message=?5,updated_at=?6 WHERE id=?1",
+        params![job_id,status,thread_id,output,error_message,now],
+    ).map_err(|error| error.to_string())?;
+    let title = if status == "completed" {
+        "知识实践已完成"
+    } else {
+        "知识实践需要处理"
+    };
+    connection.execute(
+        "INSERT INTO notifications(id,kind,title,body,output,source_id,route,is_read,created_at,read_at)
+         VALUES(?1,'codex_task',?2,?3,?4,?5,?6,0,?7,NULL)
+         ON CONFLICT(id) DO UPDATE SET title=excluded.title,body=excluded.body,output=excluded.output,is_read=0,created_at=excluded.created_at,read_at=NULL",
+        params![format!("knowledge-codex:{job_id}"),title,if status == "completed" {"Codex 已完成知识实践，请检查输出和代码。"} else {"Codex 执行失败，请查看错误信息。"},if output.trim().is_empty(){error_message}else{output},job_id,format!("/knowledge?item={knowledge_id}"),now],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn run_knowledge_codex_job(
+    state: DatabaseState,
+    job_id: String,
+    item: KnowledgeItem,
+    repository_path: String,
+    instruction: String,
+) -> Result<(), String> {
+    let repository = Path::new(&repository_path);
+    let (cli_path, _) = crate::codex_video::resolve_codex_cli()?;
+    let prompt = format!(
+        "请在项目 `{}` 中参考下面这条已确认知识完成实践。\n\n标题：{}\n\n内容：\n{}\n\n补充要求：{}\n\n先检查项目真实代码和约束，只做与要求直接相关的最小修改；不得提交、推送、重置或删除用户文件；完成后运行与改动相称的验证，并用中文说明完成内容、文件和验证结果。",
+        repository.display(), item.title, item.content, if instruction.trim().is_empty() { "无" } else { instruction.trim() }
+    );
+    let job_dir = state
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("knowledge-codex-jobs")
+        .join(&job_id);
+    fs::create_dir_all(&job_dir).map_err(|error| error.to_string())?;
+    let jsonl_path = job_dir.join("codex-run.jsonl");
+    let stderr_path = job_dir.join("codex-stderr.log");
+    let last_message_path = job_dir.join("codex-last-message.md");
+    let stderr_file = File::create(&stderr_path).map_err(|error| error.to_string())?;
+    let mut command = crate::codex_video::hidden_command(&cli_path);
+    command
+        .args(["--sandbox", "workspace-write", "--cd"])
+        .arg(repository)
+        .args(["exec", "--json", "--skip-git-repo-check"])
+        .arg("--output-last-message")
+        .arg(&last_message_path)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr_file));
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动 Codex CLI 失败：{error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取 Codex 输出。".to_string())?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(jsonl_path)
+        .map_err(|error| error.to_string())?;
+    let mut thread_id = None;
+    let mut streamed_output = String::new();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        writeln!(log, "{line}").map_err(|error| error.to_string())?;
+        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            if value.get("type").and_then(Value::as_str) == Some("thread.started") {
+                thread_id = value
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            if value.get("type").and_then(Value::as_str) == Some("item.completed")
+                && value.pointer("/item/type").and_then(Value::as_str) == Some("agent_message")
+            {
+                streamed_output = value
+                    .pointer("/item/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+            }
+        }
+    }
+    let status = child.wait().map_err(|error| error.to_string())?;
+    let output = fs::read_to_string(last_message_path)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(streamed_output);
+    if status.success() {
+        finish_knowledge_job(
+            &state,
+            &job_id,
+            &item.id,
+            "completed",
+            thread_id.as_deref(),
+            &output,
+            "",
+        )
+    } else {
+        let error =
+            fs::read_to_string(stderr_path).unwrap_or_else(|_| "Codex CLI 执行失败。".to_string());
+        finish_knowledge_job(
+            &state,
+            &job_id,
+            &item.id,
+            "failed",
+            thread_id.as_deref(),
+            &output,
+            &error,
+        )
+    }
+}
+
+#[tauri::command]
+pub fn start_knowledge_codex_job(
+    state: tauri::State<'_, DatabaseState>,
+    knowledge_id: String,
+    repository_path: String,
+    instruction: String,
+) -> Result<KnowledgeCodexJob, String> {
+    let repository = Path::new(&repository_path);
+    if !repository.is_dir() {
+        return Err("选择的项目目录不存在。".to_string());
+    }
+    let database = state.inner().clone();
+    let connection = database.connect()?;
+    let allowed: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repository_assets WHERE path=?1)",
+            [&repository_path],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !allowed {
+        return Err("只能选择项目资产中已经识别的本地项目。".to_string());
+    }
+    let item = connection.query_row(
+        "SELECT id,kind,title,content,project,source_type,source_id,tags,confirmed,created_at,updated_at FROM knowledge_items WHERE id=?1",
+        [&knowledge_id],
+        |row| Ok(KnowledgeItem { id: row.get(0)?, kind: row.get(1)?, title: row.get(2)?, content: row.get(3)?, project: row.get(4)?, source_type: row.get(5)?, source_id: row.get(6)?, tags: row.get(7)?, confirmed: row.get(8)?, created_at: row.get(9)?, updated_at: row.get(10)? }),
+    ).map_err(|_| "知识不存在。".to_string())?;
+    if !item.confirmed {
+        return Err("请先确认这条知识，再发送给 Codex。".to_string());
+    }
+    crate::codex_video::resolve_codex_cli()?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    connection.execute(
+        "INSERT INTO knowledge_codex_jobs(id,knowledge_id,repository_path,instruction,status,thread_id,output,error_message,created_at,updated_at) VALUES(?1,?2,?3,?4,'running',NULL,'','',?5,?5)",
+        params![id,knowledge_id,repository_path,instruction,now],
+    ).map_err(|error| error.to_string())?;
+    let job = KnowledgeCodexJob {
+        id: id.clone(),
+        knowledge_id: item.id.clone(),
+        repository_path: repository_path.clone(),
+        instruction: instruction.clone(),
+        status: "running".to_string(),
+        thread_id: None,
+        output: String::new(),
+        error_message: String::new(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = run_knowledge_codex_job(
+            database.clone(),
+            id.clone(),
+            item.clone(),
+            repository_path,
+            instruction,
+        ) {
+            let _ = finish_knowledge_job(&database, &id, &item.id, "failed", None, "", &error);
+        }
+    });
+    Ok(job)
 }
 
 #[tauri::command]

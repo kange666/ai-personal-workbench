@@ -1,5 +1,6 @@
 mod ai;
 mod audit;
+mod capture;
 mod codex;
 mod codex_video;
 mod content;
@@ -7,6 +8,7 @@ mod database;
 mod email;
 mod git;
 mod knowledge;
+mod maintenance;
 mod notifications;
 mod parity;
 mod parity_catalog;
@@ -17,6 +19,7 @@ mod testing;
 mod toolchain;
 mod videos;
 mod vip;
+mod wellbeing;
 mod worktime;
 
 use chrono::{Duration, Timelike};
@@ -184,6 +187,10 @@ fn quota_tray_tooltip(quota: Option<&codex::TrayQuota>) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             app.handle().plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -289,6 +296,9 @@ pub fn run() {
             let history_state = state.clone();
             let history_app = app.handle().clone();
             std::thread::spawn(move || {
+                if let Err(error) = maintenance::ensure_daily_backup_for_state(&history_state) {
+                    eprintln!("启动时创建每日数据库备份失败：{error}");
+                }
                 if let Err(error) = parity::sync_feature_parity_for_state(&history_state) {
                     eprintln!("启动时同步 PC/APP 对照矩阵失败：{error}");
                 }
@@ -387,6 +397,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version,
             database::database_health,
+            capture::list_quick_captures,
+            capture::save_quick_capture,
+            capture::archive_quick_capture,
+            wellbeing::get_daily_checkin,
+            wellbeing::save_daily_checkin,
+            maintenance::backup_status,
+            maintenance::create_database_backup,
+            maintenance::export_database_backup,
+            maintenance::restore_database_backup,
+            maintenance::check_for_updates,
             database::list_tasks,
             database::save_task,
             database::delete_task,
@@ -399,6 +419,9 @@ pub fn run() {
             tapd::list_tapd_items,
             tapd::list_tapd_codex_jobs,
             tapd::start_tapd_codex_job,
+            tapd::continue_tapd_codex_job,
+            tapd::run_tapd_codex_job_tests,
+            tapd::review_tapd_codex_job,
             database::token_summary,
             database::list_conversation_metrics,
             database::set_conversation_project,
@@ -418,6 +441,7 @@ pub fn run() {
             notifications::list_notifications,
             notifications::mark_notification_read,
             notifications::mark_all_notifications_read,
+            notifications::review_notification,
             email::email_notification_status,
             email::save_qq_email_config,
             email::delete_qq_email_config,
@@ -443,6 +467,9 @@ pub fn run() {
             knowledge::sync_knowledge,
             knowledge::save_knowledge,
             knowledge::delete_knowledge,
+            knowledge::list_knowledge_versions,
+            knowledge::list_knowledge_codex_jobs,
+            knowledge::start_knowledge_codex_job,
             ai::ai_status,
             ai::save_deepseek_key,
             ai::clear_deepseek_key,
@@ -450,6 +477,7 @@ pub fn run() {
             ai::refine_report_with_ai,
             ai::ask_knowledge,
             testing::list_test_menus,
+            testing::recommend_tests_from_git,
             testing::list_test_runs,
             testing::read_test_report,
             testing::start_test_run,
@@ -465,6 +493,8 @@ pub fn run() {
             videos::sync_video_pipeline,
             videos::list_video_jobs,
             videos::save_video_job_type,
+            videos::list_video_publish_records,
+            videos::save_video_publish_record,
             vip::vip_status,
             vip::activate_vip,
             vip::deactivate_vip,

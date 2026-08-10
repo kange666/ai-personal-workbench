@@ -107,6 +107,40 @@ pub struct SaveVideoType {
     video_type: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPublishRecord {
+    id: String,
+    video_job_id: String,
+    title: String,
+    video_type: String,
+    platform: String,
+    status: String,
+    publish_url: String,
+    published_at: Option<String>,
+    views: i64,
+    likes: i64,
+    comments: i64,
+    favorites: i64,
+    notes: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveVideoPublishRecord {
+    video_job_id: String,
+    platform: String,
+    status: String,
+    publish_url: String,
+    published_at: Option<String>,
+    views: i64,
+    likes: i64,
+    comments: i64,
+    favorites: i64,
+    notes: String,
+}
+
 pub(crate) fn creation_root() -> Result<PathBuf, String> {
     let profile =
         env::var_os("USERPROFILE").ok_or_else(|| "无法读取 Windows 用户目录。".to_string())?;
@@ -532,6 +566,15 @@ pub fn sync_video_pipeline_for_state(
         }
     }
     let jobs = list_video_jobs_for_state(state)?;
+    let now = Utc::now().to_rfc3339();
+    let connection = state.connect()?;
+    for job in jobs.iter().filter(|item| item.status == "complete") {
+        connection.execute(
+            "INSERT OR IGNORE INTO video_publish_records(id,video_job_id,platform,status,publish_url,published_at,views,likes,comments,favorites,notes,created_at,updated_at)
+             VALUES(?1,?2,'抖音','ready','',NULL,0,0,0,0,'',?3,?3)",
+            params![format!("publish:{}:douyin",job.id),job.id,now],
+        ).map_err(|error| error.to_string())?;
+    }
     Ok(VideoPipelineSummary {
         job_count: jobs.len(),
         complete_count: jobs.iter().filter(|item| item.status == "complete").count(),
@@ -691,6 +734,93 @@ pub fn save_video_job_type(
         "UPDATE video_jobs SET video_type=?2,manually_confirmed_type=1,updated_at=?3 WHERE id=?1",
         params![selection.id,selection.video_type,Utc::now().to_rfc3339()],
     ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_video_publish_records(
+    state: tauri::State<'_, DatabaseState>,
+) -> Result<Vec<VideoPublishRecord>, String> {
+    let connection = state.connect()?;
+    let mut statement = connection.prepare(
+        "SELECT p.id,p.video_job_id,j.title,j.video_type,p.platform,p.status,p.publish_url,p.published_at,p.views,p.likes,p.comments,p.favorites,p.notes,p.updated_at
+         FROM video_publish_records p JOIN video_jobs j ON j.id=p.video_job_id
+         ORDER BY CASE p.status WHEN 'ready' THEN 0 WHEN 'published' THEN 1 ELSE 2 END,p.updated_at DESC",
+    ).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(VideoPublishRecord {
+                id: row.get(0)?,
+                video_job_id: row.get(1)?,
+                title: row.get(2)?,
+                video_type: row.get(3)?,
+                platform: row.get(4)?,
+                status: row.get(5)?,
+                publish_url: row.get(6)?,
+                published_at: row.get(7)?,
+                views: row.get(8)?,
+                likes: row.get(9)?,
+                comments: row.get(10)?,
+                favorites: row.get(11)?,
+                notes: row.get(12)?,
+                updated_at: row.get(13)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_video_publish_record(
+    state: tauri::State<'_, DatabaseState>,
+    record: SaveVideoPublishRecord,
+) -> Result<(), String> {
+    if !["ready", "published"].contains(&record.status.as_str()) {
+        return Err("发布状态仅支持待发布或已发布。".to_string());
+    }
+    if [
+        record.views,
+        record.likes,
+        record.comments,
+        record.favorites,
+    ]
+    .iter()
+    .any(|value| *value < 0)
+    {
+        return Err("播放、点赞、评论和收藏不能为负数。".to_string());
+    }
+    let platform = if record.platform.trim().is_empty() {
+        "抖音"
+    } else {
+        record.platform.trim()
+    };
+    let now = Utc::now().to_rfc3339();
+    let published_at = if record.status == "published" {
+        record.published_at.or_else(|| Some(now.clone()))
+    } else {
+        None
+    };
+    let connection = state.connect()?;
+    let job_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM video_jobs WHERE id=?1)",
+            [&record.video_job_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !job_exists {
+        return Err("视频生产任务不存在。".to_string());
+    }
+    connection.execute(
+        "INSERT INTO video_publish_records(id,video_job_id,platform,status,publish_url,published_at,views,likes,comments,favorites,notes,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)
+         ON CONFLICT(video_job_id,platform) DO UPDATE SET status=excluded.status,publish_url=excluded.publish_url,published_at=excluded.published_at,views=excluded.views,likes=excluded.likes,comments=excluded.comments,favorites=excluded.favorites,notes=excluded.notes,updated_at=excluded.updated_at",
+        params![format!("publish:{}:{}",record.video_job_id,platform),record.video_job_id,platform,record.status,record.publish_url.trim(),published_at,record.views,record.likes,record.comments,record.favorites,record.notes.trim(),now],
+    ).map_err(|error| error.to_string())?;
+    if record.status == "published" {
+        connection.execute("UPDATE content_ideas SET status='published',updated_at=?2 WHERE id=(SELECT content_idea_id FROM video_jobs WHERE id=?1)",params![record.video_job_id,now]).map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 

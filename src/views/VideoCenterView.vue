@@ -7,17 +7,21 @@ import {
   isTauriRuntime,
   listLocalVideos,
   listVideoJobs,
+  listVideoPublishRecords,
   openLocalVideo,
   readVideoCover,
   revealLocalFile,
   revealLocalVideo,
   saveVideoJobType,
+  saveVideoPublishRecord,
   syncVideoPipeline,
   type VideoDeliverable,
   type VideoItem,
   type VideoJob,
   type VideoProjectDetails,
+  type VideoPublishRecord,
 } from "../services/backend";
+import { compactDetailTitle } from "../utils/detailTitle";
 
 const demoVideos: VideoItem[] = [
   { id:"demo-1", title:"使用 Codex 2 小时完成个人工作台_最终版", project:"使用codex2小时完成个人工作台", path:"C:\\Users\\11429\\Documents\\视频创作\\使用codex2小时完成个人工作台\\output\\最终版.mp4", folder:"output", sourceRoot:"视频创作", fileName:"最终版.mp4", extension:"MP4", sizeBytes:19_587_568, modifiedAt:new Date().toISOString(), status:"final", collection:"tech" },
@@ -37,9 +41,15 @@ const selected = ref<VideoItem | null>(null);
 const details = ref<VideoProjectDetails | null>(null);
 const detailsLoading = ref(false);
 const detailMessage = ref("");
-const activeSection = ref<"library" | "pipeline">(route.query.tab === "pipeline" ? "pipeline" : "library");
+const activeSection = ref<"library" | "pipeline" | "publish">(route.query.tab === "pipeline" ? "pipeline" : route.query.tab === "publish" ? "publish" : "library");
 const jobs = ref<VideoJob[]>([]);
+const publishRecords = ref<VideoPublishRecord[]>([]);
+const savingPublishId = ref("");
 let jobTimer = 0;
+
+const selectedTitle = computed(() =>
+  compactDetailTitle(selected.value?.title || "视频详情", selected.value?.project || "视频"),
+);
 
 const projects = computed(() => ["全部项目", ...new Set(videos.value.map(item => item.project))]);
 const filtered = computed(() => videos.value.filter(item => {
@@ -87,10 +97,21 @@ async function refresh() {
     if (isTauriRuntime()) {
       await syncVideoPipeline();
       jobs.value = await listVideoJobs();
+      publishRecords.value = await listVideoPublishRecords();
     }
     await loadCovers(videos.value);
   } catch (cause) { error.value=String(cause); }
   finally { loading.value=false; }
+}
+async function savePublish(record: VideoPublishRecord, markPublished = false) {
+  if (!isTauriRuntime()) return;
+  savingPublishId.value=record.id; error.value="";
+  try {
+    if (markPublished) record.status="published";
+    await saveVideoPublishRecord({ videoJobId:record.videoJobId, platform:record.platform, status:record.status, publishUrl:record.publishUrl, publishedAt:record.publishedAt, views:record.views, likes:record.likes, comments:record.comments, favorites:record.favorites, notes:record.notes });
+    publishRecords.value=await listVideoPublishRecords();
+  } catch (cause) { error.value=String(cause); }
+  finally { savingPublishId.value=""; }
 }
 async function changeJobType(job: VideoJob) {
   if (!isTauriRuntime()) return;
@@ -165,7 +186,7 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
   <div class="view video-center-view">
     <header class="page-header"><div><h1>视频中心</h1><p>管理本地成片，并按脚本、视频、封面、发布文案检查生产交付</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">{{ loading ? '扫描中…' : '↻ 重新扫描' }}</button></div></header>
     <p v-if="error" class="scan-message error">{{ error }}</p>
-    <div class="video-center-tabs"><button :class="{active:activeSection==='library'}" @click="activeSection='library'">本地视频库</button><button :class="{active:activeSection==='pipeline'}" @click="activeSection='pipeline'">生产流水线</button></div>
+    <div class="video-center-tabs"><button :class="{active:activeSection==='library'}" @click="activeSection='library'">本地视频库</button><button :class="{active:activeSection==='pipeline'}" @click="activeSection='pipeline'">生产流水线</button><button :class="{active:activeSection==='publish'}" @click="activeSection='publish'">发布与复盘</button></div>
     <section v-if="activeSection==='library'" class="video-collections">
       <button v-for="item in collections" :key="item.id" :class="[item.id,{active:collectionFilter===item.id}]" @click="collectionFilter=collectionFilter===item.id?'all':item.id">
         <i>{{ item.mark }}</i><span><b>{{ item.title }}</b><small>{{ item.subtitle }}</small></span><em>{{ collectionCounts[item.id] }} 个作品</em>
@@ -187,7 +208,7 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
         <div v-if="!filtered.length && !loading" class="empty-state video-empty"><b>没有符合条件的视频</b><p>工作台只展示成片和 renders/output 中的渲染结果，中间 clip 会自动忽略。</p></div>
       </div>
     </section>
-    <template v-else>
+    <template v-if="activeSection==='pipeline'">
       <section class="video-metrics pipeline-metrics"><div><span>生产项目</span><b>{{ jobs.length }}</b><small>每个目录只保留一条任务</small></div><div><span>完整交付</span><b>{{ pipelineStats.complete }}</b><small>四项交付全部可读</small></div><div><span>需要补齐</span><b>{{ pipelineStats.attention }}</b><small>明确显示缺少哪一项</small></div><div><span>已覆盖合集</span><b>{{ pipelineStats.types }}/3</b><small>人性、科技、推理</small></div></section>
       <section class="panel pipeline-panel">
         <div class="pipeline-explain"><b>统一验收口径</b><span>脚本 → 成片 → 封面 → 发布文案。工作台只检查并管理现有本地交付，不会未经确认自动发布视频。</span></div>
@@ -201,10 +222,14 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
         </article><div v-if="!jobs.length&&!loading" class="empty-state"><b>尚未建立视频生产任务</b><p>点击重新扫描后，会从本地视频项目自动建立。</p></div></div>
       </section>
     </template>
+    <section v-if="activeSection==='publish'" class="panel publish-review-panel">
+      <header><div><h2>发布与数据复盘</h2><p>完整交付后自动进入待发布。工作台只记录状态和数据，不会在未授权的情况下操作抖音账号。</p></div><b>{{ publishRecords.filter(item=>item.status==='ready').length }} 条待发布</b></header>
+      <div class="publish-records"><article v-for="record in publishRecords" :key="record.id" :class="record.status"><header><div><small>{{ jobTypeText[record.videoType] }} · {{ record.platform }}</small><h3>{{ record.title }}</h3></div><span>{{ record.status==='published'?'已发布':'待发布' }}</span></header><div class="publish-fields"><label>作品链接<input v-model="record.publishUrl" placeholder="发布后粘贴抖音作品链接"></label><label>播放<input v-model.number="record.views" min="0" type="number"></label><label>点赞<input v-model.number="record.likes" min="0" type="number"></label><label>评论<input v-model.number="record.comments" min="0" type="number"></label><label>收藏<input v-model.number="record.favorites" min="0" type="number"></label></div><label>复盘备注<textarea v-model="record.notes" rows="2" placeholder="记录开头留存、评论反馈和下一条改进点"></textarea></label><footer><small v-if="record.publishedAt">发布于 {{ formatTime(record.publishedAt) }}</small><span></span><button class="button secondary small" :disabled="savingPublishId===record.id" @click="savePublish(record)">保存数据</button><button v-if="record.status==='ready'" class="button primary small" :disabled="savingPublishId===record.id" @click="savePublish(record,true)">标记已发布</button></footer></article><div v-if="!publishRecords.length" class="empty-state"><b>还没有待发布作品</b><p>视频的脚本、成片、封面和发布文案全部就绪后，会自动出现在这里。</p></div></div>
+    </section>
     <div v-if="selected" class="activity-backdrop" @click.self="selected=null">
       <aside class="activity-drawer panel video-detail-drawer">
         <header>
-          <div><h2>{{ selected.title }}</h2><p>本地交付内容 · 可直接查看、复制和定位</p></div>
+          <div><h2 :title="selected.title">{{ selectedTitle }}</h2><p>本地交付内容 · 可直接查看、复制和定位</p></div>
           <button class="icon-button" @click="selected=null">×</button>
         </header>
         <video v-if="selectedVideoSrc" :key="selected.path" class="internal-video-player" :src="selectedVideoSrc" controls autoplay playsinline preload="metadata">当前环境不支持播放该视频。</video>
@@ -251,4 +276,5 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
 <style scoped>
 .video-collections{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:14px}.video-collections>button{min-width:0;min-height:86px;padding:13px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:inherit;display:grid;grid-template-columns:42px minmax(0,1fr) auto;align-items:center;gap:11px;text-align:left}.video-collections>button:hover,.video-collections>button.active{border-color:var(--primary);background:var(--primary-soft)}.video-collections i{width:42px;height:42px;border-radius:11px;background:linear-gradient(145deg,var(--primary),#526cff);color:#fff;display:grid;place-items:center;font-style:normal;font-weight:900}.video-collections .human-weakness i{background:linear-gradient(145deg,#e1a957,#c77b4c)}.video-collections .reasoning i{background:linear-gradient(145deg,#5f6f9d,#28324c)}.video-collections span{min-width:0;display:flex;flex-direction:column;gap:5px}.video-collections span b,.video-collections span small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.video-collections span small{color:var(--muted);font-size:10px}.video-collections em{color:var(--primary);font-style:normal;font-size:10px;white-space:nowrap}.collection-tag{margin-right:7px;padding:3px 6px;border-radius:5px;background:var(--primary-soft);color:var(--primary);font-style:normal;font-size:9px}
 .video-center-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.video-center-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}.video-center-tabs button.active{background:var(--primary);color:#fff}.pipeline-panel{padding:18px}.pipeline-explain{display:flex;gap:14px;padding:14px 16px;border-radius:12px;background:rgba(117,100,245,.08)}.pipeline-explain span{color:var(--muted)}.job-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}.video-job-card{padding:18px;border:1px solid var(--line);border-radius:14px}.video-job-card>header,.video-job-card>footer{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.video-job-card h2{margin:4px 0 0;font-size:17px}.video-job-card>header small{display:block;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.video-job-card>header>span{padding:5px 9px;border-radius:99px;background:rgba(243,154,98,.12);color:#f39a62;font-size:12px;white-space:nowrap}.video-job-card.complete>header>span{background:rgba(83,200,149,.12);color:#53c895}.video-job-card.running>header>span,.video-job-card.queued>header>span,.video-job-card.finalizing>header>span{background:var(--primary-soft);color:var(--primary)}.video-job-card.failed>header>span{background:color-mix(in srgb,var(--danger) 12%,transparent);color:var(--danger)}.job-progress-label{display:flex;justify-content:space-between;gap:12px;margin-top:16px;font-size:12px}.job-progress-label span{color:var(--muted)}.job-progress-label b{color:var(--primary)}.job-stage{height:7px;margin:7px 0 16px;border-radius:99px;background:var(--surface-2);overflow:hidden}.job-stage i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--primary),#53c895);transition:width .35s ease}.job-deliverables{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}.job-deliverables>span{display:grid;gap:3px;padding:9px 7px;border-radius:9px;background:var(--surface-2);font-size:12px}.job-deliverables b{font-size:16px}.job-deliverables em,.job-deliverables small{font-size:10px;color:var(--muted)}.job-deliverables .ready em{color:#53c895}.job-deliverables .missing em{color:#f39a62}.job-success,.job-failure,.job-running{margin:14px 0;color:var(--muted);font-size:12px}.job-success{color:#53c895}.job-running{color:var(--primary)}.job-codex-output{margin:12px 0}.job-codex-output summary{cursor:pointer;color:var(--primary)}.job-codex-output pre{max-height:180px;overflow:auto;padding:10px;border-radius:8px;background:var(--surface-2);white-space:pre-wrap;overflow-wrap:anywhere}.video-job-card>footer{align-items:end;padding-top:12px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.video-job-card>footer label{display:grid;gap:4px}.video-job-card>footer select{padding:6px 8px}.video-job-card>footer b{font-size:11px;color:var(--text)}@media(max-width:1050px){.job-grid{grid-template-columns:1fr}}
+.publish-review-panel{padding:18px}.publish-review-panel>header{display:flex;justify-content:space-between;align-items:start;gap:18px}.publish-review-panel h2,.publish-review-panel h3{margin:0}.publish-review-panel header p{margin:6px 0 0;color:var(--muted)}.publish-review-panel>header>b{color:var(--primary);white-space:nowrap}.publish-records{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}.publish-records>article{display:grid;gap:12px;padding:16px;border:1px solid var(--line);border-radius:13px;background:var(--surface)}.publish-records>article>header,.publish-records>article>footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.publish-records>article>header span{padding:5px 9px;border-radius:99px;background:var(--primary-soft);color:var(--primary)}.publish-records>article.published>header span{background:color-mix(in srgb,var(--success) 12%,transparent);color:var(--success)}.publish-fields{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px}.publish-records label{display:grid;gap:5px;color:var(--muted);font-size:10px}.publish-records input,.publish-records textarea{min-width:0;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);padding:9px;resize:vertical}.publish-records footer span{flex:1}@media(max-width:1120px){.publish-records{grid-template-columns:1fr}.publish-fields{grid-template-columns:1fr 1fr}.publish-fields label:first-child{grid-column:1/3}}
 </style>
