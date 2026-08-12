@@ -52,7 +52,7 @@ const tapdUser = ref("");
 const tapdPassword = ref("");
 const tapdAccessToken = ref("");
 const tapdOwner = ref("刘子世康");
-const emailStatus = ref<EmailNotificationStatus>({ configured:false, enabled:false, state:"unconfigured", maskedEmail:"", afterTime:"17:40", lastError:"", retryingCount:0, failedCount:0 });
+const emailStatus = ref<EmailNotificationStatus>({ configured:false, enabled:false, state:"unconfigured", maskedEmail:"", lastError:"", retryingCount:0, failedCount:0 });
 const qqEmail = ref("");
 const qqAuthCode = ref("");
 const vipStatus = ref<VipStatus>({ active:false });
@@ -251,7 +251,7 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
         <small>令牌或密码只保存在 Windows 凭据库。工作台通过 TAPD 官方 OpenAPI 只读拉取内容，不读取浏览器登录状态，也不会自动回写 TAPD。</small>
       </article>
       <article class="panel settings-card email-settings">
-        <div><h2>QQ 邮件通知</h2><p>Codex 任务在北京时间 {{ emailStatus.afterTime }} 以后完成时，发送到同一个 QQ 邮箱。</p></div>
+        <div><h2>QQ 邮件通知</h2><p>邮件开关开启后，新完成的 Codex 任务会发送到同一个 QQ 邮箱。</p></div>
         <span class="settings-status" :class="{ready:emailStatus.state==='ready',error:emailStatus.state==='error',disabled:emailStatus.state==='disabled'}">{{ emailStateText() }}</span>
         <label>QQ 邮箱<input v-model="qqEmail" type="email" autocomplete="off" :placeholder="emailStatus.maskedEmail ? `已保存：${emailStatus.maskedEmail}` : '例如 123456@qq.com'"></label>
         <label>SMTP 授权码<input v-model="qqAuthCode" type="password" autocomplete="new-password" placeholder="QQ 邮箱生成的授权码；保存后不回显"></label>

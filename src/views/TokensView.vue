@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import TokenTrendChart from "../components/TokenTrendChart.vue";
 import { getModelTokenMetrics, getProjectTokenMetrics, getTokenSummary, getTokenTrend, isTauriRuntime, listConversationMetrics, scanCodexSessions, scanGitRepositories, setConversationProject, type CodexScanSummary, type ConversationMetric, type GitScanSummary, type ModelTokenMetric, type ProjectTokenMetric, type TokenSummary, type TokenTrendPoint } from "../services/backend";
@@ -71,7 +71,9 @@ async function scan() { if (!isTauriRuntime()) { error.value = "浏览器模式�
 async function scanGit() { if (!isTauriRuntime()) { error.value = "浏览器模式不能读取本机 Git，请在桌面端运行。"; return; } loading.value = true; error.value = ""; lastScan.value = null; try { lastGitScan.value = await scanGitRepositories(); } catch (cause) { error.value = String(cause); } finally { loading.value = false; } }
 async function saveConversationProject(reset=false) { if (detail.value?.kind !== "conversation") return; const id=detail.value.value.id; loading.value=true; try { await setConversationProject(id,reset ? undefined : projectEdit.value); await refresh(); const updated=conversations.value.find(item=>item.id===id); if (updated) { detail.value={kind:"conversation",value:updated}; projectEdit.value=projectName(updated.project); } } catch(cause){error.value=String(cause);} finally{loading.value=false;} }
 watch([inputPrice,cachedPrice,outputPrice], () => { localStorage.setItem("ai-workbench.price.input",String(inputPrice.value)); localStorage.setItem("ai-workbench.price.cached",String(cachedPrice.value)); localStorage.setItem("ai-workbench.price.output",String(outputPrice.value)); });
-onMounted(refresh);
+function refreshAfterCodexScan() { void refresh(); }
+onMounted(() => { window.addEventListener("workbench-codex-data-updated",refreshAfterCodexScan); void refresh(); });
+onBeforeUnmount(() => window.removeEventListener("workbench-codex-data-updated",refreshAfterCodexScan));
 </script>
 
 <template>

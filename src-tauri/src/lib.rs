@@ -28,7 +28,7 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Emitter, Manager,
 };
 
 #[tauri::command]
@@ -305,8 +305,9 @@ pub fn run() {
                 if let Err(error) = videos::sync_video_pipeline_for_state(&history_state) {
                     eprintln!("启动时同步视频生产流水线失败：{error}");
                 }
-                if let Err(error) = reports::sync_history_if_sources_changed(&history_state) {
-                    eprintln!("启动时同步 Codex 历史失败：{error}");
+                match reports::sync_history_if_sources_changed(&history_state) {
+                    Ok(_) => { let _ = history_app.emit("codex-data-updated", ()); }
+                    Err(error) => eprintln!("启动时同步 Codex 历史失败：{error}"),
                 }
                 if let Err(error) = knowledge::sync_knowledge_for_state(&history_state) {
                     eprintln!("启动时自动整理知识失败：{error}");
@@ -318,6 +319,18 @@ pub fn run() {
                     eprintln!("启动时同步 Codex 完成提醒失败：{error}");
                 }
                 email::sync_tray_menu(&history_app, &history_state);
+            });
+            let token_refresh_state = state.clone();
+            let token_refresh_app = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                loop {
+                    match codex::scan_codex_sessions_for_state(&token_refresh_state) {
+                        Ok(_) => { let _ = token_refresh_app.emit("codex-data-updated", ()); }
+                        Err(error) => eprintln!("自动刷新 Codex Token 失败：{error}"),
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(10 * 60));
+                }
             });
             let notification_state = state.clone();
             std::thread::spawn(move || loop {

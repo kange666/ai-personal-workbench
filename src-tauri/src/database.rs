@@ -748,7 +748,6 @@ impl DatabaseState {
             .map_err(|error| error.to_string())?;
         for (key, value) in [
             ("codex_email_enabled", "0"),
-            ("codex_email_after_time", "17:40"),
             ("codex_email_enabled_at", ""),
             ("codex_email_config_status", "unconfigured"),
             ("codex_email_last_error", ""),

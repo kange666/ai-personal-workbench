@@ -58,8 +58,7 @@ async function persistCheckin() {
   finally { savingCheckin.value=false; }
 }
 
-onMounted(async () => {
-  window.addEventListener("workbench-notifications-updated",updateNotificationMessages);
+async function loadDashboardData() {
   if (!isTauriRuntime()) return;
   try {
     const activityStart = new Date(); activityStart.setDate(activityStart.getDate() - 6);
@@ -70,10 +69,17 @@ onMounted(async () => {
     checkin.value = await getDailyCheckin(todayIso) || checkin.value;
   }
   catch (error) { console.error("首页统计读取失败", error); }
+}
+function refreshAfterCodexScan() { void loadDashboardData(); }
+onMounted(() => {
+  window.addEventListener("workbench-notifications-updated",updateNotificationMessages);
+  window.addEventListener("workbench-codex-data-updated",refreshAfterCodexScan);
+  void loadDashboardData();
 });
 onBeforeUnmount(() => {
   window.clearInterval(focusTimer);
   window.removeEventListener("workbench-notifications-updated",updateNotificationMessages);
+  window.removeEventListener("workbench-codex-data-updated",refreshAfterCodexScan);
 });
 </script>
 

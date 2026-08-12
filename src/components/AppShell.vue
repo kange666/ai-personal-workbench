@@ -36,7 +36,7 @@ const notificationLoading = ref(false);
 const notifications = ref<WorkbenchNotification[]>([]);
 const notificationToast = ref<WorkbenchNotification | null>(null);
 const selectedNotification = ref<WorkbenchNotification | null>(null);
-const emailStatus = ref<EmailNotificationStatus>({ configured:false, enabled:false, state:"unconfigured", maskedEmail:"", afterTime:"17:40", lastError:"", retryingCount:0, failedCount:0 });
+const emailStatus = ref<EmailNotificationStatus>({ configured:false, enabled:false, state:"unconfigured", maskedEmail:"", lastError:"", retryingCount:0, failedCount:0 });
 const emailLoading = ref(false);
 const vipStatus = ref<VipStatus>({ active:false });
 const windowMaximized = ref(false);
@@ -72,7 +72,7 @@ const pendingReviewCount = computed(() => notifications.value.filter(item => ite
 const emailButtonText = computed(() => emailStatus.value.state === "error" ? "异常" : emailStatus.value.enabled ? "开" : emailStatus.value.state === "unverified" ? "待验" : emailStatus.value.state === "unconfigured" ? "未配" : "关");
 const emailTooltip = computed(() => [
   "Codex完成邮件通知",
-  `每天${emailStatus.value.afterTime}后生效`,
+  emailStatus.value.enabled ? "开关已开启，新完成任务会发送邮件" : "开关已关闭",
   `收件人：${emailStatus.value.maskedEmail || "尚未配置"}`,
   emailStatus.value.lastError || "",
 ].filter(Boolean).join("\n"));
@@ -87,6 +87,7 @@ let emailTimer = 0;
 let healthTimer = 0;
 let emailUnlisten: UnlistenFn | undefined;
 let vipUnlisten: UnlistenFn | undefined;
+let codexDataUnlisten: UnlistenFn | undefined;
 let windowResizeUnlisten: UnlistenFn | undefined;
 let quickShortcutRegistered = false;
 function openSearch() { searchOpen.value = true; }
@@ -322,6 +323,7 @@ onMounted(() => {
   void loadVipStatus();
   if (isTauriRuntime()) void listen<EmailNotificationStatus>("codex-email-status-changed", event => { emailStatus.value=event.payload; }).then(unlisten => { emailUnlisten=unlisten; });
   if (isTauriRuntime()) void listen<VipStatus>("vip-status-changed", event => { vipStatus.value=event.payload; }).then(unlisten => { vipUnlisten=unlisten; });
+  if (isTauriRuntime()) void listen("codex-data-updated", () => { window.dispatchEvent(new CustomEvent("workbench-codex-data-updated")); }).then(unlisten => { codexDataUnlisten=unlisten; });
   if (isTauriRuntime()) {
     void syncWindowState();
     void getCurrentWindow().onResized(() => void syncWindowState()).then(unlisten => { windowResizeUnlisten=unlisten; });
@@ -348,6 +350,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(notificationToastTimer);
   emailUnlisten?.();
   vipUnlisten?.();
+  codexDataUnlisten?.();
   windowResizeUnlisten?.();
   if (quickShortcutRegistered) void unregisterShortcut("CommandOrControl+Shift+Space");
   window.removeEventListener("keydown", handleKeydown);

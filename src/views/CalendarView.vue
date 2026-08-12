@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import TaskEditor from "../components/TaskEditor.vue";
 import TasksView from "./TasksView.vue";
@@ -115,7 +115,9 @@ function switchSection(value: "planning" | "tasks") {
 }
 watch(() => route.query.tab, value => { activeSection.value = value === "tasks" ? "tasks" : "planning"; });
 watch(() => `${activeMonth.value.getFullYear()}-${activeMonth.value.getMonth()}`, loadActivity);
-onMounted(() => { const date=String(route.query.date || ""); if (/^\d{4}-\d{2}-\d{2}$/.test(date)) { selectedDate.value=date; const parsed=parse(date); activeMonth.value=new Date(parsed.getFullYear(),parsed.getMonth(),1); } void loadActivity(); });
+function refreshAfterCodexScan() { void loadActivity(); }
+onMounted(() => { window.addEventListener("workbench-codex-data-updated",refreshAfterCodexScan); const date=String(route.query.date || ""); if (/^\d{4}-\d{2}-\d{2}$/.test(date)) { selectedDate.value=date; const parsed=parse(date); activeMonth.value=new Date(parsed.getFullYear(),parsed.getMonth(),1); } void loadActivity(); });
+onBeforeUnmount(() => window.removeEventListener("workbench-codex-data-updated",refreshAfterCodexScan));
 </script>
 
 <template>

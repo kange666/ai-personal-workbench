@@ -125,7 +125,6 @@ export interface EmailNotificationStatus {
   enabled: boolean;
   state: "unconfigured" | "unverified" | "disabled" | "ready" | "error";
   maskedEmail: string;
-  afterTime: string;
   lastError: string;
   retryingCount: number;
   failedCount: number;

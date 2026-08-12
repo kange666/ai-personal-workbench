@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import WorkTimeDrawer from "../components/WorkTimeDrawer.vue";
 import { useWorkbenchStore } from "../stores/workbench";
@@ -131,7 +131,9 @@ async function copyContinuation() {
 async function openRecordSources(report: ReportRecord) { loading.value=true; error.value=""; try { recordSources.value=await getReportSources(report.id); sourceTitle.value=`${report.title} · Codex、Git 与任务来源`; } catch(cause){error.value=String(cause);} finally{loading.value=false;} }
 function openRecordSource(item: ReportSource) { if(item.kind==="Codex 对话") void router.push(`/tokens?conversation=${item.id}`); else if(item.kind==="任务") void router.push(`/tasks?task=${item.id}`); else if(item.kind==="测试") void router.push(`/testing?run=${item.id}`); }
 watch([startDate,endDate],load);
-onMounted(initialize);
+function refreshAfterCodexScan() { void load(); }
+onMounted(() => { window.addEventListener("workbench-codex-data-updated",refreshAfterCodexScan); void initialize(); });
+onBeforeUnmount(() => window.removeEventListener("workbench-codex-data-updated",refreshAfterCodexScan));
 </script>
 
 <template><div class="view work-records-view"><header class="page-header"><div><h1>工作记录</h1><p>按天和周查看整理后的工作成果、工时、Codex、Git、测试与报告</p></div><div><button class="button secondary" :disabled="loading" @click="load">↻ 重新整理</button></div></header>

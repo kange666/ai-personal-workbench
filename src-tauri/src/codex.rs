@@ -6,8 +6,11 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
+
+static CODEX_SCAN_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Default, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -421,6 +424,9 @@ fn roots() -> Vec<(PathBuf, bool)> {
 }
 
 pub fn scan_codex_sessions_for_state(state: &DatabaseState) -> Result<CodexScanSummary, String> {
+    let _scan_guard = CODEX_SCAN_LOCK
+        .lock()
+        .map_err(|_| "Codex 扫描锁异常，请重启工作台后重试。".to_string())?;
     let mut summary = CodexScanSummary::default();
     let mut connection = state.connect()?;
     let transaction = connection

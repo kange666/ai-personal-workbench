@@ -1,5 +1,5 @@
 use crate::database::DatabaseState;
-use chrono::{DateTime, Duration, FixedOffset, Local, NaiveTime, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Local, Utc};
 use keyring::Entry;
 use lettre::{
     message::{header::ContentType, Mailbox},
@@ -15,7 +15,6 @@ const CREDENTIAL_SERVICE: &str = "AI Personal Workbench";
 const CREDENTIAL_USER: &str = "qq-smtp";
 const SMTP_HOST: &str = "smtp.qq.com";
 const SMTP_PORT: u16 = 465;
-const DEFAULT_AFTER_TIME: &str = "17:40";
 pub struct EmailTrayMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,7 +31,6 @@ pub struct EmailNotificationStatus {
     pub enabled: bool,
     pub state: String,
     pub masked_email: String,
-    pub after_time: String,
     pub last_error: String,
     pub retrying_count: i64,
     pub failed_count: i64,
@@ -109,15 +107,6 @@ fn set_meta(state: &DatabaseState, key: &str, value: &str) -> Result<(), String>
 
 fn enabled(state: &DatabaseState) -> bool {
     meta(state, "codex_email_enabled") == "1"
-}
-
-fn after_time(state: &DatabaseState) -> String {
-    let value = meta(state, "codex_email_after_time");
-    if NaiveTime::parse_from_str(&value, "%H:%M").is_ok() {
-        value
-    } else {
-        DEFAULT_AFTER_TIME.into()
-    }
 }
 
 fn is_authentication_error(error: &str) -> bool {
@@ -210,7 +199,6 @@ pub fn status_for_state(state: &DatabaseState) -> EmailNotificationStatus {
             .as_ref()
             .map(|value| masked_email(&value.email))
             .unwrap_or_default(),
-        after_time: after_time(state),
         last_error: meta(state, "codex_email_last_error"),
         retrying_count,
         failed_count,
@@ -221,17 +209,6 @@ pub fn initialize_for_state(state: &DatabaseState) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     set_meta(state, "codex_email_runtime_started_at", &now)?;
     Ok(())
-}
-
-fn completion_is_after_threshold(completed_at: &str, threshold: &str) -> bool {
-    let Ok(completed) = DateTime::parse_from_rfc3339(completed_at) else {
-        return false;
-    };
-    let Ok(threshold) = NaiveTime::parse_from_str(threshold, "%H:%M") else {
-        return false;
-    };
-    let beijing = FixedOffset::east_opt(8 * 60 * 60).expect("固定东八区偏移有效");
-    completed.with_timezone(&beijing).time() >= threshold
 }
 
 fn occurred_before(value: &str, boundary: &str) -> bool {
@@ -246,18 +223,11 @@ fn occurred_before(value: &str, boundary: &str) -> bool {
 
 fn delivery_decision(
     completed_at: &str,
-    threshold: &str,
     runtime_started_at: &str,
     enabled_at: &str,
     current_enabled: bool,
     configured: bool,
 ) -> (&'static str, String) {
-    if !completion_is_after_threshold(completed_at, threshold) {
-        return (
-            "skipped_before_time",
-            format!("完成时间早于北京时间 {threshold}"),
-        );
-    }
     if runtime_started_at.is_empty() || occurred_before(completed_at, runtime_started_at) {
         return (
             "skipped_disabled",
@@ -279,7 +249,6 @@ pub fn reconcile_notifications_for_state(state: &DatabaseState) -> Result<usize,
     let configured = credential().is_ok();
     let runtime_started_at = meta(state, "codex_email_runtime_started_at");
     let enabled_at = meta(state, "codex_email_enabled_at");
-    let threshold = after_time(state);
     let now = Utc::now().to_rfc3339();
     let connection = state.connect()?;
     let mut statement = connection
@@ -299,7 +268,6 @@ pub fn reconcile_notifications_for_state(state: &DatabaseState) -> Result<usize,
     for (notification_id, completed_at) in missing {
         let (status, reason) = delivery_decision(
             &completed_at,
-            &threshold,
             &runtime_started_at,
             &enabled_at,
             current_enabled,
@@ -668,18 +636,6 @@ mod tests {
     }
 
     #[test]
-    fn threshold_uses_actual_beijing_completion_time() {
-        assert!(!completion_is_after_threshold(
-            "2026-08-07T09:39:59Z",
-            "17:40"
-        ));
-        assert!(completion_is_after_threshold(
-            "2026-08-07T09:40:00Z",
-            "17:40"
-        ));
-    }
-
-    #[test]
     fn qq_email_validation_and_masking_are_strict() {
         assert!(valid_qq_email("123456@qq.com"));
         assert!(!valid_qq_email("name@qq.com"));
@@ -731,23 +687,21 @@ mod tests {
     }
 
     #[test]
-    fn delivery_decision_respects_runtime_and_latest_enable_time() {
+    fn delivery_decision_ignores_time_of_day_and_respects_enable_time() {
         assert_eq!(
             delivery_decision(
-                "2026-08-07T09:39:59Z",
-                "17:40",
-                "2026-08-07T09:00:00Z",
-                "2026-08-07T09:30:00Z",
+                "2026-08-07T01:31:00Z",
+                "2026-08-07T01:00:00Z",
+                "2026-08-07T01:30:00Z",
                 true,
                 true,
             )
             .0,
-            "skipped_before_time"
+            "pending"
         );
         assert_eq!(
             delivery_decision(
                 "2026-08-07T09:50:00Z",
-                "17:40",
                 "2026-08-07T10:00:00Z",
                 "2026-08-07T09:30:00Z",
                 true,
@@ -759,7 +713,6 @@ mod tests {
         assert_eq!(
             delivery_decision(
                 "2026-08-07T10:00:00Z",
-                "17:40",
                 "2026-08-07T09:00:00Z",
                 "2026-08-07T10:01:00Z",
                 true,
@@ -771,7 +724,6 @@ mod tests {
         assert_eq!(
             delivery_decision(
                 "2026-08-07T10:02:00Z",
-                "17:40",
                 "2026-08-07T09:00:00Z",
                 "2026-08-07T10:01:00Z",
                 true,
@@ -857,7 +809,6 @@ mod tests {
     fn reconciliation_only_tracks_codex_complete_once() {
         let (directory, state) = test_state("deduplicate");
         initialize_for_state(&state).unwrap();
-        set_meta(&state, "codex_email_after_time", "00:00").unwrap();
         let completed_at = (Utc::now() + Duration::minutes(1)).to_rfc3339();
         let connection = state.connect().unwrap();
         connection.execute("INSERT INTO notifications(id,kind,title,created_at) VALUES('codex-complete-once','codex_complete','Codex 完成',?1)", [&completed_at]).unwrap();
