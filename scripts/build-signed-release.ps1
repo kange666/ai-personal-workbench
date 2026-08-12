@@ -88,7 +88,7 @@ $sourceCommit = (git -C $projectRoot rev-parse HEAD).Trim()
 $publishedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
 
 $manifest = [ordered]@{
-    version = $tag
+    version = $version
     notes = $ReleaseNotes
     pub_date = $publishedAt
     publishedAt = $publishedAt
