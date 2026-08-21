@@ -8,8 +8,10 @@ import {
   listRepositoryAssets,
   listTapdCodexJobs,
   listTapdItems,
+  readTapdProcessReport,
   reviewTapdCodexJob,
   runTapdCodexJobTests,
+  saveTapdAutoFixSettings,
   startTapdCodexJob,
   syncTapdItems,
   type RepositoryAsset,
@@ -29,6 +31,8 @@ const status = ref<TapdStatus>({
   owner: "刘子世康",
   itemCount: 0,
   warnings: [],
+  autoFixEnabled: false,
+  autoFixRepositoryPath: "",
 });
 const items = ref<TapdWorkItem[]>([]);
 const jobs = ref<TapdCodexJob[]>([]);
@@ -43,6 +47,10 @@ const message = ref("");
 const error = ref("");
 const reviewNote = ref("");
 const codexNote = ref("");
+const autoRepositoryPath = ref("");
+const processReport = ref("");
+const reportOpen = ref(false);
+const reportLoading = ref(false);
 let jobTimer = 0;
 
 const typeLabels: Record<string, string> = {
@@ -83,11 +91,18 @@ const selectedJob = computed(() =>
     ? jobs.value.find((job) => job.itemId === selected.value?.id)
     : undefined,
 );
+const jobsByItem = computed(() => {
+  const result = new Map<string, TapdCodexJob>();
+  for (const job of jobs.value) {
+    if (!result.has(job.itemId)) result.set(job.itemId, job);
+  }
+  return result;
+});
 const selectedTitle = computed(() =>
   compactDetailTitle(selected.value?.title || "TAPD 工作项", "TAPD"),
 );
 const running = computed(() =>
-  jobs.value.some((job) => job.status === "running"),
+  jobs.value.some((job) => ["queued", "running"].includes(job.status)),
 );
 
 function formatTime(value?: string) {
@@ -158,7 +173,11 @@ function statusTagClass(item: TapdWorkItem) {
   return "neutral";
 }
 function openItem(item: TapdWorkItem) {
-  if (selected.value?.id !== item.id) codexNote.value = "";
+  if (selected.value?.id !== item.id) {
+    codexNote.value = "";
+    processReport.value = "";
+    reportOpen.value = false;
+  }
   selected.value = item;
   if (!repositoryPath.value) {
     repositoryPath.value =
@@ -173,6 +192,9 @@ function openItem(item: TapdWorkItem) {
 async function loadJobs() {
   if (isTauriRuntime()) jobs.value = await listTapdCodexJobs();
 }
+function refreshAfterBackgroundSync() {
+  void load();
+}
 async function load() {
   if (!isTauriRuntime()) return;
   loading.value = true;
@@ -185,6 +207,12 @@ async function load() {
         listRepositoryAssets(),
         listTapdCodexJobs(),
       ]);
+    autoRepositoryPath.value =
+      status.value.autoFixRepositoryPath ||
+      repositories.value.find((repo) => repo.name.toLowerCase() === "client")
+        ?.path ||
+      repositories.value[0]?.path ||
+      "";
     const requested = String(route.query.item || "");
     if (requested)
       selected.value =
@@ -207,7 +235,12 @@ async function sync() {
     const notificationText = result.notificationsCreated
       ? ` 新增 ${result.notificationsCreated} 条未读消息。`
       : "";
-    message.value = `同步完成：${result.bugs} 个缺陷、${result.tasks} 个任务、${result.stories} 个需求。${notificationText}${warning}`;
+    const autoText = result.autoJobsStarted
+      ? ` 已自动排队处理 ${result.autoJobsStarted} 个新缺陷。`
+      : result.autoJobsSkipped
+        ? ` ${result.autoJobsSkipped} 个新缺陷未进入自动处理，请查看提示。`
+        : "";
+    message.value = `同步完成：${result.bugs} 个缺陷、${result.tasks} 个任务、${result.stories} 个需求。${notificationText}${autoText}${warning}`;
     await load();
     window.dispatchEvent(new CustomEvent("tapd-items-synced"));
   } catch (cause) {
@@ -215,6 +248,30 @@ async function sync() {
   } finally {
     loading.value = false;
   }
+}
+async function updateAutoFix(enabled: boolean) {
+  loading.value = true;
+  error.value = "";
+  message.value = "";
+  try {
+    const saved = await saveTapdAutoFixSettings(
+      enabled,
+      autoRepositoryPath.value,
+    );
+    status.value.autoFixEnabled = saved.enabled;
+    status.value.autoFixRepositoryPath = saved.repositoryPath;
+    autoRepositoryPath.value = saved.repositoryPath;
+    message.value = saved.enabled
+      ? "新缺陷自动修改已开启；后续同步发现的新缺陷会按验证、修复、复测流程串行处理。"
+      : "新缺陷自动修改已关闭，现有任务不会被中断。";
+  } catch (cause) {
+    error.value = String(cause);
+  } finally {
+    loading.value = false;
+  }
+}
+async function persistAutoRepository() {
+  await updateAutoFix(status.value.autoFixEnabled);
 }
 async function sendToCodex() {
   if (!selected.value || !repositoryPath.value) return;
@@ -254,6 +311,25 @@ async function runProjectTests() {
   } finally {
     loading.value = false;
   }
+}
+async function showProcessReport() {
+  if (!selectedJob.value) return;
+  reportOpen.value = true;
+  reportLoading.value = true;
+  error.value = "";
+  try {
+    processReport.value = await readTapdProcessReport(selectedJob.value.id);
+  } catch (cause) {
+    processReport.value = "";
+    error.value = String(cause);
+  } finally {
+    reportLoading.value = false;
+  }
+}
+async function copyProcessReport() {
+  if (!processReport.value) return;
+  await navigator.clipboard.writeText(processReport.value);
+  message.value = "处理报告已复制。";
 }
 async function reviewResult(decision: "accepted" | "changes_requested") {
   if (!selectedJob.value) return;
@@ -313,8 +389,12 @@ onMounted(async () => {
   jobTimer = window.setInterval(() => {
     if (running.value) void loadJobs();
   }, 3000);
+  window.addEventListener("tapd-background-synced", refreshAfterBackgroundSync);
 });
-onBeforeUnmount(() => window.clearInterval(jobTimer));
+onBeforeUnmount(() => {
+  window.clearInterval(jobTimer);
+  window.removeEventListener("tapd-background-synced", refreshAfterBackgroundSync);
+});
 </script>
 
 <template>
@@ -347,6 +427,36 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
     >
       {{ error || message }}
     </div>
+    <section class="panel tapd-auto-fix">
+      <div>
+        <b>新缺陷自动修改</b>
+        <p>
+          自动按“修改前静态与动态验证 → 最小方案 → 实施 →
+          修改后静态与动态复测”处理，只处理后续同步发现的新缺陷。
+        </p>
+      </div>
+      <div class="tapd-auto-controls">
+        <select
+          v-model="autoRepositoryPath"
+          :disabled="loading || !repositories.length"
+          aria-label="自动处理使用的本地项目"
+          @change="persistAutoRepository"
+        >
+          <option value="" disabled>选择自动处理项目</option>
+          <option v-for="repo in repositories" :key="repo.path" :value="repo.path">
+            {{ repo.name }} · {{ repo.path }}
+          </option>
+        </select>
+        <button
+          class="button"
+          :class="status.autoFixEnabled ? 'primary' : 'secondary'"
+          :disabled="loading || !status.configured"
+          @click="updateAutoFix(!status.autoFixEnabled)"
+        >
+          自动修改：{{ status.autoFixEnabled ? "开" : "关" }}
+        </button>
+      </div>
+    </section>
     <section v-if="!status.configured" class="panel tapd-config-notice">
       <div>
         <b>还差一步：配置 TAPD OpenAPI</b>
@@ -422,7 +532,11 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
           ><b>{{ item.title }}</b
           ><small
             >#{{ item.id
-            }}{{ item.description ? ` · ${item.description}` : "" }}</small
+            }}{{ item.description ? ` · ${item.description}` : "" }}<i
+              v-if="jobsByItem.get(item.id)?.processReportPath"
+              class="tapd-report-mark"
+              >处理报告</i
+            ></small
           ></span
         ><span
           ><em :class="statusTagClass(item)">{{ item.statusLabel }}</em></span
@@ -509,12 +623,14 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
           ><button
             class="button primary"
             :disabled="
-              loading || !repositoryPath || selectedJob?.status === 'running'
+              loading ||
+              !repositoryPath ||
+              ['queued', 'running'].includes(selectedJob?.status || '')
             "
             @click="sendToCodex"
           >
             {{
-              selectedJob?.status === "running"
+              ["queued", "running"].includes(selectedJob?.status || "")
                 ? "Codex 执行中…"
                 : "发送给 Codex"
             }}</button
@@ -530,9 +646,38 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
                 ? "已完成"
                 : selectedJob.status === "failed"
                   ? "失败"
-                  : "执行中"
+                  : selectedJob.status === "queued"
+                    ? "排队中"
+                    : "执行中"
             }}</i>
           </h3>
+          <div class="tapd-report-actions">
+            <span
+              >{{ selectedJob.triggerSource === "auto" ? "自动处理" : "人工发送" }} ·
+              过程报告将保存在本地 Markdown 文件</span
+            ><button
+              class="button secondary small"
+              :disabled="reportLoading || !selectedJob.processReportPath"
+              @click="showProcessReport"
+            >
+              {{ reportLoading ? "读取中…" : "查看处理报告" }}
+            </button>
+          </div>
+          <div v-if="reportOpen" class="tapd-process-report">
+            <header>
+              <b>处理过程与结果</b
+              ><div>
+                <button
+                  class="button secondary small"
+                  :disabled="!processReport"
+                  @click="copyProcessReport"
+                >
+                  复制 Markdown</button
+                ><button class="icon-button" @click="reportOpen = false">×</button>
+              </div>
+            </header>
+            <pre>{{ processReport || "报告正在生成，任务完成后重新打开即可查看。" }}</pre>
+          </div>
           <pre v-if="selectedJob.output || selectedJob.errorMessage">{{
             selectedJob.output || selectedJob.errorMessage
           }}</pre>

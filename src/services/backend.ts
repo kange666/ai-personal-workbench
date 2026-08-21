@@ -144,6 +144,8 @@ export interface GitScanSummary {
 export interface RepositoryAsset {
   path: string;
   name: string;
+  isPinned: boolean;
+  isHidden: boolean;
   category: string;
   purpose: string;
   technologyStack: string;
@@ -195,6 +197,42 @@ export interface TapdStatus {
   lastSyncedAt?: string;
   itemCount: number;
   warnings: string[];
+  autoFixEnabled: boolean;
+  autoFixRepositoryPath: string;
+}
+
+export interface GitCredentialStatus {
+  configured: boolean;
+  username: string;
+  source: string;
+}
+
+export interface GitChangedFile {
+  path: string;
+  indexStatus: string;
+  worktreeStatus: string;
+  label: string;
+}
+
+export interface GitRepositoryStatus {
+  repositoryPath: string;
+  currentBranch: string;
+  branches: string[];
+  remoteUrl: string;
+  upstream: string;
+  ahead: number;
+  behind: number;
+  userName: string;
+  userEmail: string;
+  hasUncommittedChanges: boolean;
+  changedFiles: GitChangedFile[];
+  credential: GitCredentialStatus;
+}
+
+export interface GitOperationResult {
+  message: string;
+  output: string;
+  commitHash: string;
 }
 
 export interface TapdWorkItem {
@@ -225,13 +263,15 @@ export interface TapdSyncSummary {
   notificationsCreated: number;
   warnings: string[];
   syncedAt: string;
+  autoJobsStarted: number;
+  autoJobsSkipped: number;
 }
 
 export interface TapdCodexJob {
   id: string;
   itemId: string;
   repositoryPath: string;
-  status: "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed";
   threadId?: string;
   output: string;
   errorMessage: string;
@@ -243,8 +283,15 @@ export interface TapdCodexJob {
   reviewStatus: "pending" | "accepted" | "changes_requested";
   reviewNote: string;
   reviewedAt?: string;
+  triggerSource: "manual" | "auto";
+  processReportPath: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TapdAutoFixSettings {
+  enabled: boolean;
+  repositoryPath: string;
 }
 
 export interface CommitPlanGroup {
@@ -919,8 +966,60 @@ export async function generateCommitPlan(path: string): Promise<CommitPlan> {
   return invoke<CommitPlan>("generate_commit_plan", { path });
 }
 
+export async function setRepositoryPinned(path: string, pinned: boolean): Promise<void> {
+  await invoke("set_repository_pinned", { path, pinned });
+}
+
+export async function setRepositoryHidden(path: string, hidden: boolean): Promise<void> {
+  await invoke("set_repository_hidden", { path, hidden });
+}
+
+export async function getGitCredentialStatus(): Promise<GitCredentialStatus> {
+  return invoke<GitCredentialStatus>("git_credential_status");
+}
+
+export async function saveGitDefaultCredential(username: string, password: string): Promise<void> {
+  await invoke("save_git_default_credential", { username, password });
+}
+
+export async function clearGitDefaultCredential(): Promise<void> {
+  await invoke("clear_git_default_credential");
+}
+
+export async function getGitRepositoryStatus(path: string): Promise<GitRepositoryStatus> {
+  return invoke<GitRepositoryStatus>("git_repository_status", { path });
+}
+
+export async function fetchGitRepository(path: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_fetch_repository", { path });
+}
+
+export async function pullGitRepository(path: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_pull_repository", { path });
+}
+
+export async function switchGitRepositoryBranch(path: string, branch: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_switch_repository_branch", { path, branch });
+}
+
+export async function mergeGitRepositoryBranch(path: string, branch: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_merge_repository_branch", { path, branch });
+}
+
+export async function revertGitRepositoryCommit(path: string, commitHash: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_revert_repository_commit", { path, commitHash });
+}
+
+export async function commitGitPlanGroup(path: string, groupId: string, commitMessage: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("execute_commit_plan_group", { path, groupId, commitMessage });
+}
+
 export async function getTapdStatus(): Promise<TapdStatus> {
   return invoke<TapdStatus>("tapd_status");
+}
+
+export async function saveTapdAutoFixSettings(enabled: boolean, repositoryPath: string): Promise<TapdAutoFixSettings> {
+  return invoke<TapdAutoFixSettings>("save_tapd_auto_fix_settings", { enabled, repositoryPath });
 }
 
 export async function saveTapdCredentials(authMode: "token" | "basic", apiUser: string, apiPassword: string, accessToken: string, owner: string): Promise<void> {
@@ -945,6 +1044,10 @@ export async function listTapdItems(): Promise<TapdWorkItem[]> {
 
 export async function listTapdCodexJobs(): Promise<TapdCodexJob[]> {
   return invoke<TapdCodexJob[]>("list_tapd_codex_jobs");
+}
+
+export async function readTapdProcessReport(id: string): Promise<string> {
+  return invoke<string>("read_tapd_process_report", { id });
 }
 
 export async function startTapdCodexJob(itemId: string, repositoryPath: string, additionalNote = ""): Promise<TapdCodexJob> {

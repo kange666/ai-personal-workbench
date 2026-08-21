@@ -1,8 +1,10 @@
 use crate::database::DatabaseState;
 use chrono::Utc;
+use keyring::Entry;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::{DirEntry, WalkDir};
@@ -11,6 +13,9 @@ use walkdir::{DirEntry, WalkDir};
 use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const GIT_CREDENTIAL_SERVICE: &str = "ai-personal-workbench";
+const GIT_CREDENTIAL_ACCOUNT: &str = "git-default";
+const DEFAULT_GIT_USERNAME: &str = "lzsk";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +38,8 @@ pub struct GitScanConfiguration {
 pub struct RepositoryAsset {
     pub path: String,
     pub name: String,
+    pub is_pinned: bool,
+    pub is_hidden: bool,
     pub category: String,
     pub purpose: String,
     pub technology_stack: String,
@@ -95,6 +102,55 @@ pub struct RepositoryAssetDetails {
     pub commit_plan: Option<CommitPlanView>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCredential {
+    username: String,
+    password: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCredentialStatus {
+    pub configured: bool,
+    pub username: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitChangedFile {
+    pub path: String,
+    pub index_status: String,
+    pub worktree_status: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepositoryStatus {
+    pub repository_path: String,
+    pub current_branch: String,
+    pub branches: Vec<String>,
+    pub remote_url: String,
+    pub upstream: String,
+    pub ahead: i64,
+    pub behind: i64,
+    pub user_name: String,
+    pub user_email: String,
+    pub has_uncommitted_changes: bool,
+    pub changed_files: Vec<GitChangedFile>,
+    pub credential: GitCredentialStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOperationResult {
+    pub message: String,
+    pub output: String,
+    pub commit_hash: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitPlanGroupView {
@@ -141,6 +197,290 @@ fn git_output(arguments: &[&str]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_credential_entry() -> Result<Entry, String> {
+    Entry::new(GIT_CREDENTIAL_SERVICE, GIT_CREDENTIAL_ACCOUNT).map_err(|error| error.to_string())
+}
+
+fn load_git_credential() -> Option<GitCredential> {
+    let raw = git_credential_entry().ok()?.get_password().ok()?;
+    let credential = serde_json::from_str::<GitCredential>(&raw).ok()?;
+    if credential.username.trim().is_empty() || credential.password.is_empty() {
+        return None;
+    }
+    Some(credential)
+}
+
+fn git_credential_status_value() -> GitCredentialStatus {
+    match load_git_credential() {
+        Some(credential) => GitCredentialStatus {
+            configured: true,
+            username: credential.username,
+            source: "Windows 凭据库".to_string(),
+        },
+        None => GitCredentialStatus {
+            configured: false,
+            username: DEFAULT_GIT_USERNAME.to_string(),
+            source: "尚未配置".to_string(),
+        },
+    }
+}
+
+fn command_output(mut command: Command) -> Result<String, String> {
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().map_err(|error| error.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(if stderr.is_empty() { stdout } else { stderr });
+    }
+    Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+fn git_operation_output(
+    repository: &str,
+    arguments: &[String],
+    allow_saved_credential: bool,
+) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repository).args(arguments);
+
+    #[cfg(windows)]
+    let askpass_directory = if allow_saved_credential {
+        if let Some(credential) = load_git_credential() {
+            let directory = std::env::temp_dir()
+                .join(format!("workbench-git-askpass-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            let powershell_script = directory.join("askpass.ps1");
+            let command_script = directory.join("askpass.cmd");
+            fs::write(
+                &powershell_script,
+                "param([string]$Prompt)\nif ($Prompt -match 'Username') { [Console]::Out.Write($env:WORKBENCH_GIT_USERNAME) } else { [Console]::Out.Write($env:WORKBENCH_GIT_PASSWORD) }\n",
+            )
+            .map_err(|error| error.to_string())?;
+            fs::write(
+                &command_script,
+                "@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0askpass.ps1\" \"%~1\"\r\n",
+            )
+            .map_err(|error| error.to_string())?;
+            command
+                .env("GIT_ASKPASS", &command_script)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("WORKBENCH_GIT_USERNAME", credential.username)
+                .env("WORKBENCH_GIT_PASSWORD", credential.password);
+            Some(directory)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let result = command_output(command);
+    #[cfg(windows)]
+    if let Some(directory) = askpass_directory {
+        let _ = fs::remove_file(directory.join("askpass.ps1"));
+        let _ = fs::remove_file(directory.join("askpass.cmd"));
+        let _ = fs::remove_dir(directory);
+    }
+    result
+}
+
+fn unstage_files(repository: &str, files: &[String]) {
+    let has_head = git_output(&["-C", repository, "rev-parse", "--verify", "HEAD"]).is_ok();
+    let mut arguments = if has_head {
+        vec![
+            "restore".to_string(),
+            "--staged".to_string(),
+            "--".to_string(),
+        ]
+    } else {
+        vec![
+            "rm".to_string(),
+            "--cached".to_string(),
+            "--ignore-unmatch".to_string(),
+            "--".to_string(),
+        ]
+    };
+    arguments.extend(files.iter().cloned());
+    let _ = git_operation_output(repository, &arguments, false);
+}
+
+fn ensure_managed_repository(state: &DatabaseState, path: &str) -> Result<(), String> {
+    if path.trim().is_empty() || !Path::new(path).join(".git").exists() {
+        return Err("项目路径不是可用的 Git 仓库，请先重新扫描。".to_string());
+    }
+    let exists = state
+        .connect()?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repository_assets WHERE path=?1)",
+            [path],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !exists {
+        return Err("项目不在工作台资产清单中，请先重新扫描。".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_clean_worktree(path: &str) -> Result<(), String> {
+    let status = git_output(&[
+        "-C",
+        path,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+    ])?;
+    if status.trim().is_empty() {
+        Ok(())
+    } else {
+        Err("当前项目有未提交修改。请先提交或自行处理后再执行该操作。".to_string())
+    }
+}
+
+fn local_branches(path: &str) -> Result<Vec<String>, String> {
+    let output = git_output(&[
+        "-C",
+        path,
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads",
+    ])?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+fn validated_branch(path: &str, branch: &str) -> Result<String, String> {
+    let branch = branch.trim();
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err("请选择有效的本地分支。".to_string());
+    }
+    local_branches(path)?
+        .into_iter()
+        .find(|candidate| candidate == branch)
+        .ok_or_else(|| "所选分支不存在，请先刷新仓库状态。".to_string())
+}
+
+fn changed_file_label(index_status: char, worktree_status: char) -> String {
+    if index_status == '?' && worktree_status == '?' {
+        "未跟踪".to_string()
+    } else if index_status == 'D' || worktree_status == 'D' {
+        "已删除".to_string()
+    } else if index_status == 'A' {
+        "已新增".to_string()
+    } else if index_status == 'R' || worktree_status == 'R' {
+        "已重命名".to_string()
+    } else if index_status != ' ' && index_status != '?' {
+        "已暂存".to_string()
+    } else {
+        "已修改".to_string()
+    }
+}
+
+fn parse_changed_files(status: &str) -> Vec<GitChangedFile> {
+    status
+        .lines()
+        .filter_map(|line| {
+            let mut chars = line.chars();
+            let index_status = chars.next()?;
+            let worktree_status = chars.next()?;
+            let raw_path = line.get(3..)?.trim();
+            let path = raw_path
+                .split(" -> ")
+                .last()
+                .unwrap_or(raw_path)
+                .trim_matches('"')
+                .to_string();
+            if path.is_empty() {
+                return None;
+            }
+            Some(GitChangedFile {
+                path,
+                index_status: index_status.to_string(),
+                worktree_status: worktree_status.to_string(),
+                label: changed_file_label(index_status, worktree_status),
+            })
+        })
+        .collect()
+}
+
+fn commit_scope(files: &[String]) -> String {
+    const IGNORED: &[&str] = &[
+        "src",
+        "app",
+        "frontend",
+        "backend",
+        "components",
+        "views",
+        "pages",
+        "modules",
+        "packages",
+    ];
+    let mut scopes = Vec::new();
+    for file in files {
+        let normalized = file.replace('\\', "/");
+        let segments = normalized.split('/').collect::<Vec<_>>();
+        let candidate = segments
+            .iter()
+            .rev()
+            .find_map(|segment| {
+                let stem = segment.split('.').next().unwrap_or(segment);
+                let lower = stem
+                    .trim_end_matches("View")
+                    .trim_end_matches("Page")
+                    .to_lowercase();
+                (!lower.is_empty()
+                    && !IGNORED.contains(&lower.as_str())
+                    && lower != "index"
+                    && lower != "main")
+                    .then_some(lower)
+            })
+            .unwrap_or_else(|| "project".to_string());
+        scopes.push(candidate);
+    }
+    scopes.sort();
+    scopes.dedup();
+    if scopes.len() == 1 {
+        scopes.remove(0)
+    } else {
+        "project".to_string()
+    }
+}
+
+fn conventional_commit_message(group: &str, title: &str, files: &[String]) -> String {
+    let commit_type = match group {
+        "code" => "feat",
+        "config" | "generated" => "chore",
+        "docs" => "docs",
+        "tests" => "test",
+        _ => "chore",
+    };
+    format!("{}({}): 更新{}", commit_type, commit_scope(files), title)
+}
+
+fn valid_conventional_commit_message(message: &str) -> bool {
+    let allowed = [
+        "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore",
+        "revert",
+    ];
+    let Some((head, description)) = message.trim().split_once(": ") else {
+        return false;
+    };
+    let Some((commit_type, scope)) = head.split_once('(') else {
+        return false;
+    };
+    allowed.contains(&commit_type)
+        && scope.ends_with(')')
+        && scope.len() > 1
+        && !scope.contains(char::is_whitespace)
+        && !description.trim().is_empty()
 }
 
 fn repository_root(cwd: &str) -> Result<String, String> {
@@ -619,7 +959,7 @@ pub fn list_repository_assets(
     let connection = state.connect()?;
     let mut statement = connection
         .prepare(
-            "SELECT a.path,a.name,a.category,a.purpose,a.technology_stack,a.main_modules,
+            "SELECT a.path,a.name,a.is_pinned,a.is_hidden,a.category,a.purpose,a.technology_stack,a.main_modules,
                     a.install_command,a.start_command,a.test_command,a.build_command,a.command_source,
                     a.remote_url,a.default_branch,a.has_uncommitted_changes,a.inference_status,
                     a.manually_confirmed,a.last_scanned_at,
@@ -631,7 +971,7 @@ pub fn list_repository_assets(
                     COALESCE((SELECT h.summary FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'尚未执行健康检查'),
                     (SELECT COUNT(*) FROM git_commits c WHERE c.repository_path=a.path),
                     (SELECT COUNT(*) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%')
-             FROM repository_assets a ORDER BY datetime(activity_updated_at) DESC,a.name COLLATE NOCASE",
+             FROM repository_assets a ORDER BY a.is_pinned DESC,datetime(activity_updated_at) DESC,a.name COLLATE NOCASE",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
@@ -639,26 +979,28 @@ pub fn list_repository_assets(
             Ok(RepositoryAsset {
                 path: row.get(0)?,
                 name: row.get(1)?,
-                category: row.get(2)?,
-                purpose: row.get(3)?,
-                technology_stack: row.get(4)?,
-                main_modules: row.get(5)?,
-                install_command: row.get(6)?,
-                start_command: row.get(7)?,
-                test_command: row.get(8)?,
-                build_command: row.get(9)?,
-                command_source: row.get(10)?,
-                remote_url: row.get(11)?,
-                default_branch: row.get(12)?,
-                has_uncommitted_changes: row.get::<_, i64>(13)? != 0,
-                inference_status: row.get(14)?,
-                manually_confirmed: row.get::<_, i64>(15)? != 0,
-                last_scanned_at: row.get(16)?,
-                updated_at: row.get(17)?,
-                health_level: row.get(18)?,
-                health_summary: row.get(19)?,
-                commit_count: row.get(20)?,
-                conversation_count: row.get(21)?,
+                is_pinned: row.get::<_, i64>(2)? != 0,
+                is_hidden: row.get::<_, i64>(3)? != 0,
+                category: row.get(4)?,
+                purpose: row.get(5)?,
+                technology_stack: row.get(6)?,
+                main_modules: row.get(7)?,
+                install_command: row.get(8)?,
+                start_command: row.get(9)?,
+                test_command: row.get(10)?,
+                build_command: row.get(11)?,
+                command_source: row.get(12)?,
+                remote_url: row.get(13)?,
+                default_branch: row.get(14)?,
+                has_uncommitted_changes: row.get::<_, i64>(15)? != 0,
+                inference_status: row.get(16)?,
+                manually_confirmed: row.get::<_, i64>(17)? != 0,
+                last_scanned_at: row.get(18)?,
+                updated_at: row.get(19)?,
+                health_level: row.get(20)?,
+                health_summary: row.get(21)?,
+                commit_count: row.get(22)?,
+                conversation_count: row.get(23)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -776,13 +1118,6 @@ pub fn generate_commit_plan(
         .transaction()
         .map_err(|error| error.to_string())?;
     transaction.execute("INSERT INTO commit_plans(id,repository_path,status,risk_level,summary,created_at,updated_at) VALUES(?1,?2,'draft',?3,?4,?5,?5)", params![plan_id,path,risk_level,summary,now]).map_err(|error| error.to_string())?;
-    let messages = BTreeMap::from([
-        ("code", "feat: 整理业务功能修改"),
-        ("config", "chore: 更新项目配置与依赖"),
-        ("docs", "docs: 更新项目文档"),
-        ("tests", "test: 完善测试与用例"),
-        ("generated", "chore: 核对生成物与二进制"),
-    ]);
     for (order, (key, (title, files))) in grouped.into_iter().enumerate() {
         let group_risk = if files.iter().any(|file| sensitive_path(file)) {
             "包含疑似敏感文件，提交前必须逐项确认"
@@ -791,7 +1126,8 @@ pub fn generate_commit_plan(
         } else {
             "未发现明显高风险文件"
         };
-        transaction.execute("INSERT INTO commit_groups(id,plan_id,group_order,title,commit_message,files_json,risk_notes,verification_notes,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'suggested')", params![uuid::Uuid::new_v4().to_string(),plan_id,order as i64,title,messages.get(key.as_str()).copied().unwrap_or("chore: 整理项目修改"),serde_json::to_string(&files).map_err(|error| error.to_string())?,group_risk,if diff_warning.is_empty(){"建议执行项目已配置的安全测试命令"}else{"git diff --check 未通过，请先处理空白或冲突标记"}]).map_err(|error| error.to_string())?;
+        let commit_message = conventional_commit_message(&key, &title, &files);
+        transaction.execute("INSERT INTO commit_groups(id,plan_id,group_order,title,commit_message,files_json,risk_notes,verification_notes,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'suggested')", params![uuid::Uuid::new_v4().to_string(),plan_id,order as i64,title,commit_message,serde_json::to_string(&files).map_err(|error| error.to_string())?,group_risk,if diff_warning.is_empty(){"建议执行项目已配置的安全测试命令"}else{"git diff --check 未通过，请先处理空白或冲突标记"}]).map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     latest_commit_plan(&state.connect()?, &path)?.ok_or_else(|| "提交建议生成失败".to_string())
@@ -821,10 +1157,431 @@ pub fn save_repository_asset(
     Ok(())
 }
 
+fn refresh_basic_repository_state(state: &DatabaseState, path: &str) -> Result<(), String> {
+    let branch = git_output(&["-C", path, "branch", "--show-current"])
+        .unwrap_or_else(|_| "HEAD".to_string());
+    let status = git_output(&[
+        "-C",
+        path,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+    ])?;
+    let remote_url =
+        git_output(&["-C", path, "config", "--get", "remote.origin.url"]).unwrap_or_default();
+    let user_name = git_output(&["-C", path, "config", "user.name"]).unwrap_or_default();
+    let user_email = git_output(&["-C", path, "config", "user.email"]).unwrap_or_default();
+    let now = Utc::now().to_rfc3339();
+    let connection = state.connect()?;
+    connection
+        .execute(
+            "UPDATE repository_assets SET default_branch=?2,remote_url=?3,has_uncommitted_changes=?4,last_scanned_at=?5,updated_at=?5 WHERE path=?1",
+            params![path, branch, remote_url, (!status.trim().is_empty()) as i64, now],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE git_repositories SET current_branch=?2,user_name=?3,user_email=?4,last_scanned_at=?5 WHERE path=?1",
+            params![path, branch, user_name, user_email, now],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn import_head_commit(state: &DatabaseState, path: &str) -> Result<String, String> {
+    let output = git_output(&[
+        "-C",
+        path,
+        "show",
+        "-s",
+        "--format=%H%x1f%cI%x1f%s%x1f%an%x1f%ae",
+        "HEAD",
+    ])?;
+    let fields = output.splitn(5, '\u{1f}').collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err("无法读取最新提交信息。".to_string());
+    }
+    state
+        .connect()?
+        .execute(
+            "INSERT INTO git_commits(repository_path,commit_hash,committed_at,subject,author_name,author_email,file_count,additions,deletions)
+             VALUES(?1,?2,?3,?4,?5,?6,0,0,0)
+             ON CONFLICT(repository_path,commit_hash) DO UPDATE SET committed_at=excluded.committed_at,subject=excluded.subject,author_name=excluded.author_name,author_email=excluded.author_email",
+            params![path, fields[0], fields[1], fields[2], fields[3], fields[4]],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(fields[0].to_string())
+}
+
+#[tauri::command]
+pub fn set_repository_pinned(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let changed = state
+        .connect()?
+        .execute(
+            "UPDATE repository_assets SET is_pinned=?2 WHERE path=?1",
+            params![path, pinned as i64],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("项目资产不存在，请先重新扫描 Git 仓库。".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_repository_hidden(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    hidden: bool,
+) -> Result<(), String> {
+    let changed = state
+        .connect()?
+        .execute(
+            "UPDATE repository_assets SET is_hidden=?2 WHERE path=?1",
+            params![path, hidden as i64],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("项目资产不存在，请先重新扫描 Git 仓库。".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_credential_status() -> GitCredentialStatus {
+    git_credential_status_value()
+}
+
+#[tauri::command]
+pub fn save_git_default_credential(username: String, password: String) -> Result<(), String> {
+    let username = if username.trim().is_empty() {
+        DEFAULT_GIT_USERNAME.to_string()
+    } else {
+        username.trim().to_string()
+    };
+    if password.is_empty() {
+        return Err("请输入 Git 密码或访问令牌。".to_string());
+    }
+    let raw = serde_json::to_string(&GitCredential { username, password })
+        .map_err(|error| error.to_string())?;
+    git_credential_entry()?
+        .set_password(&raw)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn clear_git_default_credential() -> Result<(), String> {
+    match git_credential_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn git_repository_status(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitRepositoryStatus, String> {
+    ensure_managed_repository(&state, &path)?;
+    let status = git_output(&[
+        "-C",
+        &path,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+    ])?;
+    let current_branch = git_output(&["-C", &path, "branch", "--show-current"])
+        .unwrap_or_else(|_| "HEAD".to_string());
+    let upstream = git_output(&[
+        "-C",
+        &path,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    ])
+    .unwrap_or_default();
+    let (ahead, behind) = if upstream.is_empty() {
+        (0, 0)
+    } else {
+        let counts = git_output(&[
+            "-C",
+            &path,
+            "rev-list",
+            "--left-right",
+            "--count",
+            "HEAD...@{upstream}",
+        ])
+        .unwrap_or_default();
+        let values = counts.split_whitespace().collect::<Vec<_>>();
+        (
+            values
+                .first()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            values
+                .get(1)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        )
+    };
+    Ok(GitRepositoryStatus {
+        repository_path: path.clone(),
+        current_branch,
+        branches: local_branches(&path)?,
+        remote_url: git_output(&["-C", &path, "config", "--get", "remote.origin.url"])
+            .unwrap_or_default(),
+        upstream,
+        ahead,
+        behind,
+        user_name: git_output(&["-C", &path, "config", "user.name"])
+            .unwrap_or_else(|_| DEFAULT_GIT_USERNAME.to_string()),
+        user_email: git_output(&["-C", &path, "config", "user.email"]).unwrap_or_default(),
+        has_uncommitted_changes: !status.trim().is_empty(),
+        changed_files: parse_changed_files(&status),
+        credential: git_credential_status_value(),
+    })
+}
+
+fn operation_result(message: &str, output: String, commit_hash: String) -> GitOperationResult {
+    GitOperationResult {
+        message: message.to_string(),
+        output,
+        commit_hash,
+    }
+}
+
+#[tauri::command]
+pub fn git_fetch_repository(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    let output = git_operation_output(
+        &path,
+        &["fetch".into(), "--prune".into(), "origin".into()],
+        true,
+    )?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result("远程状态已更新。", output, String::new()))
+}
+
+#[tauri::command]
+pub fn git_pull_repository(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    ensure_clean_worktree(&path)?;
+    let output = git_operation_output(&path, &["pull".into(), "--ff-only".into()], true)?;
+    let commit_hash = import_head_commit(&state, &path)?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result("代码已安全拉取。", output, commit_hash))
+}
+
+#[tauri::command]
+pub fn git_switch_repository_branch(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    branch: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    ensure_clean_worktree(&path)?;
+    let branch = validated_branch(&path, &branch)?;
+    let output = git_operation_output(&path, &["switch".into(), branch.clone()], false)?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result(
+        &format!("已切换到 {branch} 分支。"),
+        output,
+        String::new(),
+    ))
+}
+
+#[tauri::command]
+pub fn git_merge_repository_branch(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    branch: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    ensure_clean_worktree(&path)?;
+    let branch = validated_branch(&path, &branch)?;
+    let current = git_output(&["-C", &path, "branch", "--show-current"])?;
+    if current == branch {
+        return Err("不能把当前分支合并到自身。".to_string());
+    }
+    let result = git_operation_output(
+        &path,
+        &["merge".into(), "--no-edit".into(), branch.clone()],
+        false,
+    );
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = git_operation_output(&path, &["merge".into(), "--abort".into()], false);
+            return Err(format!("合并未完成，已恢复操作前状态：{error}"));
+        }
+    };
+    let commit_hash = import_head_commit(&state, &path)?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result(
+        &format!("已将 {branch} 合并到 {current}。"),
+        output,
+        commit_hash,
+    ))
+}
+
+#[tauri::command]
+pub fn git_revert_repository_commit(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    commit_hash: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    ensure_clean_worktree(&path)?;
+    let commit_hash = commit_hash.trim();
+    if !(7..=40).contains(&commit_hash.len())
+        || !commit_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("提交编号无效，请刷新提交历史后重试。".to_string());
+    }
+    let verify = format!("{commit_hash}^{{commit}}");
+    git_output(&["-C", &path, "cat-file", "-e", &verify])?;
+    let result = git_operation_output(
+        &path,
+        &["revert".into(), "--no-edit".into(), commit_hash.to_string()],
+        false,
+    );
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = git_operation_output(&path, &["revert".into(), "--abort".into()], false);
+            return Err(format!("回退未完成，已恢复操作前状态：{error}"));
+        }
+    };
+    let new_hash = import_head_commit(&state, &path)?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result(
+        "已通过新提交回退所选历史，不会改写提交记录。",
+        output,
+        new_hash,
+    ))
+}
+
+#[tauri::command]
+pub fn execute_commit_plan_group(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    group_id: String,
+    commit_message: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    if !valid_conventional_commit_message(&commit_message) {
+        return Err(
+            "提交信息格式应为 type(scope): 描述，例如 feat(workflow): 新增通用提交审核页面。"
+                .to_string(),
+        );
+    }
+    let (files_json, group_status): (String, String) = state
+        .connect()?
+        .query_row(
+            "SELECT g.files_json,g.status FROM commit_groups g JOIN commit_plans p ON p.id=g.plan_id WHERE g.id=?1 AND p.repository_path=?2",
+            params![group_id, path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "提交建议不存在，请重新生成。".to_string())?;
+    if group_status == "committed" {
+        return Err("该建议组已经提交，请重新分析当前工作区。".to_string());
+    }
+    let files = serde_json::from_str::<Vec<String>>(&files_json)
+        .map_err(|_| "提交建议中的文件清单无效，请重新生成。".to_string())?;
+    if files.is_empty() {
+        return Err("提交建议中没有可提交文件。".to_string());
+    }
+    if files.iter().any(|file| sensitive_path(file)) {
+        return Err("该组包含疑似密钥或凭据文件，工作台不会自动提交。".to_string());
+    }
+    let staged = git_output(&["-C", &path, "diff", "--cached", "--name-only"])?;
+    if !staged.trim().is_empty() {
+        return Err(
+            "检测到已有手工暂存文件。为避免混入本次提交，请先在 Git 中处理暂存区。".to_string(),
+        );
+    }
+    let current_status = git_output(&[
+        "-C",
+        &path,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+    ])?;
+    let current_paths = parse_changed_files(&current_status)
+        .into_iter()
+        .map(|file| file.path.replace('\\', "/"))
+        .collect::<HashSet<_>>();
+    if files
+        .iter()
+        .any(|file| !current_paths.contains(&file.replace('\\', "/")))
+    {
+        return Err("部分文件已经变化或不再存在，请重新生成提交建议。".to_string());
+    }
+
+    let mut add_arguments = vec!["add".to_string(), "--".to_string()];
+    add_arguments.extend(files.iter().cloned());
+    git_operation_output(&path, &add_arguments, false)?;
+    let staged_after = git_output(&["-C", &path, "diff", "--cached", "--name-only"])?;
+    if staged_after.trim().is_empty() {
+        return Err("所选文件没有形成可提交修改。".to_string());
+    }
+    let effective_name = git_output(&["-C", &path, "config", "user.name"])
+        .unwrap_or_else(|_| DEFAULT_GIT_USERNAME.to_string());
+    let effective_email = git_output(&["-C", &path, "config", "user.email"])
+        .unwrap_or_else(|_| format!("{DEFAULT_GIT_USERNAME}@users.noreply.github.com"));
+    let commit_arguments = vec![
+        "-c".to_string(),
+        format!("user.name={effective_name}"),
+        "-c".to_string(),
+        format!("user.email={effective_email}"),
+        "commit".to_string(),
+        "-m".to_string(),
+        commit_message.clone(),
+    ];
+    let output = match git_operation_output(&path, &commit_arguments, false) {
+        Ok(output) => output,
+        Err(error) => {
+            unstage_files(&path, &files);
+            return Err(format!("提交失败，已撤销本次暂存：{error}"));
+        }
+    };
+    let commit_hash = import_head_commit(&state, &path)?;
+    let connection = state.connect()?;
+    connection
+        .execute(
+            "UPDATE commit_groups SET status='committed',commit_message=?2,commit_hash=?3,confirmed_at=?4,committed_at=?4 WHERE id=?1",
+            params![group_id, commit_message, commit_hash, Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| error.to_string())?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result(
+        "提交已完成，未自动推送。",
+        output,
+        commit_hash,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_group_for_path, discover_repository_candidates, parse_commits, sensitive_path,
+        commit_group_for_path, conventional_commit_message, discover_repository_candidates,
+        ensure_clean_worktree, git_operation_output, parse_changed_files, parse_commits,
+        sensitive_path, unstage_files, valid_conventional_commit_message, validated_branch,
         GitScanConfiguration,
     };
     use std::path::PathBuf;
@@ -869,5 +1626,67 @@ mod tests {
         assert!(sensitive_path(".env.production"));
         assert!(sensitive_path("cert/private.key"));
         assert!(!sensitive_path("src/token-chart.vue"));
+    }
+
+    #[test]
+    fn commit_message_contains_type_scope_and_description() {
+        let message = conventional_commit_message(
+            "code",
+            "业务代码",
+            &["src/views/WorkflowView.vue".to_string()],
+        );
+        assert_eq!(message, "feat(workflow): 更新业务代码");
+        assert!(valid_conventional_commit_message(&message));
+        assert!(valid_conventional_commit_message(
+            "fix(workflow): 修复审核状态展示"
+        ));
+        assert!(!valid_conventional_commit_message("feat: 缺少作用域"));
+    }
+
+    #[test]
+    fn worktree_status_is_exposed_as_readable_file_rows() {
+        let files = parse_changed_files(" M src/main.rs\n?? docs/guide.md\nD  old.txt");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].label, "已修改");
+        assert_eq!(files[1].label, "未跟踪");
+        assert_eq!(files[2].label, "已删除");
+    }
+
+    #[test]
+    fn git_safety_helpers_use_local_branch_and_restore_staging() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-git-ops-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let repository = directory.display().to_string();
+        let run = |arguments: &[&str]| {
+            git_operation_output(
+                &repository,
+                &arguments
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap()
+        };
+        run(&["init"]);
+        run(&["config", "user.name", "lzsk"]);
+        run(&["config", "user.email", "lzsk@example.test"]);
+        std::fs::write(directory.join("main.txt"), "first\n").unwrap();
+        run(&["add", "--", "main.txt"]);
+        run(&["commit", "-m", "feat(core): 初始化测试仓库"]);
+        run(&["branch", "feature"]);
+        assert_eq!(validated_branch(&repository, "feature").unwrap(), "feature");
+        assert!(validated_branch(&repository, "--invalid").is_err());
+
+        std::fs::write(directory.join("main.txt"), "changed\n").unwrap();
+        assert!(ensure_clean_worktree(&repository).is_err());
+        run(&["add", "--", "main.txt"]);
+        assert!(!run(&["diff", "--cached", "--name-only"]).is_empty());
+        unstage_files(&repository, &["main.txt".to_string()]);
+        assert!(run(&["diff", "--cached", "--name-only"]).is_empty());
+
+        assert!(directory.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

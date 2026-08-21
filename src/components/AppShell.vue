@@ -208,8 +208,9 @@ async function syncTapdNotifications() {
   try {
     const status=await getTapdStatus();
     if (!status.configured) return;
-    await syncTapdItems();
+    const result=await syncTapdItems();
     await loadNotifications(false);
+    window.dispatchEvent(new CustomEvent("tapd-background-synced",{detail:result}));
   }
   catch (error) { console.error("同步 TAPD 消息失败", error); }
 }

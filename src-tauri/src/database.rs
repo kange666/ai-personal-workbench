@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, MAIN_DB};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 28;
+pub const SCHEMA_VERSION: i64 = 30;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -383,6 +383,8 @@ impl DatabaseState {
                  CREATE TABLE IF NOT EXISTS repository_assets (
                    path TEXT PRIMARY KEY,
                    name TEXT NOT NULL,
+                   is_pinned INTEGER NOT NULL DEFAULT 0,
+                   is_hidden INTEGER NOT NULL DEFAULT 0,
                    category TEXT NOT NULL DEFAULT '待确认',
                    purpose TEXT NOT NULL DEFAULT '',
                    technology_stack TEXT NOT NULL DEFAULT '',
@@ -677,6 +679,8 @@ impl DatabaseState {
                     review_status TEXT NOT NULL DEFAULT 'pending',
                     review_note TEXT NOT NULL DEFAULT '',
                     reviewed_at TEXT,
+                    trigger_source TEXT NOT NULL DEFAULT 'manual',
+                    process_report_path TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(item_id) REFERENCES tapd_work_items(id) ON DELETE CASCADE
@@ -720,9 +724,13 @@ impl DatabaseState {
             "ALTER TABLE tapd_codex_jobs ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'",
             "ALTER TABLE tapd_codex_jobs ADD COLUMN review_note TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE tapd_codex_jobs ADD COLUMN reviewed_at TEXT",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN trigger_source TEXT NOT NULL DEFAULT 'manual'",
+            "ALTER TABLE tapd_codex_jobs ADD COLUMN process_report_path TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE notifications ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'",
             "ALTER TABLE notifications ADD COLUMN review_note TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE notifications ADD COLUMN reviewed_at TEXT",
+            "ALTER TABLE repository_assets ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE repository_assets ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = connection.execute(migration, []);
         }
@@ -1115,6 +1123,22 @@ mod migration_tests {
             )
             .unwrap();
         assert!(repository_assets_exists);
+        let repository_pin_column_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repository_assets') WHERE name='is_pinned')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(repository_pin_column_exists);
+        let repository_hidden_column_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repository_assets') WHERE name='is_hidden')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(repository_hidden_column_exists);
         let email_deliveries_exists: bool = upgraded
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_deliveries')",
