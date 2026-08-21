@@ -78,12 +78,18 @@ Copy-Item -LiteralPath $installer.FullName -Destination $installerOutput -Force
 Copy-Item -LiteralPath $releaseExe -Destination $portableOutput -Force
 Copy-Item -LiteralPath $signaturePath -Destination $signatureOutput -Force
 
+# Preserve the exact Pages directory layout required by the in-app updater.
+$pagesMirrorDirectory = Join-Path $outputDirectory "pages-mirror\downloads\$tag"
+New-Item -ItemType Directory -Path $pagesMirrorDirectory -Force | Out-Null
+Copy-Item -LiteralPath $installerOutput -Destination (Join-Path $pagesMirrorDirectory $installerName) -Force
+
 $installerItem = Get-Item -LiteralPath $installerOutput
 $portableItem = Get-Item -LiteralPath $portableOutput
 $installerHash = (Get-FileHash -LiteralPath $installerOutput -Algorithm SHA256).Hash
 $portableHash = (Get-FileHash -LiteralPath $portableOutput -Algorithm SHA256).Hash
 $signature = (Get-Content -LiteralPath $signatureOutput -Raw).Trim()
 $releaseBaseUrl = "https://github.com/kange666/ai-personal-workbench-download/releases/download/$tag"
+$updaterMirrorUrl = "https://kange666.github.io/ai-personal-workbench-download/downloads/$tag/$installerName"
 $sourceCommit = (git -C $projectRoot rev-parse HEAD).Trim()
 $publishedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
 
@@ -112,7 +118,8 @@ $manifest = [ordered]@{
     platforms = [ordered]@{
         "windows-x86_64" = [ordered]@{
             signature = $signature
-            url = "$releaseBaseUrl/$installerName"
+            # The updater uses the Pages mirror to avoid GitHub Release redirect stalls.
+            url = $updaterMirrorUrl
         }
     }
 }

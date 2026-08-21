@@ -181,6 +181,13 @@ export interface RepositoryAssetUpdate {
   commandSource: string;
 }
 
+export interface ProjectLaunchResult {
+  projectName: string;
+  command: string;
+  processId: number;
+  message: string;
+}
+
 export interface RepositoryAssetDetails {
   conversations: Array<{ id: string; title: string; updatedAt: string; archived: boolean }>;
   commits: Array<{ hash: string; subject: string; committedAt: string }>;
@@ -972,6 +979,14 @@ export async function setRepositoryPinned(path: string, pinned: boolean): Promis
 
 export async function setRepositoryHidden(path: string, hidden: boolean): Promise<void> {
   await invoke("set_repository_hidden", { path, hidden });
+}
+
+export async function setRepositoryCategory(path: string, category: string): Promise<void> {
+  await invoke("set_repository_category", { path, category });
+}
+
+export async function startRepositoryProject(path: string): Promise<ProjectLaunchResult> {
+  return invoke<ProjectLaunchResult>("start_repository_project", { path });
 }
 
 export async function getGitCredentialStatus(): Promise<GitCredentialStatus> {

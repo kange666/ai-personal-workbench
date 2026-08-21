@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, shallowRef } from "vue";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useRoute } from "vue-router";
 import ThemeSwitch from "../components/ThemeSwitch.vue";
@@ -63,6 +62,8 @@ const pendingUpdate = shallowRef<Update | null>(null);
 const updatePhase = ref<"idle" | "checking" | "ready" | "backing-up" | "downloading" | "installing" | "error">("idle");
 const updateDownloaded = ref(0);
 const updateTotal = ref(0);
+const updateHint = ref("");
+let updateSlowTimer: number | undefined;
 const updateProgress = computed(() => updateTotal.value > 0 ? Math.min(100, Math.round(updateDownloaded.value / updateTotal.value * 100)) : 0);
 const updateBusy = computed(() => ["checking", "backing-up", "downloading", "installing"].includes(updatePhase.value));
 
@@ -93,6 +94,7 @@ async function exportBackup() { loading.value=true; error.value=""; message.valu
 async function restoreBackup(path:string) { if (!window.confirm("恢复会用所选备份替换当前本地数据。系统会先自动创建一份“恢复前保护”备份，是否继续？")) return; loading.value=true; error.value=""; message.value=""; try { backupStatus.value=await restoreDatabaseBackup(path); message.value="恢复完成，页面即将重新载入。"; window.setTimeout(()=>window.location.reload(),800); } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function locateBackup(path:string) { try { await revealLocalFile(path); } catch(cause) { error.value=String(cause); } }
 async function prepareSignedUpdate() {
+  updateHint.value = "";
   if (pendingUpdate.value) await pendingUpdate.value.close();
   pendingUpdate.value = null;
   updatePhase.value = "checking";
@@ -106,7 +108,7 @@ async function prepareSignedUpdate() {
   return available;
 }
 async function refreshUpdateStatus() {
-  loading.value=true; error.value=""; message.value="";
+  loading.value=true; error.value=""; message.value=""; updateHint.value="";
   try {
     updateStatus.value=await checkForUpdates();
     if (updateStatus.value.updateAvailable) {
@@ -131,15 +133,32 @@ async function installAvailableUpdate() {
     await createDatabaseBackup();
     updateDownloaded.value=0;
     updateTotal.value=0;
+    updateHint.value="正在连接更新服务器…";
     updatePhase.value="downloading";
-    await update.downloadAndInstall((event) => {
-      if (event.event === "Started") updateTotal.value=event.data.contentLength || 0;
-      if (event.event === "Progress") updateDownloaded.value += event.data.chunkLength;
-      if (event.event === "Finished") updatePhase.value="installing";
-    }, { timeout: 5 * 60_000 });
-    message.value="新版本已安装，正在重新启动工作台。";
-    await relaunch();
+    updateSlowTimer=window.setTimeout(() => {
+      if (updatePhase.value === "downloading" && updateDownloaded.value === 0) {
+        updateHint.value="下载源响应较慢；可继续等待，或点击“手工下载”使用浏览器下载。";
+      }
+    }, 15_000);
+    await update.download((event) => {
+      if (event.event === "Started") {
+        updateTotal.value=event.data.contentLength || 0;
+        updateHint.value="更新包已连接，正在下载并校验签名。";
+      }
+      if (event.event === "Progress") {
+        updateDownloaded.value += event.data.chunkLength;
+        updateHint.value="正在下载更新包；下载完成后将自动启动安装器。";
+      }
+      if (event.event === "Finished") updateHint.value="下载完成，正在准备安装。";
+    }, { timeout: 2 * 60_000 });
+    if (updateSlowTimer) window.clearTimeout(updateSlowTimer);
+    updateSlowTimer=undefined;
+    updatePhase.value="installing";
+    updateHint.value="安装器启动后工作台会自动退出并重新打开，请勿重复点击。";
+    await update.install();
   } catch(cause) {
+    if (updateSlowTimer) window.clearTimeout(updateSlowTimer);
+    updateSlowTimer=undefined;
     updatePhase.value="error";
     error.value=`一键更新失败：${String(cause)}。当前版本和本地数据没有被替换。`;
   }
@@ -223,8 +242,9 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
               <div v-if="updatePhase==='downloading'"><i :style="{width:`${updateProgress}%`}"></i></div>
               <small v-if="updatePhase==='downloading'">{{ formatUpdateBytes(updateDownloaded) }}<template v-if="updateTotal"> / {{ formatUpdateBytes(updateTotal) }}</template></small>
               <small v-else-if="updatePhase==='ready'">签名校验将在安装时再次执行。</small>
+              <small v-if="updateHint">{{ updateHint }}</small>
             </div>
-            <div class="settings-actions"><button class="button secondary" :disabled="loading || updateBusy" @click="refreshUpdateStatus">重新检查</button><button v-if="updateStatus.updateAvailable" class="button primary" :disabled="updateBusy" @click="installAvailableUpdate">{{ updatePhase==='checking' ? '验证中…' : updatePhase==='backing-up' ? '备份中…' : updatePhase==='downloading' ? `下载 ${updateProgress}%` : updatePhase==='installing' ? '安装中…' : '一键更新并重启' }}</button><button v-if="updateStatus.updateAvailable && updateStatus.installerUrl && updatePhase==='error'" class="button secondary" @click="openUpdateUrl(updateStatus.installerUrl)">手工下载</button></div>
+            <div class="settings-actions"><button class="button secondary" :disabled="loading || updateBusy" @click="refreshUpdateStatus">重新检查</button><button v-if="updateStatus.updateAvailable" class="button primary" :disabled="updateBusy" @click="installAvailableUpdate">{{ updatePhase==='checking' ? '验证中…' : updatePhase==='backing-up' ? '备份中…' : updatePhase==='downloading' ? (updateTotal ? `下载 ${updateProgress}%` : '正在下载…') : updatePhase==='installing' ? '正在启动安装器…' : '一键更新并重启' }}</button><button v-if="updateStatus.updateAvailable && updateStatus.installerUrl && (updatePhase==='downloading' || updatePhase==='error')" class="button secondary" @click="openUpdateUrl(updateStatus.installerUrl)">手工下载</button></div>
           </article>
         </div>
       </div>

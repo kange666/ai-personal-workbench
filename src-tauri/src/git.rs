@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use walkdir::{DirEntry, WalkDir};
 
 #[cfg(windows)]
@@ -75,6 +75,15 @@ pub struct RepositoryAssetUpdate {
     pub test_command: String,
     pub build_command: String,
     pub command_source: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLaunchResult {
+    pub project_name: String,
+    pub command: String,
+    pub process_id: u32,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1252,6 +1261,100 @@ pub fn set_repository_hidden(
 }
 
 #[tauri::command]
+pub fn set_repository_category(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    category: String,
+) -> Result<(), String> {
+    let category = normalize_repository_category(&category)?;
+    let changed = state
+        .connect()?
+        .execute(
+            "UPDATE repository_assets SET category=?2,manually_confirmed=1,updated_at=?3 WHERE path=?1",
+            params![path, category, Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("项目资产不存在，请先重新扫描 Git 仓库。".to_string());
+    }
+    Ok(())
+}
+
+fn normalize_repository_category(category: &str) -> Result<String, String> {
+    let category = category.trim();
+    if category.is_empty() {
+        return Err("项目分类不能为空。".to_string());
+    }
+    if category.chars().count() > 40 || category.contains(['\r', '\n']) {
+        return Err("项目分类最多 40 个字符，且不能包含换行。".to_string());
+    }
+    Ok(category.to_string())
+}
+
+fn spawn_project_start_command(path: &Path, start_command: &str) -> Result<u32, String> {
+    let command = start_command.trim();
+    if command.is_empty() {
+        return Err("该项目尚未配置启动命令，请先在项目详情中填写。".to_string());
+    }
+    if command.contains(['\r', '\n']) {
+        return Err("启动命令不能包含换行。".to_string());
+    }
+
+    #[cfg(windows)]
+    let mut process = {
+        let mut process = Command::new("cmd.exe");
+        process.args(["/D", "/S", "/C", command]);
+        process.creation_flags(CREATE_NO_WINDOW);
+        process
+    };
+
+    #[cfg(not(windows))]
+    let mut process = {
+        let mut process = Command::new("sh");
+        process.args(["-lc", command]);
+        process
+    };
+
+    process
+        .current_dir(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|child| child.id())
+        .map_err(|error| format!("启动项目失败：{error}"))
+}
+
+#[tauri::command]
+pub fn start_repository_project(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<ProjectLaunchResult, String> {
+    let path = path.trim().to_string();
+    let (project_name, start_command): (String, String) = state
+        .connect()?
+        .query_row(
+            "SELECT name,start_command FROM repository_assets WHERE path=?1",
+            [&path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "项目资产不存在，请先重新扫描 Git 仓库。".to_string())?;
+    let repository_path = Path::new(&path);
+    if !repository_path.is_dir() {
+        return Err("项目目录不存在，请重新扫描或修正项目路径。".to_string());
+    }
+    let process_id = spawn_project_start_command(repository_path, &start_command)?;
+    Ok(ProjectLaunchResult {
+        project_name: project_name.clone(),
+        command: start_command,
+        process_id,
+        message: format!("已启动 {project_name}，进程号 {process_id}。"),
+    })
+}
+
+#[tauri::command]
 pub fn git_credential_status() -> GitCredentialStatus {
     git_credential_status_value()
 }
@@ -1580,11 +1683,12 @@ pub fn execute_commit_plan_group(
 mod tests {
     use super::{
         commit_group_for_path, conventional_commit_message, discover_repository_candidates,
-        ensure_clean_worktree, git_operation_output, parse_changed_files, parse_commits,
-        sensitive_path, unstage_files, valid_conventional_commit_message, validated_branch,
-        GitScanConfiguration,
+        ensure_clean_worktree, git_operation_output, normalize_repository_category,
+        parse_changed_files, parse_commits, sensitive_path, spawn_project_start_command,
+        unstage_files, valid_conventional_commit_message, validated_branch, GitScanConfiguration,
     };
     use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn commit_parser_keeps_author_identity_for_personal_reports() {
@@ -1650,6 +1754,36 @@ mod tests {
         assert_eq!(files[0].label, "已修改");
         assert_eq!(files[1].label, "未跟踪");
         assert_eq!(files[2].label, "已删除");
+    }
+
+    #[test]
+    fn repository_category_is_trimmed_and_rejects_invalid_input() {
+        assert_eq!(
+            normalize_repository_category("  业务系统  ").unwrap(),
+            "业务系统"
+        );
+        assert!(normalize_repository_category("   ").is_err());
+        assert!(normalize_repository_category("业务\n系统").is_err());
+        assert!(normalize_repository_category(&"类".repeat(41)).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_start_command_runs_in_the_project_directory_without_a_console() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-project-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        spawn_project_start_command(&directory, "echo started>launch-marker.txt").unwrap();
+
+        let marker = directory.join("launch-marker.txt");
+        for _ in 0..40 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "started");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

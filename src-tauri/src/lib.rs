@@ -472,6 +472,8 @@ pub fn run() {
             git::generate_commit_plan,
             git::set_repository_pinned,
             git::set_repository_hidden,
+            git::set_repository_category,
+            git::start_repository_project,
             git::git_credential_status,
             git::save_git_default_credential,
             git::clear_git_default_credential,
