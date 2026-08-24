@@ -1,11 +1,11 @@
-use crate::{codex, database::DatabaseState, git, worktime};
+use crate::{codex, database::DatabaseState, git, project_identity, worktime};
 use chrono::{Datelike, Duration, Local, NaiveDate, Timelike, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
-const HISTORY_SUMMARY_VERSION: &str = "13";
+const HISTORY_SUMMARY_VERSION: &str = "14";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -740,7 +740,7 @@ fn build_content(
         String::new(),
         "## 工作概览".to_string(),
         String::new(),
-        format!("- 完成任务：{} 项", completed.len()),
+        format!("- 完成事项：{} 项", completed.len()),
         format!("- 进行中或待处理：{} 项", pending.len()),
         format!("- 活跃项目：{} 个", projects.len()),
         format!("- Codex 对话：{conversation_count} 次"),
@@ -749,6 +749,15 @@ fn build_content(
         format!("- 工作记录：{} 条（按对话与日期归并）", conversations.len()),
         format!("- Token 使用：{total_tokens}（周期差量口径）"),
         format!("- Git 提交：{commit_count} 次，新增 {additions} 行，删除 {deletions} 行"),
+        String::new(),
+        "## 生成依据".to_string(),
+        String::new(),
+        format!("- Codex 对话：{conversation_count} 次（归档 {archived_conversation_count} 次）"),
+        format!("- Git 功能提交：{commit_count} 次"),
+        format!("- 任务与 TAPD 事项：{} 项", tasks.len()),
+        format!("- 数据截至：{}", Local::now().format("%Y-%m-%d %H:%M")),
+        String::new(),
+        "> 统计数量、提交、测试和来源明细来自本地记录；“项目工作总结”为工作台按项目与功能自动归纳，可在报告中心查看原始依据。".to_string(),
         String::new(),
         "## 项目工作总结".to_string(),
         String::new(),
@@ -813,10 +822,15 @@ fn build_content(
         } else {
             "推进"
         };
+        let (kind, title) = if let Some(title) = task.title.strip_prefix("TAPD 缺陷：") {
+            ("缺陷", title)
+        } else {
+            ("任务", task.title.as_str())
+        };
         project_work
             .entry(task.project.clone())
             .or_default()
-            .push(format!("{status}任务：{}", task.title));
+            .push(format!("{status}{kind}：{title}"));
     }
     for conversation in conversations {
         let Some(summary) = conversation_work_summary(conversation) else {
@@ -1091,6 +1105,7 @@ fn generate_for_date(
     report_type: &str,
     reference: NaiveDate,
 ) -> Result<ReportRecord, String> {
+    project_identity::sync_project_profiles_for_state(state)?;
     let (start, end) = report_period(report_type, reference)?;
     let start_text = start.format("%Y-%m-%d").to_string();
     let end_text = end.format("%Y-%m-%d").to_string();
@@ -1113,7 +1128,7 @@ fn generate_for_date(
         return Err("报告已锁定，请先解锁再重新生成。".to_string());
     }
 
-    let tasks = {
+    let mut tasks = {
         let mut statement = connection
             .prepare(
                 "SELECT title,project,status,note FROM tasks
@@ -1138,6 +1153,56 @@ fn generate_for_date(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
     };
+    for task in &mut tasks {
+        task.project = project_identity::canonical_project_name(&connection, &task.project, "");
+    }
+    let tapd_facts_raw = {
+        let mut statement = connection
+            .prepare(
+                "SELECT w.title,p.workspace_name,p.repository_path,w.status,w.status_label
+                 FROM tapd_work_items w JOIN tapd_projects p ON p.workspace_id=w.workspace_id
+                 WHERE w.item_type='bug' AND date(w.modified_at) BETWEEN ?1 AND ?2
+                 ORDER BY w.modified_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![start_text, end_text], |row| {
+                let status = row.get::<_, String>(3)?;
+                let status_label = row.get::<_, String>(4)?;
+                let completed = ["已解决", "已关闭", "closed", "resolved", "done"]
+                    .iter()
+                    .any(|value| {
+                        status.eq_ignore_ascii_case(value)
+                            || status_label.eq_ignore_ascii_case(value)
+                    });
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    completed,
+                    status_label,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let tapd_facts = tapd_facts_raw
+        .into_iter()
+        .map(
+            |(title, workspace_name, repository_path, completed, status_label)| TaskFact {
+                title: format!("TAPD 缺陷：{title}"),
+                project: project_identity::canonical_project_name(
+                    &connection,
+                    &workspace_name,
+                    &repository_path,
+                ),
+                status: if completed { "done" } else { "doing" }.into(),
+                note: status_label,
+            },
+        )
+        .collect::<Vec<_>>();
+    tasks.extend(tapd_facts);
     let (_token_conversation_count, total_tokens): (i64, i64) = connection.query_row(
         "WITH ordered AS (
            SELECT conversation_id,event_time,
@@ -1183,7 +1248,11 @@ fn generate_for_date(
                 facts.push(ConversationFact {
                     id: id.clone(),
                     date: date.clone(),
-                    project: project_label(&project),
+                    project: project_identity::canonical_project_name(
+                        &connection,
+                        &project,
+                        &source_path,
+                    ),
                     source_path: source_path.clone(),
                     archived,
                     requests: Vec::new(),
@@ -1219,7 +1288,7 @@ fn generate_for_date(
         .collect::<HashSet<_>>();
     let conversation_count = conversation_ids.len() as i64;
     let archived_conversation_count = archived_ids.len() as i64;
-    let git_facts = {
+    let mut git_facts = {
         let mut statement = connection
             .prepare(
                 "SELECT date(gc.committed_at,'localtime'),gr.name,gr.path,gc.subject,gc.file_count,gc.additions,gc.deletions
@@ -1245,6 +1314,13 @@ fn generate_for_date(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
     };
+    for fact in &mut git_facts {
+        fact.project = project_identity::canonical_project_name(
+            &connection,
+            &fact.project,
+            &fact.repository_path,
+        );
+    }
     let valuable_git = git_facts
         .iter()
         .filter(|item| git_work_summary(&item.subject).is_some())
@@ -1252,7 +1328,7 @@ fn generate_for_date(
     let commit_count = valuable_git.len() as i64;
     let additions = valuable_git.iter().map(|item| item.additions).sum::<i64>();
     let deletions = valuable_git.iter().map(|item| item.deletions).sum::<i64>();
-    let tests = {
+    let mut tests = {
         let mut statement = connection
             .prepare(
                 "SELECT project,menu_name,mode,status,date(started_at,'localtime'),error_message
@@ -1276,6 +1352,9 @@ fn generate_for_date(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
     };
+    for test in &mut tests {
+        test.project = project_identity::canonical_project_name(&connection, &test.project, "");
+    }
 
     let title = report_title(report_type, reference);
     let content = add_test_section(
@@ -1405,7 +1484,7 @@ pub fn report_sources(
                 kind: "Codex 对话".to_string(),
                 id,
                 title,
-                project: project_label(&cwd),
+                project: project_identity::canonical_project_name(&connection, &cwd, &cwd),
                 date,
                 detail: if archived {
                     "归档对话".to_string()
@@ -1429,7 +1508,11 @@ pub fn report_sources(
             Ok(ReportSource {
                 kind: "Git 提交".to_string(),
                 id: row.get(0)?,
-                project: project_label(&row.get::<_, String>(1)?),
+                project: project_identity::canonical_project_name(
+                    &connection,
+                    &row.get::<_, String>(1)?,
+                    &row.get::<_, String>(1)?,
+                ),
                 title: row.get(2)?,
                 date: row.get(3)?,
                 detail: format!(
@@ -1464,7 +1547,11 @@ pub fn report_sources(
                 kind: "任务".to_string(),
                 id: row.get(0)?,
                 title: row.get(1)?,
-                project: row.get(2)?,
+                project: project_identity::canonical_project_name(
+                    &connection,
+                    &row.get::<_, String>(2)?,
+                    "",
+                ),
                 date: row.get(3)?,
                 detail: row.get(4)?,
             })
@@ -1506,7 +1593,11 @@ pub fn report_sources(
                 kind: "测试".to_string(),
                 id: row.get(0)?,
                 title: row.get(1)?,
-                project: row.get(2)?,
+                project: project_identity::canonical_project_name(
+                    &connection,
+                    &row.get::<_, String>(2)?,
+                    "",
+                ),
                 date: row.get(3)?,
                 detail,
             })
@@ -1515,6 +1606,43 @@ pub fn report_sources(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     sources.extend(tests);
+    drop(statement);
+
+    let mut statement = connection
+        .prepare(
+            "SELECT w.item_key,w.title,p.workspace_name,p.repository_path,date(w.modified_at),w.status_label,w.priority
+             FROM tapd_work_items w JOIN tapd_projects p ON p.workspace_id=w.workspace_id
+             WHERE w.item_type='bug' AND date(w.modified_at) BETWEEN ?1 AND ?2
+             ORDER BY w.modified_at DESC LIMIT 100",
+        )
+        .map_err(|error| error.to_string())?;
+    let tapd_items = statement
+        .query_map(params![&start, &end], |row| {
+            let workspace_name = row.get::<_, String>(2)?;
+            let repository_path = row.get::<_, String>(3)?;
+            let status = row.get::<_, String>(5)?;
+            let priority = row.get::<_, String>(6)?;
+            Ok(ReportSource {
+                kind: "TAPD 缺陷".to_string(),
+                id: row.get(0)?,
+                title: row.get(1)?,
+                project: project_identity::canonical_project_name(
+                    &connection,
+                    &workspace_name,
+                    &repository_path,
+                ),
+                date: row.get(4)?,
+                detail: if priority.trim().is_empty() {
+                    status
+                } else {
+                    format!("{status} · 优先级 {priority}")
+                },
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    sources.extend(tapd_items);
     sources.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.kind.cmp(&b.kind)));
     Ok(sources)
 }

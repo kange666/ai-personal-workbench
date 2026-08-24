@@ -2,7 +2,7 @@ export type ThemeMode = "command" | "warm";
 export type TaskScope = "day" | "week" | "project";
 export type TaskStatus = "todo" | "doing" | "done" | "blocked" | "overdue" | "cancelled" | "draft";
 export type TaskPriority = "P0" | "P1" | "P2";
-export type TaskSource = "manual" | "conversation" | "test" | "report" | "ai";
+export type TaskSource = "manual" | "conversation" | "test" | "report" | "ai" | "inbox";
 
 export interface WorkTask {
   id: string;

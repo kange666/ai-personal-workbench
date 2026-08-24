@@ -17,6 +17,7 @@ import TaskEditor from "./TaskEditor.vue";
 import WorkspaceSearch from "./WorkspaceSearch.vue";
 import NotificationDrawer from "./NotificationDrawer.vue";
 import QuickCapture from "./QuickCapture.vue";
+import { loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
 
 const store = useWorkbenchStore();
 const router = useRouter();
@@ -40,20 +41,9 @@ const emailStatus = ref<EmailNotificationStatus>({ configured:false, enabled:fal
 const emailLoading = ref(false);
 const vipStatus = ref<VipStatus>({ active:false });
 const windowMaximized = ref(false);
-const navItems = [
-  { path:"/", icon:"home", label:"工作台" },
-  { path:"/work-records", icon:"records", label:"工作记录" },
-  { path:"/projects", icon:"projects", label:"项目资产" },
-  { path:"/calendar", icon:"calendar", label:"工作日历" },
-  { path:"/reports", icon:"reports", label:"报告中心" },
-  { path:"/testing", icon:"testing", label:"测试中心" },
-  { path:"/tokens", icon:"tokens", label:"Token 分析" },
-  { path:"/tapd", icon:"tapd", label:"TAPD 工作" },
-  { path:"/content", icon:"content", label:"内容工坊", vip:true },
-  { path:"/videos", icon:"videos", label:"视频中心", vip:true },
-  { path:"/knowledge", icon:"knowledge", label:"知识库" },
-];
-const visibleNavItems = computed(() => navItems.filter(item => !item.vip || vipStatus.value.active));
+let topbarDragStart: { x:number; y:number } | null = null;
+const navigationOrder = ref(loadNavigationOrder());
+const visibleNavItems = computed(() => orderedNavigationItems(navigationOrder.value).filter(item => !item.vip || vipStatus.value.active));
 const dateText = computed(() => new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(new Date()));
 const todayIso = new Date().toLocaleDateString("sv-SE");
 const todayDay = new Date().getDate();
@@ -138,7 +128,7 @@ async function loadSystemHealth() {
   } else items.push({ label:"额度快照", state:"warning", detail:"读取失败" });
   if (tapdResult.status === "fulfilled") {
     const value=tapdResult.value;
-    items.push({ label:"TAPD", state:value.configured ? (value.lastSyncedAt ? "ok" : "warning") : "idle", detail:value.configured ? `${value.itemCount} 项 · ${value.lastSyncedAt ? "已同步" : "尚未同步"}` : "未配置" });
+    items.push({ label:"TAPD", state:value.configured ? (value.lastSyncedAt ? "ok" : "warning") : "idle", detail:value.configured ? `${value.projects.filter(project => project.enabled).length} 个项目 · ${value.itemCount} 个缺陷` : "未配置" });
   } else items.push({ label:"TAPD", state:"warning", detail:"检查失败" });
   if (repositoriesResult.status === "fulfilled") {
     const repositories=repositoriesResult.value;
@@ -207,7 +197,7 @@ async function syncTapdNotifications() {
   if (!isTauriRuntime()) return;
   try {
     const status=await getTapdStatus();
-    if (!status.configured) return;
+    if (!status.configured || !status.projects.some(project => project.enabled)) return;
     const result=await syncTapdItems();
     await loadNotifications(false);
     window.dispatchEvent(new CustomEvent("tapd-background-synced",{detail:result}));
@@ -234,12 +224,31 @@ async function toggleMaximizeWindow() {
   await syncWindowState();
 }
 async function closeWindow() { if (isTauriRuntime()) await getCurrentWindow().close(); }
-async function startWindowDragging(event:MouseEvent) {
+function isTopbarInteractiveTarget(target:HTMLElement) {
+  return Boolean(target.closest("button,a,input,select,textarea,[role='button'],.system-health-popover,.quota-popover,.notification-popover"));
+}
+function prepareWindowDragging(event:MouseEvent) {
   if (!isTauriRuntime() || event.button !== 0) return;
   const target=event.target as HTMLElement;
-  if (target.closest("button,a,input,select,textarea,[role='button'],.system-health-popover,.quota-popover,.notification-popover")) return;
+  if (isTopbarInteractiveTarget(target)) return;
+  topbarDragStart={x:event.screenX,y:event.screenY};
+}
+async function continueWindowDragging(event:MouseEvent) {
+  if (!topbarDragStart || (event.buttons & 1) === 0) return;
+  const moved=Math.hypot(event.screenX-topbarDragStart.x,event.screenY-topbarDragStart.y);
+  if (moved < 4) return;
+  topbarDragStart=null;
   await getCurrentWindow().startDragging();
 }
+function cancelWindowDragging() { topbarDragStart=null; }
+async function toggleMaximizeFromTopbar(event:MouseEvent) {
+  const target=event.target as HTMLElement;
+  if (!isTauriRuntime() || event.button !== 0 || isTopbarInteractiveTarget(target)) return;
+  topbarDragStart=null;
+  event.preventDefault();
+  await toggleMaximizeWindow();
+}
+function refreshNavigationOrder() { navigationOrder.value=loadNavigationOrder(); }
 async function toggleEmailNotification() {
   if (emailLoading.value) return;
   if (["unconfigured","unverified"].includes(emailStatus.value.state)) {
@@ -292,6 +301,7 @@ function handleNotificationReviewed(id:string,decision:"accepted"|"follow_up",no
   const item=notifications.value.find(notification=>notification.id===id);
   if (item) { item.reviewStatus=decision; item.reviewNote=note; item.reviewedAt=new Date().toISOString(); item.isRead=true; }
   if (selectedNotification.value?.id===id) selectedNotification.value=item || null;
+  window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:notifications.value.slice(0,5) }));
 }
 function toggleNotifications() {
   notificationOpen.value=!notificationOpen.value;
@@ -340,6 +350,9 @@ onMounted(() => {
   window.addEventListener("open-workbench-notification", openNotificationFromPage);
   window.addEventListener("open-quick-capture", openQuickCaptureFromPage);
   window.addEventListener("tapd-items-synced", refreshNotificationsFromTapd);
+  window.addEventListener(navigationOrderChangedEvent, refreshNavigationOrder);
+  window.addEventListener("mousemove", continueWindowDragging);
+  window.addEventListener("mouseup", cancelWindowDragging);
 });
 onBeforeUnmount(() => {
   window.clearInterval(statusTimer);
@@ -359,6 +372,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("open-workbench-notification", openNotificationFromPage);
   window.removeEventListener("open-quick-capture", openQuickCaptureFromPage);
   window.removeEventListener("tapd-items-synced", refreshNotificationsFromTapd);
+  window.removeEventListener(navigationOrderChangedEvent, refreshNavigationOrder);
+  window.removeEventListener("mousemove", continueWindowDragging);
+  window.removeEventListener("mouseup", cancelWindowDragging);
 });
 </script>
 
@@ -369,10 +385,10 @@ onBeforeUnmount(() => {
       <nav><RouterLink v-for="item in visibleNavItems" :key="item.path" :to="item.path" :title="item.label"><NavIcon :name="item.icon" /><em>{{ item.label }}</em><b v-if="item.vip" class="vip-badge">VIP</b></RouterLink></nav>
       <div class="side-footer"><RouterLink class="settings-link" to="/settings" title="设置"><NavIcon name="settings" /><em>设置</em></RouterLink></div>
     </aside>
-    <header class="app-topbar" data-tauri-drag-region @mousedown="startWindowDragging">
+    <header class="app-topbar" @mousedown="prepareWindowDragging" @dblclick="toggleMaximizeFromTopbar">
       <button class="top-search" title="搜索全部本地数据" @click="openSearch">⌕<span>搜索任务、对话、报告、知识与内容</span><kbd>Ctrl K</kbd></button>
-      <span class="topbar-drag-zone" data-tauri-drag-region aria-hidden="true"></span>
-      <span class="top-date" data-tauri-drag-region>{{ dateText }}</span>
+      <span class="topbar-drag-zone" aria-hidden="true"></span>
+      <span class="top-date">{{ dateText }}</span>
       <div class="top-runtime" @focusout="closeHealthOnBlur">
         <button class="top-runtime-status" :class="{ warning:healthIssueCount>0, loading:healthLoading }" title="查看本地数据与连接状态" @click="healthOpen=!healthOpen"><i></i><span>{{ healthSummary }}</span></button>
         <section v-if="healthOpen" class="system-health-popover panel">
@@ -404,9 +420,10 @@ onBeforeUnmount(() => {
           <header><div><b>消息中心</b><small>{{ unreadCount ? `${unreadCount} 条未读` : '全部已读' }} · {{ pendingReviewCount }} 条 Codex 结果待确认</small></div><button class="text-button" :disabled="!unreadCount" @click="readAllNotifications">全部已读</button></header>
           <div class="notification-list">
             <button v-for="item in notifications" :key="item.id" class="notification-item" :class="{ unread:!item.isRead }" @click="openNotification(item)"><i></i><span><b>{{ item.title }}</b><p>{{ item.body }}</p><small>{{ notificationTime(item.createdAt) }} · {{ item.isRead ? '已读' : '未读' }}</small></span></button>
-            <p v-if="!notifications.length && !notificationLoading" class="notification-empty">暂无消息。Codex 完成结果和 TAPD 工作项变化会显示在这里。</p>
+            <p v-if="!notifications.length && !notificationLoading" class="notification-empty">暂无消息。Codex 完成结果和 TAPD 缺陷变化会显示在这里。</p>
             <p v-if="notificationLoading" class="notification-empty">正在读取消息…</p>
           </div>
+          <footer class="notification-popover-footer"><RouterLink to="/inbox" @click="notificationOpen=false">打开待处理收件箱</RouterLink><span>统一处理 Codex、TAPD、测试和项目风险</span></footer>
         </section>
       </div>
       <button class="top-capture-button" title="快速记录（Ctrl + Shift + Space）" @click="quickCaptureOpen=true">＋ 记录</button>
@@ -430,6 +447,6 @@ onBeforeUnmount(() => {
     <WorkspaceSearch :open="searchOpen" @close="searchOpen = false" />
     <NotificationDrawer :notification="selectedNotification" @close="selectedNotification=null" @reviewed="handleNotificationReviewed" />
     <QuickCapture :open="quickCaptureOpen" @close="quickCaptureOpen=false" />
-    <button v-if="notificationToast" class="notification-toast panel" @click="openNotification(notificationToast)"><i></i><span><small>{{ notificationToast.kind==='tapd_item' ? 'TAPD 工作消息' : 'Codex 任务完成' }}</small><b>{{ notificationToast.title.replace(/^Codex 任务已完成：/, '') }}</b><p>{{ notificationToast.body }}</p></span><em>查看</em></button>
+    <button v-if="notificationToast" class="notification-toast panel" @click="openNotification(notificationToast)"><i></i><span><small>{{ notificationToast.kind==='tapd_item' ? 'TAPD 缺陷消息' : 'Codex 任务完成' }}</small><b>{{ notificationToast.title.replace(/^Codex 任务已完成：/, '') }}</b><p>{{ notificationToast.body }}</p></span><em>查看</em></button>
   </div>
 </template>

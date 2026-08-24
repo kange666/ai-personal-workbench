@@ -1,6 +1,6 @@
 [package]
 name = "ai-personal-workbench"
-version = "1.5.1"
+version = "1.6.0"
 description = "AI 个人工作台本地桌面程序"
 authors = ["Local User"]
 edition = "2021"

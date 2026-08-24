@@ -7,11 +7,13 @@ mod content;
 mod database;
 mod email;
 mod git;
+mod inbox;
 mod knowledge;
 mod maintenance;
 mod notifications;
 mod parity;
 mod parity_catalog;
+mod project_identity;
 mod reports;
 mod suggestions;
 mod tapd;
@@ -186,11 +188,12 @@ fn quota_tray_tooltip(quota: Option<&codex::TrayQuota>) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(git::ProjectProcessState::default())
         .setup(|app| {
             app.handle().plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -413,6 +416,7 @@ pub fn run() {
             capture::list_quick_captures,
             capture::save_quick_capture,
             capture::archive_quick_capture,
+            capture::delete_quick_capture,
             wellbeing::get_daily_checkin,
             wellbeing::save_daily_checkin,
             maintenance::backup_status,
@@ -425,6 +429,12 @@ pub fn run() {
             database::delete_task,
             suggestions::sync_task_suggestions,
             tapd::tapd_status,
+            tapd::list_tapd_projects,
+            tapd::save_tapd_project,
+            tapd::remove_tapd_project,
+            tapd::save_tapd_project_automation,
+            tapd::preview_tapd_project_automation,
+            tapd::set_tapd_automation_paused,
             tapd::save_tapd_auto_fix_settings,
             tapd::save_tapd_credentials,
             tapd::clear_tapd_credentials,
@@ -432,6 +442,7 @@ pub fn run() {
             tapd::sync_tapd_items,
             tapd::list_tapd_items,
             tapd::list_tapd_codex_jobs,
+            tapd::execute_tapd_codex_job,
             tapd::read_tapd_process_report,
             tapd::start_tapd_codex_job,
             tapd::continue_tapd_codex_job,
@@ -457,6 +468,9 @@ pub fn run() {
             notifications::mark_notification_read,
             notifications::mark_all_notifications_read,
             notifications::review_notification,
+            inbox::list_inbox_items,
+            inbox::update_inbox_status,
+            inbox::create_task_from_inbox,
             email::email_notification_status,
             email::save_qq_email_config,
             email::delete_qq_email_config,
@@ -465,8 +479,11 @@ pub fn run() {
             email::retry_failed_emails,
             git::scan_git_repositories,
             git::git_scan_configuration,
+            git::git_scan_status,
             git::save_git_scan_configuration,
             git::list_repository_assets,
+            project_identity::list_project_profiles,
+            project_identity::save_project_profile,
             git::repository_asset_details,
             git::save_repository_asset,
             git::generate_commit_plan,
@@ -474,12 +491,17 @@ pub fn run() {
             git::set_repository_hidden,
             git::set_repository_category,
             git::start_repository_project,
+            git::stop_repository_project,
+            git::list_running_repository_projects,
+            git::open_repository_runtime_url,
             git::git_credential_status,
             git::save_git_default_credential,
             git::clear_git_default_credential,
             git::git_repository_status,
             git::git_fetch_repository,
             git::git_pull_repository,
+            git::git_stage_repository_changes,
+            git::git_push_repository,
             git::git_switch_repository_branch,
             git::git_merge_repository_branch,
             git::git_revert_repository_commit,
@@ -539,8 +561,15 @@ pub fn run() {
             worktime::work_time_settings,
             worktime::save_work_time_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run AI Personal Workbench");
+        .build(tauri::generate_context!())
+        .expect("failed to build AI Personal Workbench");
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let state = app_handle.state::<git::ProjectProcessState>();
+            let database = app_handle.state::<database::DatabaseState>();
+            git::stop_all_repository_projects(&state, &database);
+        }
+    });
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::{database::DatabaseState, reports::project_label};
+use crate::{database::DatabaseState, project_identity};
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,7 @@ fn activity_events(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<ActivityEvent>, String> {
+    project_identity::sync_project_profiles_for_state(state)?;
     let connection = state.connect()?;
     let mut statement = connection
         .prepare(
@@ -185,11 +186,11 @@ fn activity_events(
         };
         events.push(ActivityEvent {
             time,
-            project: if raw_project.contains(['\\', '/']) {
-                project_label(&raw_project)
-            } else {
-                raw_project
-            },
+            project: project_identity::canonical_project_name(
+                &connection,
+                &raw_project,
+                &raw_project,
+            ),
             work_type: work_type_for(&kind, &detail),
             kind,
         });
@@ -374,6 +375,7 @@ pub fn summary_for_range(
     end_date: &str,
     refresh: bool,
 ) -> Result<WorkSummary, String> {
+    project_identity::sync_project_profiles_for_state(state)?;
     parse_date(start_date)?;
     parse_date(end_date)?;
     if refresh {
@@ -395,8 +397,11 @@ pub fn summary_for_range(
     let mut projects = BTreeMap::<String, i64>::new();
     let mut types = BTreeMap::<String, i64>::new();
     let mut daily = BTreeMap::<String, (i64, i64, i64)>::new();
+    let connection = state.connect()?;
     for item in &effective {
-        *projects.entry(item.project.clone()).or_default() += item.duration_minutes;
+        let project =
+            project_identity::canonical_project_name(&connection, &item.project, &item.project);
+        *projects.entry(project).or_default() += item.duration_minutes;
         *types.entry(item.work_type.clone()).or_default() += item.duration_minutes;
         daily.entry(item.date.clone()).or_default().0 += item.duration_minutes;
     }

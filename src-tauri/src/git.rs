@@ -3,10 +3,12 @@ use chrono::Utc;
 use keyring::Entry;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
-use std::fs;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use walkdir::{DirEntry, WalkDir};
 
 #[cfg(windows)]
@@ -24,6 +26,14 @@ pub struct GitScanSummary {
     pub commits_imported: usize,
     pub snapshots_created: usize,
     pub errors: usize,
+    pub error_details: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitScanStatus {
+    pub last_scanned_at: String,
+    pub errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,6 +41,8 @@ pub struct GitScanSummary {
 pub struct GitScanConfiguration {
     pub roots: Vec<String>,
     pub max_depth: usize,
+    #[serde(default)]
+    pub excluded_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -52,6 +64,9 @@ pub struct RepositoryAsset {
     pub remote_url: String,
     pub default_branch: String,
     pub has_uncommitted_changes: bool,
+    pub changed_file_count: i64,
+    pub ahead_count: i64,
+    pub behind_count: i64,
     pub inference_status: String,
     pub manually_confirmed: bool,
     pub last_scanned_at: String,
@@ -60,6 +75,16 @@ pub struct RepositoryAsset {
     pub health_summary: String,
     pub commit_count: i64,
     pub conversation_count: i64,
+    pub last_activity_at: String,
+    pub runtime_status: String,
+    pub runtime_local_url: String,
+    pub runtime_error: String,
+    pub runtime_started_at: String,
+    pub runtime_log_path: String,
+    pub runtime_log_excerpt: String,
+    pub pending_level: String,
+    pub pending_summary: String,
+    pub next_action: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -80,10 +105,51 @@ pub struct RepositoryAssetUpdate {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLaunchResult {
+    pub project_path: String,
     pub project_name: String,
     pub command: String,
     pub process_id: u32,
+    pub managed: bool,
     pub message: String,
+    pub status: String,
+    pub started_at: String,
+    pub local_url: String,
+    pub log_path: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningProjectProcess {
+    pub project_path: String,
+    pub project_name: String,
+    pub command: String,
+    pub process_id: u32,
+    pub status: String,
+    pub started_at: String,
+    pub local_url: String,
+    pub log_path: String,
+    pub log_excerpt: String,
+    pub error_message: String,
+}
+
+struct ManagedProjectProcess {
+    info: RunningProjectProcess,
+    child: Child,
+    run_id: String,
+    telemetry: Arc<Mutex<RuntimeTelemetry>>,
+}
+
+#[derive(Default)]
+struct RuntimeTelemetry {
+    status: String,
+    local_url: String,
+    log_lines: VecDeque<String>,
+    error_message: String,
+}
+
+#[derive(Default)]
+pub struct ProjectProcessState {
+    processes: Mutex<HashMap<String, ManagedProjectProcess>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -105,10 +171,24 @@ pub struct RepositoryCommit {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RepositoryAssociation {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub subtitle: String,
+    pub status: String,
+    pub updated_at: String,
+    pub route: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RepositoryAssetDetails {
     pub conversations: Vec<RepositoryConversation>,
     pub commits: Vec<RepositoryCommit>,
     pub commit_plan: Option<CommitPlanView>,
+    pub associations: Vec<RepositoryAssociation>,
+    pub next_action: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -206,6 +286,29 @@ fn git_output(arguments: &[&str]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// Git 的短状态首字符本身可能是空格，不能像普通命令输出一样 trim，
+// 否则第一条文件状态会被破坏。-z 同时避免中文、空格和重命名路径被转义。
+fn git_status_output(repository: &str) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command.args([
+        "-C",
+        repository,
+        "-c",
+        "core.quotepath=false",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn git_credential_entry() -> Result<Entry, String> {
@@ -336,14 +439,8 @@ fn ensure_managed_repository(state: &DatabaseState, path: &str) -> Result<(), St
 }
 
 fn ensure_clean_worktree(path: &str) -> Result<(), String> {
-    let status = git_output(&[
-        "-C",
-        path,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=normal",
-    ])?;
-    if status.trim().is_empty() {
+    let status = git_status_output(path)?;
+    if status.is_empty() {
         Ok(())
     } else {
         Err("当前项目有未提交修改。请先提交或自行处理后再执行该操作。".to_string())
@@ -364,6 +461,100 @@ fn local_branches(path: &str) -> Result<Vec<String>, String> {
         .filter(|branch| !branch.is_empty())
         .map(ToString::to_string)
         .collect())
+}
+
+fn repository_ahead_behind(path: &str) -> (i64, i64) {
+    let upstream = git_output(&[
+        "-C",
+        path,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    ])
+    .unwrap_or_default();
+    if upstream.is_empty() {
+        return (0, 0);
+    }
+    let counts = git_output(&[
+        "-C",
+        path,
+        "rev-list",
+        "--left-right",
+        "--count",
+        &format!("HEAD...{upstream}"),
+    ])
+    .unwrap_or_default();
+    let mut values = counts.split_whitespace();
+    (
+        values
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        values
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+    )
+}
+
+fn repository_attention(
+    health_level: &str,
+    runtime_status: &str,
+    behind_count: i64,
+    changed_file_count: i64,
+    last_activity_at: &str,
+    latest_conversation_title: &str,
+) -> (String, String, String) {
+    if runtime_status == "failed" {
+        return (
+            "high".to_string(),
+            "最近一次启动失败".to_string(),
+            "查看启动日志并修复失败原因".to_string(),
+        );
+    }
+    if health_level == "失败" {
+        return (
+            "high".to_string(),
+            "仓库健康检查失败".to_string(),
+            "重新扫描并查看失败原因".to_string(),
+        );
+    }
+    if behind_count > 0 {
+        return (
+            "medium".to_string(),
+            format!("落后远程 {behind_count} 个提交"),
+            "检查工作区后拉取远程代码".to_string(),
+        );
+    }
+    if changed_file_count > 0 {
+        return (
+            "medium".to_string(),
+            format!("有 {changed_file_count} 个未提交文件"),
+            format!("整理并提交 {changed_file_count} 个修改文件"),
+        );
+    }
+    let is_stale = chrono::DateTime::parse_from_rfc3339(last_activity_at)
+        .map(|value| {
+            Utc::now()
+                .signed_duration_since(value.with_timezone(&Utc))
+                .num_days()
+                >= 60
+        })
+        .unwrap_or(false);
+    if is_stale {
+        return (
+            "low".to_string(),
+            "超过 60 天没有活动".to_string(),
+            "确认项目是否仍需维护".to_string(),
+        );
+    }
+    let next_action = if latest_conversation_title.is_empty() {
+        "查看项目说明并继续工作".to_string()
+    } else {
+        format!("继续 Codex 任务：{latest_conversation_title}")
+    };
+    ("none".to_string(), "暂无待处理项".to_string(), next_action)
 }
 
 fn validated_branch(path: &str, branch: &str) -> Result<String, String> {
@@ -394,30 +585,34 @@ fn changed_file_label(index_status: char, worktree_status: char) -> String {
 }
 
 fn parse_changed_files(status: &str) -> Vec<GitChangedFile> {
-    status
-        .lines()
-        .filter_map(|line| {
-            let mut chars = line.chars();
-            let index_status = chars.next()?;
-            let worktree_status = chars.next()?;
-            let raw_path = line.get(3..)?.trim();
-            let path = raw_path
-                .split(" -> ")
-                .last()
-                .unwrap_or(raw_path)
-                .trim_matches('"')
-                .to_string();
-            if path.is_empty() {
-                return None;
-            }
-            Some(GitChangedFile {
-                path,
-                index_status: index_status.to_string(),
-                worktree_status: worktree_status.to_string(),
-                label: changed_file_label(index_status, worktree_status),
-            })
-        })
-        .collect()
+    let records = status.split('\0').collect::<Vec<_>>();
+    let mut files = Vec::new();
+    let mut index = 0;
+    while index < records.len() {
+        let record = records[index];
+        index += 1;
+        if record.is_empty() || record.len() < 4 {
+            continue;
+        }
+        let bytes = record.as_bytes();
+        let index_status = bytes[0] as char;
+        let worktree_status = bytes[1] as char;
+        let path = record[3..].to_string();
+        if path.is_empty() {
+            continue;
+        }
+        files.push(GitChangedFile {
+            path,
+            index_status: index_status.to_string(),
+            worktree_status: worktree_status.to_string(),
+            label: changed_file_label(index_status, worktree_status),
+        });
+        // -z 模式的重命名/复制记录会额外跟一个旧路径；界面只展示当前路径。
+        if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
+            index += 1;
+        }
+    }
+    files
 }
 
 fn commit_scope(files: &[String]) -> String {
@@ -526,13 +721,17 @@ fn load_scan_configuration(connection: &Connection) -> Result<GitScanConfigurati
         .unwrap_or_else(|| GitScanConfiguration {
             roots: default_scan_roots(),
             max_depth: 3,
+            excluded_names: Vec::new(),
         });
     configuration.max_depth = configuration.max_depth.clamp(1, 6);
     configuration.roots.retain(|root| !root.trim().is_empty());
+    configuration
+        .excluded_names
+        .retain(|name| !name.trim().is_empty());
     Ok(configuration)
 }
 
-fn should_descend(entry: &DirEntry) -> bool {
+fn should_descend(entry: &DirEntry, excluded_names: &[String]) -> bool {
     if entry.depth() == 0 {
         return true;
     }
@@ -550,7 +749,9 @@ fn should_descend(entry: &DirEntry) -> bool {
             | "coverage"
             | "$RECYCLE.BIN"
             | "System Volume Information"
-    )
+    ) && !excluded_names
+        .iter()
+        .any(|excluded| name.eq_ignore_ascii_case(excluded.trim()))
 }
 
 fn discover_repository_candidates(configuration: &GitScanConfiguration) -> Vec<String> {
@@ -565,7 +766,7 @@ fn discover_repository_candidates(configuration: &GitScanConfiguration) -> Vec<S
             .max_depth(configuration.max_depth)
             .follow_links(false)
             .into_iter()
-            .filter_entry(should_descend)
+            .filter_entry(|entry| should_descend(entry, &configuration.excluded_names))
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_dir())
         {
@@ -764,6 +965,7 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
         commits_imported: 0,
         snapshots_created: 0,
         errors: 0,
+        error_details: Vec::new(),
     };
 
     for repository in repositories {
@@ -806,21 +1008,21 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
         }
         let history = match git_output(&history_arguments) {
             Ok(output) => parse_commits(&output),
-            Err(_) => {
+            Err(error) => {
                 summary.errors += 1;
+                summary
+                    .error_details
+                    .push(format!("{}：读取提交历史失败（{}）", repository, error));
                 Vec::new()
             }
         };
-        let (status, status_failed) = match git_output(&[
-            "-C",
-            &repository,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=normal",
-        ]) {
+        let (status, status_failed) = match git_status_output(&repository) {
             Ok(output) => (output, false),
-            Err(_) => {
+            Err(error) => {
                 summary.errors += 1;
+                summary
+                    .error_details
+                    .push(format!("{}：读取工作区状态失败（{}）", repository, error));
                 (String::new(), true)
             }
         };
@@ -833,14 +1035,11 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
             .and_then(|name| name.to_str())
             .unwrap_or(&repository)
             .to_string();
-        let has_uncommitted_changes = !status.trim().is_empty();
-        let health_level = if status_failed {
-            "失败"
-        } else if has_uncommitted_changes {
-            "警告"
-        } else {
-            "健康"
-        };
+        let changed_files = parse_changed_files(&status);
+        let changed_file_count = changed_files.len() as i64;
+        let has_uncommitted_changes = changed_file_count > 0;
+        let health_level = if status_failed { "失败" } else { "健康" };
+        let (ahead_count, behind_count) = repository_ahead_behind(&repository);
 
         let transaction = connection
             .transaction()
@@ -855,10 +1054,10 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
             .map_err(|error| error.to_string())?;
         transaction
             .execute(
-                "INSERT INTO repository_assets(path,name,default_branch,has_uncommitted_changes,last_scanned_at,updated_at)
-                 VALUES(?1,?2,?3,?4,?5,?5)
-                 ON CONFLICT(path) DO UPDATE SET name=excluded.name,default_branch=excluded.default_branch,has_uncommitted_changes=excluded.has_uncommitted_changes,last_scanned_at=excluded.last_scanned_at,updated_at=excluded.updated_at",
-                params![repository, repository_name, branch, has_uncommitted_changes as i64, captured_at],
+                "INSERT INTO repository_assets(path,name,default_branch,has_uncommitted_changes,changed_file_count,ahead_count,behind_count,last_scanned_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8)
+                 ON CONFLICT(path) DO UPDATE SET name=excluded.name,default_branch=excluded.default_branch,has_uncommitted_changes=excluded.has_uncommitted_changes,changed_file_count=excluded.changed_file_count,ahead_count=excluded.ahead_count,behind_count=excluded.behind_count,last_scanned_at=excluded.last_scanned_at,updated_at=excluded.updated_at",
+                params![repository, repository_name, branch, has_uncommitted_changes as i64, changed_file_count, ahead_count, behind_count, captured_at],
             )
             .map_err(|error| error.to_string())?;
         transaction
@@ -870,7 +1069,7 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
                     repository,
                     health_level,
                     has_uncommitted_changes as i64,
-                    if has_uncommitted_changes { "工作区存在未提交修改" } else { "Git 状态正常" },
+                    if status_failed { "Git 仓库检查失败" } else { "目录与 Git 仓库可正常读取" },
                     if status_failed { "无法读取 Git 工作区状态" } else { "" },
                     captured_at
                 ],
@@ -891,18 +1090,17 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
         let mut added_count = 0;
         let mut deleted_count = 0;
         let mut untracked_count = 0;
-        for line in status.lines() {
-            let code = line.get(0..2).unwrap_or_default();
-            if code == "??" {
+        for file in changed_files {
+            if file.index_status == "?" && file.worktree_status == "?" {
                 untracked_count += 1;
             } else {
-                if code.contains('M') {
+                if file.index_status == "M" || file.worktree_status == "M" {
                     modified_count += 1;
                 }
-                if code.contains('A') {
+                if file.index_status == "A" || file.worktree_status == "A" {
                     added_count += 1;
                 }
-                if code.contains('D') {
+                if file.index_status == "D" || file.worktree_status == "D" {
                     deleted_count += 1;
                 }
             }
@@ -918,6 +1116,21 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
         transaction.commit().map_err(|error| error.to_string())?;
     }
 
+    let completed_at = Utc::now().to_rfc3339();
+    let errors =
+        serde_json::to_string(&summary.error_details).map_err(|error| error.to_string())?;
+    for (key, value) in [
+        ("git_last_scan_at", completed_at),
+        ("git_last_scan_errors", errors),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO app_meta(key,value) VALUES(?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            )
+            .map_err(|error| error.to_string())?;
+    }
     Ok(summary)
 }
 
@@ -926,6 +1139,26 @@ pub fn git_scan_configuration(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<GitScanConfiguration, String> {
     load_scan_configuration(&state.connect()?)
+}
+
+#[tauri::command]
+pub fn git_scan_status(state: tauri::State<'_, DatabaseState>) -> Result<GitScanStatus, String> {
+    let connection = state.connect()?;
+    let read_value = |key: &str| -> Result<String, String> {
+        connection
+            .query_row("SELECT value FROM app_meta WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map(|value| value.unwrap_or_default())
+            .map_err(|error| error.to_string())
+    };
+    let errors = serde_json::from_str::<Vec<String>>(&read_value("git_last_scan_errors")?)
+        .unwrap_or_default();
+    Ok(GitScanStatus {
+        last_scanned_at: read_value("git_last_scan_at")?,
+        errors,
+    })
 }
 
 #[tauri::command]
@@ -938,6 +1171,30 @@ pub fn save_git_scan_configuration(
     }
     if !(1..=6).contains(&configuration.max_depth) {
         return Err("扫描深度必须在 1 到 6 之间".to_string());
+    }
+    let mut configuration = configuration;
+    configuration.roots = configuration
+        .roots
+        .into_iter()
+        .map(|root| root.trim().to_string())
+        .filter(|root| !root.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    configuration.roots.sort_by_key(|root| root.to_lowercase());
+    configuration.excluded_names = configuration
+        .excluded_names
+        .into_iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    configuration
+        .excluded_names
+        .sort_by_key(|name| name.to_lowercase());
+    if configuration.roots.is_empty() {
+        return Err("至少保留一个 Git 扫描根目录".to_string());
     }
     let value = serde_json::to_string(&configuration).map_err(|error| error.to_string())?;
     state
@@ -970,21 +1227,42 @@ pub fn list_repository_assets(
         .prepare(
             "SELECT a.path,a.name,a.is_pinned,a.is_hidden,a.category,a.purpose,a.technology_stack,a.main_modules,
                     a.install_command,a.start_command,a.test_command,a.build_command,a.command_source,
-                    a.remote_url,a.default_branch,a.has_uncommitted_changes,a.inference_status,
+                    a.remote_url,a.default_branch,a.has_uncommitted_changes,a.changed_file_count,a.ahead_count,a.behind_count,a.inference_status,
                     a.manually_confirmed,a.last_scanned_at,
                     COALESCE(NULLIF(MAX(
                       COALESCE((SELECT MAX(c.committed_at) FROM git_commits c WHERE c.repository_path=a.path),''),
                       COALESCE((SELECT MAX(c.updated_at) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%'),'')
                     ),''),a.updated_at) AS activity_updated_at,
-                    COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证'),
-                    COALESCE((SELECT h.summary FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'尚未执行健康检查'),
+                    CASE COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证') WHEN '警告' THEN '健康' ELSE COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证') END,
+                    CASE COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证') WHEN '警告' THEN '目录与 Git 仓库可正常读取' ELSE COALESCE((SELECT h.summary FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'尚未执行健康检查') END,
                     (SELECT COUNT(*) FROM git_commits c WHERE c.repository_path=a.path),
-                    (SELECT COUNT(*) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%')
+                    (SELECT COUNT(*) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%'),
+                    COALESCE((SELECT r.status FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
+                    COALESCE((SELECT r.local_url FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
+                    COALESCE((SELECT r.error_message FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
+                    COALESCE((SELECT r.started_at FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
+                    COALESCE((SELECT r.log_path FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
+                    COALESCE((SELECT r.log_excerpt FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
+                    COALESCE((SELECT COALESCE(NULLIF(c.title,''),'未命名 Codex 任务') FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%' ORDER BY COALESCE(c.updated_at,c.started_at) DESC LIMIT 1),'')
              FROM repository_assets a ORDER BY a.is_pinned DESC,datetime(activity_updated_at) DESC,a.name COLLATE NOCASE",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
+            let health_level: String = row.get(23)?;
+            let last_activity_at: String = row.get(22)?;
+            let runtime_status: String = row.get(27)?;
+            let behind_count: i64 = row.get(18)?;
+            let changed_file_count: i64 = row.get(16)?;
+            let latest_conversation_title: String = row.get(33)?;
+            let (pending_level, pending_summary, next_action) = repository_attention(
+                &health_level,
+                &runtime_status,
+                behind_count,
+                changed_file_count,
+                &last_activity_at,
+                &latest_conversation_title,
+            );
             Ok(RepositoryAsset {
                 path: row.get(0)?,
                 name: row.get(1)?,
@@ -1002,14 +1280,27 @@ pub fn list_repository_assets(
                 remote_url: row.get(13)?,
                 default_branch: row.get(14)?,
                 has_uncommitted_changes: row.get::<_, i64>(15)? != 0,
-                inference_status: row.get(16)?,
-                manually_confirmed: row.get::<_, i64>(17)? != 0,
-                last_scanned_at: row.get(18)?,
-                updated_at: row.get(19)?,
-                health_level: row.get(20)?,
-                health_summary: row.get(21)?,
-                commit_count: row.get(22)?,
-                conversation_count: row.get(23)?,
+                changed_file_count,
+                ahead_count: row.get(17)?,
+                behind_count,
+                inference_status: row.get(19)?,
+                manually_confirmed: row.get::<_, i64>(20)? != 0,
+                last_scanned_at: row.get(21)?,
+                updated_at: last_activity_at.clone(),
+                health_level,
+                health_summary: row.get(24)?,
+                commit_count: row.get(25)?,
+                conversation_count: row.get(26)?,
+                last_activity_at,
+                runtime_status,
+                runtime_local_url: row.get(28)?,
+                runtime_error: row.get(29)?,
+                runtime_started_at: row.get(30)?,
+                runtime_log_path: row.get(31)?,
+                runtime_log_excerpt: row.get(32)?,
+                pending_level,
+                pending_summary,
+                next_action,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1023,6 +1314,13 @@ pub fn repository_asset_details(
     path: String,
 ) -> Result<RepositoryAssetDetails, String> {
     let connection = state.connect()?;
+    let (repository_name, build_command, remote_url): (String, String, String) = connection
+        .query_row(
+            "SELECT name,build_command,remote_url FROM repository_assets WHERE path=?1",
+            [&path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
     let normalized = path.replace('/', "\\").to_lowercase();
     let mut conversation_statement = connection
         .prepare(
@@ -1061,11 +1359,226 @@ pub fn repository_asset_details(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let mut associations = Vec::new();
+    associations.extend(conversations.iter().take(12).map(|item| {
+        RepositoryAssociation {
+            id: item.id.clone(),
+            kind: "codex".to_string(),
+            title: item.title.clone(),
+            subtitle: if item.archived {
+                "已归档 Codex 任务"
+            } else {
+                "Codex 任务"
+            }
+            .to_string(),
+            status: if item.archived { "archived" } else { "active" }.to_string(),
+            updated_at: item.updated_at.clone(),
+            route: format!("/tokens?conversation={}", item.id),
+        }
+    }));
+
+    let mut test_statement = connection
+        .prepare(
+            "SELECT id,menu_name,status,started_at FROM test_runs
+             WHERE lower(project)=lower(?1) OR lower(project)=lower(?2)
+             ORDER BY started_at DESC LIMIT 12",
+        )
+        .map_err(|error| error.to_string())?;
+    associations.extend(
+        test_statement
+            .query_map(params![repository_name, path], |row| {
+                let id: String = row.get(0)?;
+                Ok(RepositoryAssociation {
+                    route: format!("/testing?run={id}"),
+                    id,
+                    kind: "test".to_string(),
+                    title: row.get(1)?,
+                    status: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    subtitle: "项目测试记录".to_string(),
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?,
+    );
+
+    let mut work_statement = connection
+        .prepare(
+            "SELECT id,work_type,duration_minutes,updated_at,note FROM work_sessions
+             WHERE lower(project)=lower(?1) OR lower(project)=lower(?2)
+             ORDER BY updated_at DESC LIMIT 12",
+        )
+        .map_err(|error| error.to_string())?;
+    associations.extend(
+        work_statement
+            .query_map(params![repository_name, path], |row| {
+                let duration: i64 = row.get(2)?;
+                let note: String = row.get(4)?;
+                Ok(RepositoryAssociation {
+                    id: row.get(0)?,
+                    kind: "work".to_string(),
+                    title: row.get(1)?,
+                    subtitle: if note.trim().is_empty() {
+                        format!("工作记录 · {duration} 分钟")
+                    } else {
+                        format!("{duration} 分钟 · {note}")
+                    },
+                    status: "recorded".to_string(),
+                    updated_at: row.get(3)?,
+                    route: "/work-records".to_string(),
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?,
+    );
+
+    let mut tapd_statement = connection
+        .prepare(
+            "SELECT i.item_key,i.id,i.workspace_id,i.title,i.status_label,i.modified_at
+             FROM tapd_work_items i JOIN tapd_projects p ON p.workspace_id=i.workspace_id
+             WHERE lower(replace(p.repository_path,'/','\\'))=lower(replace(?1,'/','\\'))
+             ORDER BY COALESCE(NULLIF(i.modified_at,''),i.synced_at) DESC LIMIT 12",
+        )
+        .map_err(|error| error.to_string())?;
+    associations.extend(
+        tapd_statement
+            .query_map([&path], |row| {
+                let workspace_id: String = row.get(2)?;
+                let item_id: String = row.get(1)?;
+                Ok(RepositoryAssociation {
+                    id: row.get(0)?,
+                    kind: "tapd".to_string(),
+                    title: row.get(3)?,
+                    subtitle: format!("TAPD 缺陷 #{item_id}"),
+                    status: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    route: format!("/tapd?project={workspace_id}&item={item_id}"),
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?,
+    );
+
+    let report_pattern = format!("%### {}%", repository_name);
+    let mut report_statement = connection
+        .prepare(
+            "SELECT id,title,status,updated_at,report_type,content_markdown FROM reports
+             WHERE content_markdown LIKE ?1 ORDER BY updated_at DESC LIMIT 8",
+        )
+        .map_err(|error| error.to_string())?;
+    associations.extend(
+        report_statement
+            .query_map([report_pattern], |row| {
+                let id: String = row.get(0)?;
+                let report_type: String = row.get(4)?;
+                let content: String = row.get(5)?;
+                let lower = content.to_lowercase();
+                let is_deployment = ["部署", "发布", "deploy", "release"]
+                    .iter()
+                    .any(|keyword| lower.contains(keyword));
+                Ok(RepositoryAssociation {
+                    route: format!("/reports?report={id}"),
+                    id,
+                    kind: if is_deployment {
+                        "deployment"
+                    } else {
+                        "report"
+                    }
+                    .to_string(),
+                    title: row.get(1)?,
+                    status: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    subtitle: if is_deployment {
+                        format!("{report_type} 报告中的部署或发布记录")
+                    } else {
+                        format!("{report_type} 报告")
+                    },
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?,
+    );
+    if Path::new(&path).join("README.md").is_file() {
+        associations.push(RepositoryAssociation {
+            id: format!("docs:{path}"),
+            kind: "docs".to_string(),
+            title: "README.md".to_string(),
+            subtitle: "项目说明文档".to_string(),
+            status: "available".to_string(),
+            updated_at: String::new(),
+            route: String::new(),
+        });
+    }
+    if !build_command.trim().is_empty() {
+        associations.push(RepositoryAssociation {
+            id: format!("build:{path}"),
+            kind: "build".to_string(),
+            title: build_command,
+            subtitle: "已识别构建命令".to_string(),
+            status: "configured".to_string(),
+            updated_at: String::new(),
+            route: String::new(),
+        });
+    }
+    if let Some((status, local_url, started_at)) = connection
+        .query_row(
+            "SELECT status,local_url,started_at FROM repository_runtime_runs
+             WHERE repository_path=?1 AND local_url<>'' ORDER BY started_at DESC LIMIT 1",
+            [&path],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    {
+        associations.push(RepositoryAssociation {
+            id: format!("runtime:{path}"),
+            kind: "runtime".to_string(),
+            title: local_url.clone(),
+            subtitle: "最近一次本地运行地址".to_string(),
+            status,
+            updated_at: started_at,
+            route: local_url,
+        });
+    }
+    if !remote_url.trim().is_empty() {
+        let remote_route =
+            if remote_url.starts_with("http://") || remote_url.starts_with("https://") {
+                remote_url.clone()
+            } else {
+                String::new()
+            };
+        associations.push(RepositoryAssociation {
+            id: format!("remote:{path}"),
+            kind: "remote".to_string(),
+            title: remote_url,
+            subtitle: "Git 远程仓库".to_string(),
+            status: "configured".to_string(),
+            updated_at: String::new(),
+            route: remote_route,
+        });
+    }
+    associations.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let next_action = conversations
+        .first()
+        .map(|item| format!("继续 Codex 任务：{}", item.title))
+        .unwrap_or_else(|| "查看最近工作记录并确定下一步".to_string());
     let commit_plan = latest_commit_plan(&connection, &path)?;
     Ok(RepositoryAssetDetails {
         conversations,
         commits,
         commit_plan,
+        associations,
+        next_action,
     })
 }
 
@@ -1074,29 +1587,15 @@ pub fn generate_commit_plan(
     state: tauri::State<'_, DatabaseState>,
     path: String,
 ) -> Result<CommitPlanView, String> {
-    let status = git_output(&[
-        "-C",
-        &path,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=normal",
-    ])?;
-    if status.trim().is_empty() {
+    let status = git_status_output(&path)?;
+    if status.is_empty() {
         return Err("当前工作区没有未提交修改".to_string());
     }
     let mut grouped: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     let mut has_sensitive = false;
-    for line in status.lines() {
-        let raw_path = line.get(3..).unwrap_or_default().trim();
-        let file = raw_path
-            .split(" -> ")
-            .last()
-            .unwrap_or(raw_path)
-            .trim_matches('"')
-            .to_string();
-        if file.is_empty() {
-            continue;
-        }
+    let changed_files = parse_changed_files(&status);
+    for changed_file in &changed_files {
+        let file = changed_file.path.clone();
         has_sensitive |= sensitive_path(&file);
         let (key, title) = commit_group_for_path(&file);
         grouped
@@ -1119,7 +1618,7 @@ pub fn generate_commit_plan(
     let plan_id = uuid::Uuid::new_v4().to_string();
     let summary = format!(
         "识别 {} 个文件，拆分为 {} 组；仅生成建议，未修改暂存区。",
-        status.lines().count(),
+        changed_files.len(),
         grouped.len()
     );
     let mut connection = state.connect()?;
@@ -1169,13 +1668,7 @@ pub fn save_repository_asset(
 fn refresh_basic_repository_state(state: &DatabaseState, path: &str) -> Result<(), String> {
     let branch = git_output(&["-C", path, "branch", "--show-current"])
         .unwrap_or_else(|_| "HEAD".to_string());
-    let status = git_output(&[
-        "-C",
-        path,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=normal",
-    ])?;
+    let status = git_status_output(path)?;
     let remote_url =
         git_output(&["-C", path, "config", "--get", "remote.origin.url"]).unwrap_or_default();
     let user_name = git_output(&["-C", path, "config", "user.name"]).unwrap_or_default();
@@ -1185,7 +1678,7 @@ fn refresh_basic_repository_state(state: &DatabaseState, path: &str) -> Result<(
     connection
         .execute(
             "UPDATE repository_assets SET default_branch=?2,remote_url=?3,has_uncommitted_changes=?4,last_scanned_at=?5,updated_at=?5 WHERE path=?1",
-            params![path, branch, remote_url, (!status.trim().is_empty()) as i64, now],
+            params![path, branch, remote_url, (!status.is_empty()) as i64, now],
         )
         .map_err(|error| error.to_string())?;
     connection
@@ -1291,7 +1784,93 @@ fn normalize_repository_category(category: &str) -> Result<String, String> {
     Ok(category.to_string())
 }
 
-fn spawn_project_start_command(path: &Path, start_command: &str) -> Result<u32, String> {
+#[derive(Debug, Default)]
+struct DetectedProjectCommands {
+    install: String,
+    start: String,
+    test: String,
+    build: String,
+    technology_stack: String,
+    source: String,
+}
+
+fn package_script_command(manager: &str, script: &str) -> String {
+    match manager {
+        "yarn" => format!("yarn {script}"),
+        "pnpm" => format!("pnpm {script}"),
+        "bun" => format!("bun run {script}"),
+        _ => format!("npm run {script}"),
+    }
+}
+
+// 仅从 package.json 的标准 scripts 中选择常见命令，不读取 README 或执行任意说明文本。
+fn detect_project_commands(path: &Path) -> Result<DetectedProjectCommands, String> {
+    let package_path = path.join("package.json");
+    let package_text = fs::read_to_string(&package_path)
+        .map_err(|_| "未找到可自动识别的 package.json，请在项目资料中填写启动命令。".to_string())?;
+    let package: serde_json::Value = serde_json::from_str(&package_text)
+        .map_err(|error| format!("package.json 格式无效：{error}"))?;
+    let scripts = package
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "package.json 未配置 scripts，无法自动识别启动命令。".to_string())?;
+    let manager = if path.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if path.join("yarn.lock").exists() {
+        "yarn"
+    } else if path.join("bun.lock").exists() || path.join("bun.lockb").exists() {
+        "bun"
+    } else {
+        "npm"
+    };
+    let start_script = ["dev", "start", "serve"]
+        .into_iter()
+        .find(|script| scripts.contains_key(*script))
+        .ok_or_else(|| {
+            "package.json 没有 dev、start 或 serve 脚本，请在项目资料中填写启动命令。".to_string()
+        })?;
+    let install = match manager {
+        "pnpm" => "pnpm install",
+        "yarn" => "yarn install",
+        "bun" => "bun install",
+        _ if path.join("package-lock.json").exists() => "npm ci",
+        _ => "npm install",
+    };
+    let dependency_names = ["dependencies", "devDependencies"]
+        .into_iter()
+        .filter_map(|key| package.get(key).and_then(serde_json::Value::as_object))
+        .flat_map(|dependencies| dependencies.keys().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let mut stack = Vec::new();
+    if dependency_names.contains("vue") {
+        stack.push("Vue");
+    }
+    if dependency_names.contains("vite") {
+        stack.push("Vite");
+    }
+    if dependency_names.contains("@tauri-apps/api") {
+        stack.push("Tauri");
+    }
+    if dependency_names.contains("electron") {
+        stack.push("Electron");
+    }
+    Ok(DetectedProjectCommands {
+        install: install.to_string(),
+        start: package_script_command(manager, start_script),
+        test: scripts
+            .contains_key("test")
+            .then(|| package_script_command(manager, "test"))
+            .unwrap_or_default(),
+        build: scripts
+            .contains_key("build")
+            .then(|| package_script_command(manager, "build"))
+            .unwrap_or_default(),
+        technology_stack: stack.join(" / "),
+        source: format!("package.json scripts（工作台自动识别 · {manager}）"),
+    })
+}
+
+fn spawn_project_start_command(path: &Path, start_command: &str) -> Result<Child, String> {
     let command = start_command.trim();
     if command.is_empty() {
         return Err("该项目尚未配置启动命令，请先在项目详情中填写。".to_string());
@@ -1318,20 +1897,490 @@ fn spawn_project_start_command(path: &Path, start_command: &str) -> Result<u32, 
     process
         .current_dir(path)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .map(|child| child.id())
         .map_err(|error| format!("启动项目失败：{error}"))
+}
+
+fn is_hbuilderx_project(path: &Path) -> bool {
+    path.join("manifest.json").is_file() && path.join("pages.json").is_file()
+}
+
+#[derive(Debug)]
+struct HBuilderxCompiler {
+    node: PathBuf,
+    cli: PathBuf,
+    plugins: PathBuf,
+}
+
+fn hbuilderx_compiler_from_root(root: &Path) -> Option<HBuilderxCompiler> {
+    let plugins = root.join("plugins");
+    let cli = plugins.join("uniapp-cli").join("bin").join("uniapp-cli.js");
+    let node = [
+        plugins.join("node18").join("node.exe"),
+        plugins.join("node").join("node.exe"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())?;
+    cli.is_file()
+        .then_some(HBuilderxCompiler { node, cli, plugins })
+}
+
+#[cfg(windows)]
+fn hbuilderx_compiler() -> Option<HBuilderxCompiler> {
+    let mut roots = vec![
+        PathBuf::from(r"D:\HBuilderX"),
+        PathBuf::from(r"C:\Program Files\HBuilderX"),
+        PathBuf::from(r"C:\Program Files (x86)\HBuilderX"),
+    ];
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(
+            PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("HBuilderX"),
+        );
+    }
+    roots
+        .into_iter()
+        .find_map(|root| hbuilderx_compiler_from_root(&root))
+}
+
+// 直接使用 HBuilderX 自带的 Node 和 uni-app 编译器启动 H5 服务，
+// 不启动 HBuilderX 编辑器、浏览器或命令行窗口。
+#[cfg(windows)]
+fn spawn_hbuilderx_h5_project(path: &Path) -> Result<(Child, String), String> {
+    let compiler = hbuilderx_compiler().ok_or_else(|| {
+        "已识别为 HBuilderX 项目，但没有找到本机 uni-app 编译器。请先安装 HBuilderX 的 uni-app 编译插件，或在项目资料中填写自定义启动命令。".to_string()
+    })?;
+    let cli_context = compiler.plugins.join("uniapp-cli");
+    let output = path.join("unpackage").join("dist").join("dev").join("h5");
+    let mut command = Command::new(&compiler.node);
+    command
+        .arg(&compiler.cli)
+        .current_dir(path)
+        .env("NODE_ENV", "development")
+        // 只允许本机访问，避免对局域网开放端口和触发 Windows 防火墙授权框。
+        .env("HOST", "127.0.0.1")
+        .env("UNI_PLATFORM", "h5")
+        .env("UNI_INPUT_DIR", path)
+        .env("UNI_OUTPUT_DIR", output)
+        .env("UNI_HBUILDERX_PLUGINS", &compiler.plugins)
+        .env("VUE_CLI_CONTEXT", cli_context)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("启动 HBuilderX 项目的 H5 服务失败：{error}"))?;
+    let description = format!(
+        "{} {} (H5)",
+        compiler.node.display(),
+        compiler.cli.display()
+    );
+    Ok((child, description))
+}
+
+fn runtime_log_excerpt(lines: &VecDeque<String>) -> String {
+    lines
+        .iter()
+        .rev()
+        .take(80)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn validated_local_runtime_url(value: &str) -> Result<String, String> {
+    let url =
+        reqwest::Url::parse(value.trim()).map_err(|_| "项目运行地址格式无效。".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("只能打开 HTTP 或 HTTPS 项目地址。".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "项目运行地址缺少主机名。".to_string())?;
+    let is_loopback_ip = host
+        .parse::<std::net::IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false);
+    if !host.eq_ignore_ascii_case("localhost") && !is_loopback_ip {
+        return Err("只能打开本机 localhost 项目地址。".to_string());
+    }
+    Ok(url.to_string())
+}
+
+fn extract_local_url(line: &str) -> Option<String> {
+    ["http://", "https://"].into_iter().find_map(|prefix| {
+        let index = line.find(prefix)?;
+        let url = line[index..]
+            .chars()
+            .take_while(|character| {
+                !character.is_whitespace()
+                    && !character.is_control()
+                    && !matches!(
+                        character,
+                        '"' | '\'' | ')' | ']' | '}' | '<' | '>' | ',' | ';'
+                    )
+            })
+            .collect::<String>()
+            .trim_end_matches(['.', ':'])
+            .to_string();
+        validated_local_runtime_url(&url).ok()
+    })
+}
+
+#[tauri::command]
+pub fn open_repository_runtime_url(url: String) -> Result<(), String> {
+    let url = validated_local_runtime_url(&url)?;
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("explorer.exe");
+        command.arg(url);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+            .spawn()
+            .map_err(|error| format!("无法使用默认浏览器打开项目地址：{error}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+        Err("当前系统暂不支持从工作台打开项目地址。".to_string())
+    }
+}
+
+fn runtime_line_failed(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "failed to compile",
+        "compile failed",
+        "module build failed",
+        "internal server error",
+        "error in ",
+        "npm err!",
+        "编译失败",
+        "预编译器错误",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn append_runtime_line(telemetry: &Arc<Mutex<RuntimeTelemetry>>, line: &str) {
+    if let Ok(mut telemetry) = telemetry.lock() {
+        if let Some(url) = extract_local_url(line) {
+            telemetry.local_url = url;
+            if telemetry.status != "failed" {
+                telemetry.status = "running".to_string();
+            }
+        }
+        let lower = line.to_lowercase();
+        if telemetry.status != "failed"
+            && (lower.contains("compiled successfully")
+                || lower.contains("ready in")
+                || lower.contains("app running at"))
+        {
+            telemetry.status = "running".to_string();
+        }
+        if runtime_line_failed(line) {
+            telemetry.status = "failed".to_string();
+            telemetry.error_message = line.trim().to_string();
+        }
+        telemetry.log_lines.push_back(line.to_string());
+        while telemetry.log_lines.len() > 250 {
+            telemetry.log_lines.pop_front();
+        }
+    }
+}
+
+fn spawn_runtime_output_reader<R: Read + Send + 'static>(
+    stream: R,
+    stream_name: &'static str,
+    log_path: PathBuf,
+    telemetry: Arc<Mutex<RuntimeTelemetry>>,
+) {
+    std::thread::spawn(move || {
+        let mut log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .ok();
+        for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            let entry = format!("[{stream_name}] {line}");
+            if let Some(file) = log_file.as_mut() {
+                let _ = writeln!(file, "{entry}");
+                let _ = file.flush();
+            }
+            append_runtime_line(&telemetry, &entry);
+        }
+    });
+}
+
+fn create_managed_project_process(
+    database: &DatabaseState,
+    project_path: String,
+    project_name: String,
+    command: String,
+    mut child: Child,
+) -> Result<ManagedProjectProcess, String> {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let started_at = Utc::now().to_rfc3339();
+    let log_directory = database
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("project-runtime-logs");
+    fs::create_dir_all(&log_directory).map_err(|error| error.to_string())?;
+    let log_path = log_directory.join(format!("{run_id}.log"));
+    let telemetry = Arc::new(Mutex::new(RuntimeTelemetry {
+        status: "starting".to_string(),
+        ..RuntimeTelemetry::default()
+    }));
+    if let Some(stdout) = child.stdout.take() {
+        spawn_runtime_output_reader(stdout, "stdout", log_path.clone(), telemetry.clone());
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_runtime_output_reader(stderr, "stderr", log_path.clone(), telemetry.clone());
+    }
+    let info = RunningProjectProcess {
+        project_path: project_path.clone(),
+        project_name,
+        command: command.clone(),
+        process_id: child.id(),
+        status: "starting".to_string(),
+        started_at: started_at.clone(),
+        local_url: String::new(),
+        log_path: log_path.display().to_string(),
+        log_excerpt: String::new(),
+        error_message: String::new(),
+    };
+    let mut managed = ManagedProjectProcess {
+        info,
+        child,
+        run_id,
+        telemetry,
+    };
+    let persist_result = database.connect().and_then(|connection| {
+        connection
+            .execute(
+                "INSERT INTO repository_runtime_runs(id,repository_path,status,command,process_id,log_path,started_at)
+                 VALUES(?1,?2,'starting',?3,?4,?5,?6)",
+                params![
+                    managed.run_id,
+                    project_path,
+                    command,
+                    managed.info.process_id as i64,
+                    managed.info.log_path,
+                    started_at
+                ],
+            )
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = persist_result {
+        let _ = terminate_managed_process(&mut managed);
+        return Err(error);
+    }
+    Ok(managed)
+}
+
+fn managed_process_info(process: &ManagedProjectProcess) -> RunningProjectProcess {
+    let mut info = process.info.clone();
+    if let Ok(telemetry) = process.telemetry.lock() {
+        info.status = telemetry.status.clone();
+        info.local_url = telemetry.local_url.clone();
+        info.log_excerpt = runtime_log_excerpt(&telemetry.log_lines);
+        info.error_message = telemetry.error_message.clone();
+    }
+    info
+}
+
+fn persist_runtime_snapshot(
+    database: &DatabaseState,
+    process: &ManagedProjectProcess,
+    finished_at: Option<&str>,
+    exit_code: Option<i32>,
+) -> Result<RunningProjectProcess, String> {
+    let info = managed_process_info(process);
+    database
+        .connect()?
+        .execute(
+            "UPDATE repository_runtime_runs SET status=?2,local_url=?3,log_excerpt=?4,error_message=?5,
+                    finished_at=COALESCE(?6,finished_at),exit_code=COALESCE(?7,exit_code) WHERE id=?1",
+            params![
+                process.run_id,
+                info.status,
+                info.local_url,
+                info.log_excerpt,
+                info.error_message,
+                finished_at,
+                exit_code
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(info)
+}
+
+fn launch_result(
+    info: &RunningProjectProcess,
+    managed: bool,
+    message: String,
+) -> ProjectLaunchResult {
+    ProjectLaunchResult {
+        project_path: info.project_path.clone(),
+        project_name: info.project_name.clone(),
+        command: info.command.clone(),
+        process_id: info.process_id,
+        managed,
+        message,
+        status: info.status.clone(),
+        started_at: info.started_at.clone(),
+        local_url: info.local_url.clone(),
+        log_path: info.log_path.clone(),
+    }
+}
+
+fn terminate_managed_process(process: &mut ManagedProjectProcess) -> Result<(), String> {
+    if process
+        .child
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("taskkill.exe");
+        command.args(["/PID", &process.info.process_id.to_string(), "/T", "/F"]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        let output = command.output().map_err(|error| error.to_string())?;
+        if !output.status.success()
+            && process
+                .child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_none()
+        {
+            let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if error.is_empty() {
+                "停止项目进程失败。".to_string()
+            } else {
+                error
+            });
+        }
+    }
+
+    #[cfg(not(windows))]
+    process.child.kill().map_err(|error| error.to_string())?;
+
+    let _ = process.child.wait();
+    Ok(())
+}
+
+pub fn stop_all_repository_projects(state: &ProjectProcessState, database: &DatabaseState) {
+    if let Ok(mut processes) = state.processes.lock() {
+        for process in processes.values_mut() {
+            let _ = terminate_managed_process(process);
+            if let Ok(mut telemetry) = process.telemetry.lock() {
+                telemetry.status = "stopped".to_string();
+            }
+            let finished_at = Utc::now().to_rfc3339();
+            let _ = persist_runtime_snapshot(database, process, Some(&finished_at), Some(0));
+        }
+        processes.clear();
+    }
+}
+
+#[tauri::command]
+pub fn list_running_repository_projects(
+    database: tauri::State<'_, DatabaseState>,
+    state: tauri::State<'_, ProjectProcessState>,
+) -> Result<Vec<RunningProjectProcess>, String> {
+    let mut processes = state
+        .processes
+        .lock()
+        .map_err(|_| "读取运行项目状态失败。".to_string())?;
+    let mut stopped_paths = Vec::new();
+    let mut running = Vec::new();
+    for (path, process) in processes.iter_mut() {
+        if let Some(exit) = process
+            .child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+        {
+            if let Ok(mut telemetry) = process.telemetry.lock() {
+                if telemetry.status != "failed" {
+                    telemetry.status =
+                        if exit.success() { "stopped" } else { "failed" }.to_string();
+                    if !exit.success() && telemetry.error_message.is_empty() {
+                        telemetry.error_message = format!("项目进程异常退出：{exit}");
+                    }
+                }
+            }
+            let finished_at = Utc::now().to_rfc3339();
+            persist_runtime_snapshot(&database, process, Some(&finished_at), exit.code())?;
+            stopped_paths.push(path.clone());
+        } else {
+            if let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(&process.info.started_at) {
+                if Utc::now()
+                    .signed_duration_since(started_at.with_timezone(&Utc))
+                    .num_seconds()
+                    >= 3
+                {
+                    if let Ok(mut telemetry) = process.telemetry.lock() {
+                        if telemetry.status == "starting" {
+                            telemetry.status = "running".to_string();
+                        }
+                    }
+                }
+            }
+            running.push(persist_runtime_snapshot(&database, process, None, None)?);
+        }
+    }
+    for path in stopped_paths {
+        processes.remove(&path);
+    }
+    Ok(running)
+}
+
+#[tauri::command]
+pub fn stop_repository_project(
+    database: tauri::State<'_, DatabaseState>,
+    state: tauri::State<'_, ProjectProcessState>,
+    path: String,
+) -> Result<ProjectLaunchResult, String> {
+    let mut process = state
+        .processes
+        .lock()
+        .map_err(|_| "读取运行项目状态失败。".to_string())?
+        .remove(path.trim())
+        .ok_or_else(|| "该项目当前没有由工作台启动的运行进程。".to_string())?;
+    terminate_managed_process(&mut process)?;
+    if let Ok(mut telemetry) = process.telemetry.lock() {
+        telemetry.status = "stopped".to_string();
+    }
+    let finished_at = Utc::now().to_rfc3339();
+    let info = persist_runtime_snapshot(&database, &process, Some(&finished_at), Some(0))?;
+    Ok(launch_result(
+        &info,
+        false,
+        format!("已停止 {}。", info.project_name),
+    ))
 }
 
 #[tauri::command]
 pub fn start_repository_project(
     state: tauri::State<'_, DatabaseState>,
+    process_state: tauri::State<'_, ProjectProcessState>,
     path: String,
 ) -> Result<ProjectLaunchResult, String> {
     let path = path.trim().to_string();
-    let (project_name, start_command): (String, String) = state
+    let (project_name, configured_start): (String, String) = state
         .connect()?
         .query_row(
             "SELECT name,start_command FROM repository_assets WHERE path=?1",
@@ -1345,13 +2394,123 @@ pub fn start_repository_project(
     if !repository_path.is_dir() {
         return Err("项目目录不存在，请重新扫描或修正项目路径。".to_string());
     }
-    let process_id = spawn_project_start_command(repository_path, &start_command)?;
-    Ok(ProjectLaunchResult {
-        project_name: project_name.clone(),
-        command: start_command,
-        process_id,
-        message: format!("已启动 {project_name}，进程号 {process_id}。"),
-    })
+
+    #[cfg(windows)]
+    if configured_start.trim().is_empty() && is_hbuilderx_project(repository_path) {
+        {
+            let mut processes = process_state
+                .processes
+                .lock()
+                .map_err(|_| "读取运行项目状态失败。".to_string())?;
+            if let Some(process) = processes.get_mut(&path) {
+                if process
+                    .child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+                {
+                    return Err(format!("{project_name} 已在运行中。"));
+                }
+                processes.remove(&path);
+            }
+        }
+        let (child, command) = spawn_hbuilderx_h5_project(repository_path)?;
+        state
+            .connect()?
+            .execute(
+                "UPDATE repository_assets SET
+                    technology_stack=CASE WHEN TRIM(technology_stack)='' THEN 'uni-app / HBuilderX' ELSE technology_stack END,
+                    command_source='HBuilderX 内置 uni-app 编译器（工作台后台启动）',updated_at=?2 WHERE path=?1",
+                params![path, Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+        let managed_process = create_managed_project_process(
+            &state,
+            path.clone(),
+            project_name.clone(),
+            command.clone(),
+            child,
+        )?;
+        let info = managed_process_info(&managed_process);
+        process_state
+            .processes
+            .lock()
+            .map_err(|_| "保存运行项目状态失败。".to_string())?
+            .insert(path, managed_process);
+        return Ok(launch_result(
+            &info,
+            true,
+            format!(
+                "已在工作台后台启动 {project_name} 的 H5 服务，进程号 {}。",
+                info.process_id
+            ),
+        ));
+    }
+
+    let start_command = if configured_start.trim().is_empty() {
+        let detected = detect_project_commands(repository_path)?;
+        state
+            .connect()?
+            .execute(
+                "UPDATE repository_assets SET
+                    install_command=CASE WHEN TRIM(install_command)='' THEN ?2 ELSE install_command END,
+                    start_command=?3,
+                    test_command=CASE WHEN TRIM(test_command)='' THEN ?4 ELSE test_command END,
+                    build_command=CASE WHEN TRIM(build_command)='' THEN ?5 ELSE build_command END,
+                    technology_stack=CASE WHEN TRIM(technology_stack)='' THEN ?6 ELSE technology_stack END,
+                    command_source=?7,updated_at=?8 WHERE path=?1",
+                params![
+                    path,
+                    detected.install,
+                    detected.start,
+                    detected.test,
+                    detected.build,
+                    detected.technology_stack,
+                    detected.source,
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        detected.start
+    } else {
+        configured_start
+    };
+    {
+        let mut processes = process_state
+            .processes
+            .lock()
+            .map_err(|_| "读取运行项目状态失败。".to_string())?;
+        if let Some(process) = processes.get_mut(&path) {
+            if process
+                .child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                return Err(format!("{project_name} 已在运行中。"));
+            }
+            processes.remove(&path);
+        }
+    }
+    let child = spawn_project_start_command(repository_path, &start_command)?;
+    let managed_process = create_managed_project_process(
+        &state,
+        path.clone(),
+        project_name.clone(),
+        start_command,
+        child,
+    )?;
+    let info = managed_process_info(&managed_process);
+    process_state
+        .processes
+        .lock()
+        .map_err(|_| "保存运行项目状态失败。".to_string())?
+        .insert(path, managed_process);
+    Ok(launch_result(
+        &info,
+        true,
+        format!("已启动 {project_name}，进程号 {}。", info.process_id),
+    ))
 }
 
 #[tauri::command]
@@ -1390,13 +2549,7 @@ pub fn git_repository_status(
     path: String,
 ) -> Result<GitRepositoryStatus, String> {
     ensure_managed_repository(&state, &path)?;
-    let status = git_output(&[
-        "-C",
-        &path,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=normal",
-    ])?;
+    let status = git_status_output(&path)?;
     let current_branch = git_output(&["-C", &path, "branch", "--show-current"])
         .unwrap_or_else(|_| "HEAD".to_string());
     let upstream = git_output(&[
@@ -1432,20 +2585,38 @@ pub fn git_repository_status(
                 .unwrap_or(0),
         )
     };
+    let changed_files = parse_changed_files(&status);
+    let remote_url =
+        git_output(&["-C", &path, "config", "--get", "remote.origin.url"]).unwrap_or_default();
+    state
+        .connect()?
+        .execute(
+            "UPDATE repository_assets SET default_branch=?2,remote_url=?3,has_uncommitted_changes=?4,
+                    changed_file_count=?5,ahead_count=?6,behind_count=?7 WHERE path=?1",
+            params![
+                path,
+                current_branch,
+                remote_url,
+                (!status.is_empty()) as i64,
+                changed_files.len() as i64,
+                ahead,
+                behind
+            ],
+        )
+        .map_err(|error| error.to_string())?;
     Ok(GitRepositoryStatus {
         repository_path: path.clone(),
         current_branch,
         branches: local_branches(&path)?,
-        remote_url: git_output(&["-C", &path, "config", "--get", "remote.origin.url"])
-            .unwrap_or_default(),
+        remote_url,
         upstream,
         ahead,
         behind,
         user_name: git_output(&["-C", &path, "config", "user.name"])
             .unwrap_or_else(|_| DEFAULT_GIT_USERNAME.to_string()),
         user_email: git_output(&["-C", &path, "config", "user.email"]).unwrap_or_default(),
-        has_uncommitted_changes: !status.trim().is_empty(),
-        changed_files: parse_changed_files(&status),
+        has_uncommitted_changes: !status.is_empty(),
+        changed_files,
         credential: git_credential_status_value(),
     })
 }
@@ -1455,6 +2626,56 @@ fn operation_result(message: &str, output: String, commit_hash: String) -> GitOp
         message: message.to_string(),
         output,
         commit_hash,
+    }
+}
+
+fn reconcile_upstream(
+    path: &str,
+    upstream: &str,
+    ahead: usize,
+    behind: usize,
+) -> Result<(String, String), String> {
+    if behind == 0 {
+        return Ok((
+            if ahead == 0 {
+                "当前分支已经是最新状态。".to_string()
+            } else {
+                format!("远程没有新提交，本地领先 {ahead} 个提交。")
+            },
+            String::new(),
+        ));
+    }
+    if ahead == 0 {
+        return Ok((
+            format!("已快进拉取 {behind} 个远程提交。"),
+            git_operation_output(
+                path,
+                &["merge".into(), "--ff-only".into(), upstream.to_string()],
+                false,
+            )?,
+        ));
+    }
+
+    match git_operation_output(
+        path,
+        &[
+            "merge".into(),
+            "--no-ff".into(),
+            "--no-edit".into(),
+            upstream.to_string(),
+        ],
+        false,
+    ) {
+        Ok(output) => Ok((
+            format!("本地与远程均有提交，已创建合并提交（本地 {ahead} / 远程 {behind}）。"),
+            output,
+        )),
+        Err(error) => {
+            let _ = git_operation_output(path, &["merge".into(), "--abort".into()], false);
+            Err(format!(
+                "本地和远程分支存在冲突，已自动中止并恢复到拉取前状态：{error}"
+            ))
+        }
     }
 }
 
@@ -1480,10 +2701,116 @@ pub fn git_pull_repository(
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
     ensure_clean_worktree(&path)?;
-    let output = git_operation_output(&path, &["pull".into(), "--ff-only".into()], true)?;
+    let fetch_output = git_operation_output(
+        &path,
+        &["fetch".into(), "--prune".into(), "origin".into()],
+        true,
+    )?;
+    let upstream = git_output(&[
+        "-C",
+        &path,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    ])
+    .map_err(|_| "当前分支尚未关联上游分支，请先推送并建立远程关联。".to_string())?;
+    let counts = git_output(&[
+        "-C",
+        &path,
+        "rev-list",
+        "--left-right",
+        "--count",
+        "HEAD...@{upstream}",
+    ])?;
+    let values = counts.split_whitespace().collect::<Vec<_>>();
+    let ahead = values
+        .first()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let behind = values
+        .get(1)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let (message, merge_output) = match reconcile_upstream(&path, &upstream, ahead, behind) {
+        Ok(result) => result,
+        Err(error) => {
+            refresh_basic_repository_state(&state, &path)?;
+            return Err(error);
+        }
+    };
     let commit_hash = import_head_commit(&state, &path)?;
     refresh_basic_repository_state(&state, &path)?;
-    Ok(operation_result("代码已安全拉取。", output, commit_hash))
+    let output = [fetch_output, merge_output]
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(operation_result(&message, output, commit_hash))
+}
+
+#[tauri::command]
+pub fn git_stage_repository_changes(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    if git_status_output(&path)?.is_empty() {
+        return Err("当前工作区没有可添加到暂存区的修改。".to_string());
+    }
+    let output = git_operation_output(&path, &["add".into(), "--all".into()], false)?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result(
+        "当前修改已添加到 Git 暂存区。",
+        output,
+        String::new(),
+    ))
+}
+
+#[tauri::command]
+pub fn git_push_repository(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    let remote =
+        git_output(&["-C", &path, "config", "--get", "remote.origin.url"]).unwrap_or_default();
+    if remote.is_empty() {
+        return Err("当前项目未配置 origin 远程仓库。".to_string());
+    }
+    let branch = git_output(&["-C", &path, "branch", "--show-current"])?;
+    if branch.is_empty() || branch == "HEAD" {
+        return Err("当前处于游离 HEAD 状态，工作台不会自动推送。".to_string());
+    }
+    let upstream = git_output(&[
+        "-C",
+        &path,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    ])
+    .unwrap_or_default();
+    let arguments = if upstream.is_empty() {
+        vec![
+            "push".to_string(),
+            "--set-upstream".to_string(),
+            "origin".to_string(),
+            branch.clone(),
+        ]
+    } else {
+        vec!["push".to_string()]
+    };
+    let output = git_operation_output(&path, &arguments, true)?;
+    refresh_basic_repository_state(&state, &path)?;
+    let commit_hash =
+        git_output(&["-C", &path, "rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    Ok(operation_result(
+        &format!("{branch} 分支已推送到远程仓库。"),
+        output,
+        commit_hash,
+    ))
 }
 
 #[tauri::command]
@@ -1618,13 +2945,7 @@ pub fn execute_commit_plan_group(
             "检测到已有手工暂存文件。为避免混入本次提交，请先在 Git 中处理暂存区。".to_string(),
         );
     }
-    let current_status = git_output(&[
-        "-C",
-        &path,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=normal",
-    ])?;
+    let current_status = git_status_output(&path)?;
     let current_paths = parse_changed_files(&current_status)
         .into_iter()
         .map(|file| file.path.replace('\\', "/"))
@@ -1682,12 +3003,18 @@ pub fn execute_commit_plan_group(
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_group_for_path, conventional_commit_message, discover_repository_candidates,
-        ensure_clean_worktree, git_operation_output, normalize_repository_category,
-        parse_changed_files, parse_commits, sensitive_path, spawn_project_start_command,
-        unstage_files, valid_conventional_commit_message, validated_branch, GitScanConfiguration,
+        commit_group_for_path, conventional_commit_message, detect_project_commands,
+        discover_repository_candidates, ensure_clean_worktree, extract_local_url,
+        git_operation_output, git_output, hbuilderx_compiler_from_root, is_hbuilderx_project,
+        normalize_repository_category, parse_changed_files, parse_commits, reconcile_upstream,
+        repository_attention, runtime_line_failed, sensitive_path, spawn_project_start_command,
+        terminate_managed_process, unstage_files, valid_conventional_commit_message,
+        validated_branch, validated_local_runtime_url, GitScanConfiguration, ManagedProjectProcess,
+        RunningProjectProcess, RuntimeTelemetry,
     };
+    use chrono::Utc;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[test]
@@ -1713,6 +3040,7 @@ mod tests {
         let configuration = GitScanConfiguration {
             roots: vec![directory.display().to_string()],
             max_depth: 3,
+            excluded_names: Vec::new(),
         };
         let repositories = discover_repository_candidates(&configuration)
             .into_iter()
@@ -1720,6 +3048,53 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(repositories, vec![project]);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn root_scanner_respects_custom_excluded_directory_names() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-git-exclude-{}", uuid::Uuid::new_v4()));
+        let visible = directory.join("active").join("project");
+        let excluded = directory.join("archive").join("old-project");
+        std::fs::create_dir_all(visible.join(".git")).unwrap();
+        std::fs::create_dir_all(excluded.join(".git")).unwrap();
+        let configuration = GitScanConfiguration {
+            roots: vec![directory.display().to_string()],
+            max_depth: 3,
+            excluded_names: vec!["archive".to_string()],
+        };
+        let repositories = discover_repository_candidates(&configuration)
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        assert_eq!(repositories, vec![visible]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn runtime_parser_only_keeps_local_preview_urls_and_compile_failures() {
+        assert_eq!(
+            extract_local_url("Local: http://127.0.0.1:8086/h5/"),
+            Some("http://127.0.0.1:8086/h5/".to_string())
+        );
+        assert_eq!(
+            extract_local_url("Local: http://localhost:82/\u{1b}[39m"),
+            Some("http://localhost:82/".to_string())
+        );
+        assert_eq!(extract_local_url("Docs: https://vite.dev/guide"), None);
+        assert!(validated_local_runtime_url("file:///C:/temp").is_err());
+        assert!(validated_local_runtime_url("https://example.com").is_err());
+        assert!(runtime_line_failed("Failed to compile with 1 error"));
+        assert!(!runtime_line_failed("0 errors found"));
+    }
+
+    #[test]
+    fn dirty_worktree_is_attention_but_not_health_failure() {
+        let (level, summary, next) =
+            repository_attention("健康", "stopped", 0, 3, &Utc::now().to_rfc3339(), "");
+        assert_eq!(level, "medium");
+        assert_eq!(summary, "有 3 个未提交文件");
+        assert!(next.contains("提交 3 个修改文件"));
     }
 
     #[test]
@@ -1749,11 +3124,33 @@ mod tests {
 
     #[test]
     fn worktree_status_is_exposed_as_readable_file_rows() {
-        let files = parse_changed_files(" M src/main.rs\n?? docs/guide.md\nD  old.txt");
-        assert_eq!(files.len(), 3);
+        let files = parse_changed_files(
+            " M src/main.rs\0?? docs/guide.md\0D  old.txt\0R  src/中文 新.vue\0src/旧.vue\0",
+        );
+        assert_eq!(files.len(), 4);
         assert_eq!(files[0].label, "已修改");
         assert_eq!(files[1].label, "未跟踪");
         assert_eq!(files[2].label, "已删除");
+        assert_eq!(files[3].path, "src/中文 新.vue");
+        assert_eq!(files[3].label, "已重命名");
+    }
+
+    #[test]
+    fn vue_project_commands_are_detected_from_package_scripts() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-project-detect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("package.json"),
+            r#"{"scripts":{"dev":"vite","build":"vite build","test":"vitest"},"dependencies":{"vue":"^3.5.0"},"devDependencies":{"vite":"^7.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(directory.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'").unwrap();
+        let detected = detect_project_commands(&directory).unwrap();
+        assert_eq!(detected.start, "pnpm dev");
+        assert_eq!(detected.build, "pnpm build");
+        assert_eq!(detected.technology_stack, "Vue / Vite");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1773,7 +3170,8 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("workbench-project-start-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        spawn_project_start_command(&directory, "echo started>launch-marker.txt").unwrap();
+        let mut child =
+            spawn_project_start_command(&directory, "echo started>launch-marker.txt").unwrap();
 
         let marker = directory.join("launch-marker.txt");
         for _ in 0..40 {
@@ -1783,6 +3181,221 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "started");
+        let _ = child.wait();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn hbuilderx_project_is_detected_from_manifest_and_pages() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-hbuilderx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("manifest.json"), "{}").unwrap();
+        std::fs::write(directory.join("pages.json"), "{}").unwrap();
+        assert!(is_hbuilderx_project(&directory));
+        std::fs::remove_file(directory.join("pages.json")).unwrap();
+        assert!(!is_hbuilderx_project(&directory));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn hbuilderx_compiler_prefers_the_bundled_node18_runtime() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-hbuilderx-{}", uuid::Uuid::new_v4()));
+        let plugins = directory.join("plugins");
+        let node18 = plugins.join("node18").join("node.exe");
+        let node = plugins.join("node").join("node.exe");
+        let cli = plugins.join("uniapp-cli").join("bin").join("uniapp-cli.js");
+        std::fs::create_dir_all(node18.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&node18, "").unwrap();
+        std::fs::write(&node, "").unwrap();
+        std::fs::write(&cli, "").unwrap();
+
+        let compiler = hbuilderx_compiler_from_root(&directory).unwrap();
+        assert_eq!(compiler.node, node18);
+        assert_eq!(compiler.cli, cli);
+        assert_eq!(compiler.plugins, plugins);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_project_process_can_be_stopped_with_its_process_tree() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-project-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let child = spawn_project_start_command(&directory, "ping 127.0.0.1 -n 30 > nul").unwrap();
+        let process_id = child.id();
+        let mut process = ManagedProjectProcess {
+            info: RunningProjectProcess {
+                project_path: directory.display().to_string(),
+                project_name: "测试项目".to_string(),
+                command: "ping 127.0.0.1 -n 30 > nul".to_string(),
+                process_id,
+                status: "running".to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                local_url: String::new(),
+                log_path: String::new(),
+                log_excerpt: String::new(),
+                error_message: String::new(),
+            },
+            child,
+            run_id: "test-run".to_string(),
+            telemetry: Arc::new(Mutex::new(RuntimeTelemetry {
+                status: "running".to_string(),
+                ..RuntimeTelemetry::default()
+            })),
+        };
+        terminate_managed_process(&mut process).unwrap();
+        assert!(process.child.try_wait().unwrap().is_some());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn diverged_branches_are_reconciled_with_a_merge_commit() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-git-pull-{}", uuid::Uuid::new_v4()));
+        let remote = directory.join("remote.git");
+        let source = directory.join("source");
+        let local = directory.join("local");
+        std::fs::create_dir_all(&directory).unwrap();
+        let root = directory.display().to_string();
+        let remote_path = remote.display().to_string();
+        let source_path = source.display().to_string();
+        let local_path = local.display().to_string();
+
+        git_operation_output(
+            &root,
+            &["init".into(), "--bare".into(), remote_path.clone()],
+            false,
+        )
+        .unwrap();
+        git_operation_output(
+            &root,
+            &[
+                "init".into(),
+                "-b".into(),
+                "main".into(),
+                source_path.clone(),
+            ],
+            false,
+        )
+        .unwrap();
+        for repository in [&source_path] {
+            git_operation_output(
+                repository,
+                &["config".into(), "user.name".into(), "workbench-test".into()],
+                false,
+            )
+            .unwrap();
+            git_operation_output(
+                repository,
+                &[
+                    "config".into(),
+                    "user.email".into(),
+                    "workbench@example.com".into(),
+                ],
+                false,
+            )
+            .unwrap();
+        }
+        std::fs::write(source.join("base.txt"), "base").unwrap();
+        git_operation_output(&source_path, &["add".into(), "--all".into()], false).unwrap();
+        git_operation_output(
+            &source_path,
+            &["commit".into(), "-m".into(), "base".into()],
+            false,
+        )
+        .unwrap();
+        git_operation_output(
+            &source_path,
+            &[
+                "remote".into(),
+                "add".into(),
+                "origin".into(),
+                remote_path.clone(),
+            ],
+            false,
+        )
+        .unwrap();
+        git_operation_output(
+            &source_path,
+            &[
+                "push".into(),
+                "--set-upstream".into(),
+                "origin".into(),
+                "main".into(),
+            ],
+            false,
+        )
+        .unwrap();
+        git_operation_output(
+            &remote_path,
+            &[
+                "symbolic-ref".into(),
+                "HEAD".into(),
+                "refs/heads/main".into(),
+            ],
+            false,
+        )
+        .unwrap();
+        git_operation_output(
+            &root,
+            &["clone".into(), remote_path.clone(), local_path.clone()],
+            false,
+        )
+        .unwrap();
+        git_operation_output(
+            &local_path,
+            &["config".into(), "user.name".into(), "workbench-test".into()],
+            false,
+        )
+        .unwrap();
+        git_operation_output(
+            &local_path,
+            &[
+                "config".into(),
+                "user.email".into(),
+                "workbench@example.com".into(),
+            ],
+            false,
+        )
+        .unwrap();
+
+        std::fs::write(source.join("remote.txt"), "remote").unwrap();
+        git_operation_output(&source_path, &["add".into(), "--all".into()], false).unwrap();
+        git_operation_output(
+            &source_path,
+            &["commit".into(), "-m".into(), "remote".into()],
+            false,
+        )
+        .unwrap();
+        git_operation_output(&source_path, &["push".into()], false).unwrap();
+        std::fs::write(local.join("local.txt"), "local").unwrap();
+        git_operation_output(&local_path, &["add".into(), "--all".into()], false).unwrap();
+        git_operation_output(
+            &local_path,
+            &["commit".into(), "-m".into(), "local".into()],
+            false,
+        )
+        .unwrap();
+        git_operation_output(&local_path, &["fetch".into(), "origin".into()], false).unwrap();
+
+        let (message, _) = reconcile_upstream(&local_path, "origin/main", 1, 1).unwrap();
+        let head = git_output(&[
+            "-C",
+            &local_path,
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            "HEAD",
+        ])
+        .unwrap();
+        assert!(message.contains("已创建合并提交"));
+        assert_eq!(head.split_whitespace().count(), 3);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

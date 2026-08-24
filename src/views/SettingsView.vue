@@ -4,6 +4,8 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useRoute } from "vue-router";
 import ThemeSwitch from "../components/ThemeSwitch.vue";
+import NavIcon from "../components/NavIcon.vue";
+import { loadNavigationOrder, orderedNavigationItems, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
 import {
   clearDeepSeekKey,
   clearTapdCredentials,
@@ -45,7 +47,7 @@ const error = ref("");
 const loading = ref(false);
 const autostartEnabled = ref(false);
 const workGapMinutes = ref(45);
-const tapdStatus = ref<TapdStatus>({ configured:false, source:"未配置", authMode:"token", workspaceId:"37583308", workspaceName:"安全生产管理", owner:"刘子世康", itemCount:0, warnings:[], autoFixEnabled:false, autoFixRepositoryPath:"" });
+const tapdStatus = ref<TapdStatus>({ configured:false, source:"未配置", authMode:"token", workspaceId:"", workspaceName:"", owner:"", itemCount:0, warnings:[], autoFixEnabled:false, autoFixRepositoryPath:"", automationPaused:false, projects:[] });
 const tapdAuthMode = ref<"token" | "basic">("token");
 const tapdUser = ref("");
 const tapdPassword = ref("");
@@ -63,9 +65,11 @@ const updatePhase = ref<"idle" | "checking" | "ready" | "backing-up" | "download
 const updateDownloaded = ref(0);
 const updateTotal = ref(0);
 const updateHint = ref("");
+const menuOrder = ref(loadNavigationOrder());
 let updateSlowTimer: number | undefined;
 const updateProgress = computed(() => updateTotal.value > 0 ? Math.min(100, Math.round(updateDownloaded.value / updateTotal.value * 100)) : 0);
 const updateBusy = computed(() => ["checking", "backing-up", "downloading", "installing"].includes(updatePhase.value));
+const orderedMenuItems = computed(() => orderedNavigationItems(menuOrder.value));
 
 function emailStateText() {
   return ({ unconfigured:"未配置", unverified:"待测试", disabled:"已配置 · 已关闭", ready:"已配置 · 已开启", error:"连接异常" } as Record<string,string>)[emailStatus.value.state] || "未配置";
@@ -198,6 +202,20 @@ async function disableVip() {
   message.value="VIP 功能已关闭，内容工坊和视频中心已隐藏。";
 }
 
+function moveMenu(path:string,direction:-1|1) {
+  const current=[...menuOrder.value];
+  const index=current.indexOf(path);
+  const target=index+direction;
+  if (index<0 || target<0 || target>=current.length) return;
+  [current[index],current[target]]=[current[target],current[index]];
+  menuOrder.value=saveNavigationOrder(current);
+  message.value="菜单顺序已保存。";
+}
+function resetMenuOrder() {
+  menuOrder.value=saveNavigationOrder(workbenchNavigationItems.map((item)=>item.path));
+  message.value="菜单顺序已恢复默认。";
+}
+
 onMounted(() => { if (route.query.vip === "required") message.value="内容工坊和视频中心属于 VIP 功能，请先输入 VIP 码启用。"; void refresh(); });
 </script>
 
@@ -208,49 +226,52 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
     <section class="settings-section">
       <header class="settings-section-title"><div><h2>常用设置</h2><p>调整显示、工时、会员功能与本地数据。</p></div></header>
       <div class="settings-overview-grid">
-        <div class="settings-stack">
-          <article class="panel settings-card compact-setting-card">
-            <div><h2>外观</h2><p>保持 B 指挥中心布局，仅切换颜色。</p></div><ThemeSwitch />
-          </article>
-          <article class="panel settings-card worktime-settings">
-            <div><h2>工时估算间隔</h2><p>相邻本地活动不超过该间隔时归为同一工作区间，默认 45 分钟。</p></div>
-            <label><input v-model.number="workGapMinutes" type="number" min="15" max="120"><span>分钟</span></label>
-            <button class="button primary" :disabled="loading" @click="saveWorkGap">保存</button>
-            <small>自动结果始终标注“估算工时”，不是精确考勤；可在工作记录中手工修正。</small>
-          </article>
-          <article class="panel settings-card vip-settings">
-            <div><h2>VIP 功能</h2><p>启用后开放内容工坊和视频中心，状态仅保存在本机。</p></div>
-            <span class="settings-status" :class="{ ready:vipStatus.active }">{{ vipStatus.active ? '已启用' : '未启用' }}</span>
-            <label v-if="!vipStatus.active">VIP 码<input v-model="vipCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="请输入 4 位 VIP 码" @keyup.enter="enableVip"></label>
-            <div class="settings-actions"><button v-if="!vipStatus.active" class="button primary" :disabled="loading || vipCode.length !== 4" @click="enableVip">启用 VIP</button><button v-else class="button secondary" :disabled="loading" @click="disableVip">关闭 VIP</button></div>
-          </article>
-        </div>
-        <div class="settings-stack">
-          <article class="panel settings-card data-safety-settings">
-            <div><h2>本地数据保护</h2><p>每天首次启动自动备份，保留最近 14 份；恢复前会再做一次保护备份。</p></div>
-            <span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span>
-            <div class="settings-actions"><button class="button primary" :disabled="loading" @click="createBackup">立即备份</button><button class="button secondary" :disabled="loading" @click="exportBackup">导出到文档</button></div>
-            <div v-if="backupStatus.backups.length" class="backup-list"><article v-for="item in backupStatus.backups.slice(0,5)" :key="item.path"><span><b>{{ backupKind(item.kind) }}</b><small>{{ backupTime(item.createdAt) }} · {{ backupSize(item.sizeBytes) }}</small></span><button class="text-button" @click="locateBackup(item.path)">定位</button><button class="text-button danger-text" @click="restoreBackup(item.path)">恢复</button></article></div>
-            <small v-else>尚无备份；点击“立即备份”即可创建第一份。</small>
-          </article>
-          <article class="panel settings-card update-settings">
-            <div><h2>版本更新</h2><p>自动下载并验证官方签名；安装前先备份本地数据，完成后重新启动。</p></div>
-            <span class="settings-status" :class="{ ready:!updateStatus.updateAvailable, warning:updateStatus.updateAvailable }">当前 V{{ updateStatus.currentVersion || '—' }}</span>
-            <div class="update-summary"><b>{{ updateStatus.message }}</b><small v-if="updateStatus.latestVersion">线上版本 {{ updateStatus.latestVersion }}</small></div>
-            <div v-if="updateBusy || updatePhase==='ready'" class="update-progress">
-              <span><b>{{ updatePhase==='checking' ? '正在验证更新包' : updatePhase==='backing-up' ? '正在备份本地数据' : updatePhase==='downloading' ? '正在下载更新' : updatePhase==='installing' ? '正在安装更新' : '更新包已验证' }}</b><em v-if="updatePhase==='downloading' && updateTotal">{{ updateProgress }}%</em></span>
-              <div v-if="updatePhase==='downloading'"><i :style="{width:`${updateProgress}%`}"></i></div>
-              <small v-if="updatePhase==='downloading'">{{ formatUpdateBytes(updateDownloaded) }}<template v-if="updateTotal"> / {{ formatUpdateBytes(updateTotal) }}</template></small>
-              <small v-else-if="updatePhase==='ready'">签名校验将在安装时再次执行。</small>
-              <small v-if="updateHint">{{ updateHint }}</small>
-            </div>
-            <div class="settings-actions"><button class="button secondary" :disabled="loading || updateBusy" @click="refreshUpdateStatus">重新检查</button><button v-if="updateStatus.updateAvailable" class="button primary" :disabled="updateBusy" @click="installAvailableUpdate">{{ updatePhase==='checking' ? '验证中…' : updatePhase==='backing-up' ? '备份中…' : updatePhase==='downloading' ? (updateTotal ? `下载 ${updateProgress}%` : '正在下载…') : updatePhase==='installing' ? '正在启动安装器…' : '一键更新并重启' }}</button><button v-if="updateStatus.updateAvailable && updateStatus.installerUrl && (updatePhase==='downloading' || updatePhase==='error')" class="button secondary" @click="openUpdateUrl(updateStatus.installerUrl)">手工下载</button></div>
-          </article>
-        </div>
+        <article class="panel settings-card compact-setting-card appearance-settings">
+          <div><h2>外观</h2><p>保持 B 指挥中心布局，仅切换颜色。</p></div><ThemeSwitch />
+        </article>
+        <article class="panel settings-card worktime-settings">
+          <div><h2>工时估算间隔</h2><p>相邻本地活动不超过该间隔时归为同一工作区间，默认 45 分钟。</p></div>
+          <label><input v-model.number="workGapMinutes" type="number" min="15" max="120"><span>分钟</span></label>
+          <button class="button primary" :disabled="loading" @click="saveWorkGap">保存</button>
+          <small>自动结果始终标注“估算工时”，不是精确考勤；可在工作记录中手工修正。</small>
+        </article>
+        <article class="panel settings-card vip-settings">
+          <div><h2>VIP 功能</h2><p>启用后开放内容工坊和视频中心，状态仅保存在本机。</p></div>
+          <span class="settings-status" :class="{ ready:vipStatus.active }">{{ vipStatus.active ? '已启用' : '未启用' }}</span>
+          <label v-if="!vipStatus.active">VIP 码<input v-model="vipCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="请输入 4 位 VIP 码" @keyup.enter="enableVip"></label>
+          <div class="settings-actions"><button v-if="!vipStatus.active" class="button primary" :disabled="loading || vipCode.length !== 4" @click="enableVip">启用 VIP</button><button v-else class="button secondary" :disabled="loading" @click="disableVip">关闭 VIP</button></div>
+        </article>
+        <article class="panel settings-card update-settings">
+          <div><h2>版本更新</h2><p>自动下载并验证官方签名；安装前先备份本地数据，完成后重新启动。</p></div>
+          <span class="settings-status" :class="{ ready:!updateStatus.updateAvailable, warning:updateStatus.updateAvailable }">当前 V{{ updateStatus.currentVersion || '—' }}</span>
+          <div class="update-summary"><b>{{ updateStatus.message }}</b><small v-if="updateStatus.latestVersion">线上版本 {{ updateStatus.latestVersion }}</small></div>
+          <div v-if="updateBusy || updatePhase==='ready'" class="update-progress">
+            <span><b>{{ updatePhase==='checking' ? '正在验证更新包' : updatePhase==='backing-up' ? '正在备份本地数据' : updatePhase==='downloading' ? '正在下载更新' : updatePhase==='installing' ? '正在安装更新' : '更新包已验证' }}</b><em v-if="updatePhase==='downloading' && updateTotal">{{ updateProgress }}%</em></span>
+            <div v-if="updatePhase==='downloading'"><i :style="{width:`${updateProgress}%`}"></i></div>
+            <small v-if="updatePhase==='downloading'">{{ formatUpdateBytes(updateDownloaded) }}<template v-if="updateTotal"> / {{ formatUpdateBytes(updateTotal) }}</template></small>
+            <small v-else-if="updatePhase==='ready'">签名校验将在安装时再次执行。</small>
+            <small v-if="updateHint">{{ updateHint }}</small>
+          </div>
+          <div class="settings-actions"><button class="button secondary" :disabled="loading || updateBusy" @click="refreshUpdateStatus">重新检查</button><button v-if="updateStatus.updateAvailable" class="button primary" :disabled="updateBusy" @click="installAvailableUpdate">{{ updatePhase==='checking' ? '验证中…' : updatePhase==='backing-up' ? '备份中…' : updatePhase==='downloading' ? (updateTotal ? `下载 ${updateProgress}%` : '正在下载…') : updatePhase==='installing' ? '正在启动安装器…' : '一键更新并重启' }}</button><button v-if="updateStatus.updateAvailable && updateStatus.installerUrl && (updatePhase==='downloading' || updatePhase==='error')" class="button secondary" @click="openUpdateUrl(updateStatus.installerUrl)">手工下载</button></div>
+        </article>
+        <article class="panel settings-card data-safety-settings settings-card-wide">
+          <div><h2>本地数据保护</h2><p>每天首次启动自动备份，保留最近 14 份；恢复前会再做一次保护备份。</p></div>
+          <span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span>
+          <div class="settings-actions"><button class="button primary" :disabled="loading" @click="createBackup">立即备份</button><button class="button secondary" :disabled="loading" @click="exportBackup">导出到文档</button></div>
+          <div v-if="backupStatus.backups.length" class="backup-list"><article v-for="item in backupStatus.backups.slice(0,5)" :key="item.path"><span><b>{{ backupKind(item.kind) }}</b><small>{{ backupTime(item.createdAt) }} · {{ backupSize(item.sizeBytes) }}</small></span><button class="text-button" @click="locateBackup(item.path)">定位</button><button class="text-button danger-text" @click="restoreBackup(item.path)">恢复</button></article></div>
+          <small v-else>尚无备份；点击“立即备份”即可创建第一份。</small>
+        </article>
       </div>
     </section>
-    <section class="settings-section">
-      <header class="settings-section-title"><div><h2>外部服务</h2><p>密钥和授权信息只保存在当前电脑。</p></div></header>
+    <details class="settings-section settings-collapsible">
+      <summary class="settings-section-title"><div><h2>菜单顺序</h2><p>调整左侧主菜单的显示顺序；设置入口固定在底部。</p></div><span class="settings-collapse-label"></span></summary>
+      <article class="panel menu-order-settings">
+        <header><div><h2>左侧菜单</h2><p>VIP 菜单关闭时暂时隐藏，重新启用后仍保留这里设置的顺序。</p></div><button class="button secondary" @click="resetMenuOrder">恢复默认</button></header>
+        <div class="menu-order-list"><article v-for="(item,index) in orderedMenuItems" :key="item.path"><b>{{ index+1 }}</b><NavIcon :name="item.icon" /><span><strong>{{ item.label }}</strong><small>{{ item.vip ? 'VIP 功能' : '常用功能' }}</small></span><div><button class="icon-button" title="上移" :disabled="index===0" @click="moveMenu(item.path,-1)">↑</button><button class="icon-button" title="下移" :disabled="index===orderedMenuItems.length-1" @click="moveMenu(item.path,1)">↓</button></div></article></div>
+      </article>
+    </details>
+    <details class="settings-section settings-collapsible">
+      <summary class="settings-section-title"><div><h2>外部服务</h2><p>密钥和授权信息只保存在当前电脑。</p></div><span class="settings-collapse-label"></span></summary>
       <div class="settings-service-list">
       <article class="panel settings-card ai-settings">
         <div><h2>DeepSeek</h2><p>用于报告润色和知识问答；未配置时本地规则生成仍可使用。</p></div>
@@ -261,14 +282,13 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
         <small>点击“AI 润色”时会发送报告草稿与同期 Codex 对话摘录；知识问答只发送已确认知识。原始日志不会在后台自动上传。</small>
       </article>
       <article class="panel settings-card tapd-settings">
-        <div><h2>TAPD · 安全生产管理</h2><p>同步项目 37583308 中“刘子世康”负责的需求、任务和缺陷。</p></div>
+        <div><h2>TAPD OpenAPI</h2><p>一个凭据可供多个项目共用；项目、负责人和自动规则分别在 TAPD 工作与自动处理菜单中配置。</p></div>
         <span class="settings-status" :class="{ready:tapdStatus.configured}">{{ tapdStatus.configured ? `已配置 · ${tapdStatus.authMode==='token'?'个人访问令牌':'API 账号'} · ${tapdStatus.source}` : '未配置' }}</span>
         <label>认证方式<select v-model="tapdAuthMode"><option value="token">个人访问令牌（推荐）</option><option value="basic">OpenAPI 用户名和 API 密码</option></select></label>
         <label v-if="tapdAuthMode==='token'">个人访问令牌<input v-model="tapdAccessToken" type="password" autocomplete="off" placeholder="粘贴 TAPD 个人访问令牌；保存后不再回显"></label>
         <template v-else><label>API 用户名<input v-model="tapdUser" autocomplete="off" placeholder="TAPD 开放平台 API 账号"></label><label>API 密码<input v-model="tapdPassword" type="password" autocomplete="off" placeholder="保存后不再回显"></label></template>
-        <label>工作项负责人<input v-model="tapdOwner" autocomplete="off" placeholder="例如：刘子世康"></label>
         <div class="settings-actions"><button v-if="tapdStatus.configured" class="button secondary" :disabled="loading" @click="testTapd">测试连接</button><button v-if="tapdStatus.configured && tapdStatus.source!=='环境变量'" class="button secondary danger-button" :disabled="loading" @click="clearTapd">删除凭据</button><button class="button primary" :disabled="loading || (tapdAuthMode==='token' ? !tapdAccessToken.trim() : !tapdUser.trim() || !tapdPassword.trim())" @click="saveTapd">保存到凭据库</button></div>
-        <small>令牌或密码只保存在 Windows 凭据库。工作台通过 TAPD 官方 OpenAPI 只读拉取内容，不读取浏览器登录状态，也不会自动回写 TAPD。</small>
+        <small>令牌或密码只保存在 Windows 凭据库。工作台通过 TAPD 官方 OpenAPI 只同步缺陷，不读取任务和需求；只有人工确认完成时才会把对应缺陷回写为“已解决”。</small>
       </article>
       <article class="panel settings-card email-settings">
         <div><h2>QQ 邮件通知</h2><p>邮件开关开启后，新完成的 Codex 任务会发送到同一个 QQ 邮箱。</p></div>
@@ -280,7 +300,7 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
         <small>固定使用 smtp.qq.com:465（SSL/TLS），发件人与收件人相同。授权码仅保存在 Windows 凭据管理器中，不会写入数据库、日志或回显到页面。</small>
       </article>
       </div>
-    </section>
+    </details>
     <section class="settings-section">
       <header class="settings-section-title"><div><h2>自动化</h2><p>控制工作台在后台持续运行的行为。</p></div></header>
       <article class="panel settings-card report-automation-settings">

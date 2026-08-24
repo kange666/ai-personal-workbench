@@ -1214,6 +1214,7 @@ mod tests {
             .iter()
             .find(|item| {
                 item.path.contains("daily-human-weakness-series")
+                    && item.path.contains(r"outputs\2026-08-07")
                     && item.file_name.eq_ignore_ascii_case("final.mp4")
             })
             .expect("应当找到每日人性弱点系列成片");

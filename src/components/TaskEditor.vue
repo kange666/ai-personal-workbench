@@ -21,7 +21,7 @@ const blank = (): TaskDraft => ({
 });
 const form = reactive<TaskDraft>(blank());
 const isEdit = computed(() => Boolean(props.task));
-const sourceLabels = { manual: "人工创建", conversation: "从 Codex 对话提取", test: "从测试问题生成", report: "从日报或周报生成", ai: "从 Codex 对话提取" } as const;
+const sourceLabels = { manual: "人工创建", conversation: "从 Codex 对话提取", test: "从测试问题生成", report: "从日报或周报生成", ai: "从 Codex 对话提取", inbox: "从统一待办箱创建" } as const;
 
 watch(() => [props.open, props.task] as const, () => {
   const task = props.task;

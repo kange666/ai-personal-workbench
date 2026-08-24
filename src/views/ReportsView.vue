@@ -120,6 +120,7 @@ function openSource(source: ReportSource) {
   if (source.kind === "Codex 对话") void router.push(`/tokens?conversation=${source.id}`);
   else if (source.kind === "任务") void router.push(`/tasks?task=${source.id}`);
   else if (source.kind === "测试") void router.push(`/testing?run=${source.id}`);
+  else if (source.kind === "TAPD 缺陷") void router.push(`/tapd?item=${source.id}`);
 }
 function exportWord() {
   if (!selected.value) return;
@@ -157,6 +158,6 @@ onMounted(async () => { await refresh(String(route.query.report || "") || undefi
       </article>
       <article v-else class="panel report-paper empty-report"><b>还没有可查看的报告</b><p>首次使用时先导入 Codex、扫描 Git，再生成报告，内容会更完整。</p></article>
     </section>
-    <div v-if="sourceOpen" class="activity-backdrop" @click.self="sourceOpen=false"><aside class="activity-drawer panel report-source-drawer"><header><div><h2>报告来源</h2><p>{{ selected?.periodStart }}—{{ selected?.periodEnd }} · 原始记录只用于核对报告结论</p></div><button class="icon-button" @click="sourceOpen=false">×</button></header><div class="report-source-summary"><span>Codex {{ reportSources.filter(item=>item.kind==='Codex 对话').length }}</span><span>Git {{ reportSources.filter(item=>item.kind==='Git 提交').length }}</span><span>任务 {{ reportSources.filter(item=>item.kind==='任务').length }}</span><span>测试 {{ reportSources.filter(item=>item.kind==='测试').length }}</span></div><div class="report-source-list"><button v-for="item in reportSources" :key="`${item.kind}:${item.id}`" @click="openSource(item)"><i>{{ item.kind }}</i><span><b>{{ item.title }}</b><small>{{ item.project }} · {{ item.date }} · {{ item.detail }}</small></span><em>{{ item.kind === 'Git 提交' ? '来源记录' : '查看 →' }}</em></button><p v-if="!reportSources.length">该报告周期没有可关联的本地来源。</p></div></aside></div>
+    <div v-if="sourceOpen" class="activity-backdrop" @click.self="sourceOpen=false"><aside class="activity-drawer panel report-source-drawer"><header><div><h2>报告证据链</h2><p>{{ selected?.periodStart }}—{{ selected?.periodEnd }} · 数据截至 {{ selected?.updatedAt ? new Date(selected.updatedAt).toLocaleString('zh-CN') : '未知' }}</p></div><button class="icon-button" @click="sourceOpen=false">×</button></header><div class="report-evidence-note"><b>来源事实</b><span>以下记录来自本地 Codex、Git、任务、测试和 TAPD；报告中的功能描述是基于这些事实自动归纳。</span></div><div class="report-source-summary"><span>Codex {{ reportSources.filter(item=>item.kind==='Codex 对话').length }}</span><span>Git {{ reportSources.filter(item=>item.kind==='Git 提交').length }}</span><span>任务 {{ reportSources.filter(item=>item.kind==='任务').length }}</span><span>测试 {{ reportSources.filter(item=>item.kind==='测试').length }}</span><span>TAPD {{ reportSources.filter(item=>item.kind==='TAPD 缺陷').length }}</span></div><div class="report-source-list"><button v-for="item in reportSources" :key="`${item.kind}:${item.id}`" @click="openSource(item)"><i>{{ item.kind }}</i><span><b>{{ item.title }}</b><small>{{ item.project }} · {{ item.date }} · {{ item.detail }}</small></span><em>{{ item.kind === 'Git 提交' ? '来源记录' : '查看 →' }}</em></button><p v-if="!reportSources.length">该报告周期没有可关联的本地来源。</p></div></aside></div>
   </div>
 </template>

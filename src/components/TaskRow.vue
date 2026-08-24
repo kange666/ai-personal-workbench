@@ -6,7 +6,7 @@ const emit = defineEmits<{ toggle: [id: string]; confirm: [id: string]; postpone
 
 const statusMap = { todo: "待办", doing: "进行中", done: "已完成", blocked: "阻塞", overdue: "逾期", cancelled: "已取消", draft: "待确认" } as const;
 const scopeMap = { day: "每日任务", week: "每周任务", project: "项目任务" } as const;
-const sourceMap = { manual: "人工", conversation: "Codex", test: "测试", report: "报告", ai: "Codex" } as const;
+const sourceMap = { manual: "人工", conversation: "Codex", test: "测试", report: "报告", ai: "Codex", inbox: "待办箱" } as const;
 </script>
 
 <template>

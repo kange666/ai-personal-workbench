@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { archiveQuickCapture, isTauriRuntime, listQuickCaptures, saveQuickCapture, type QuickCapture } from "../services/backend";
+import { archiveQuickCapture, deleteQuickCapture, isTauriRuntime, listQuickCaptures, saveQuickCapture, type QuickCapture } from "../services/backend";
 
 const props=defineProps<{ open:boolean }>();
 const emit=defineEmits<{ close:[]; saved:[QuickCapture] }>();
@@ -20,6 +20,13 @@ async function save() {
   finally { loading.value=false; }
 }
 async function archive(item:QuickCapture) { await archiveQuickCapture(item.id); items.value=items.value.filter(value=>value.id!==item.id); }
+async function remove(item:QuickCapture) {
+  if (!window.confirm(`确定删除这条${item.kind==='note'?'笔记':item.kind==='idea'?'灵感':'网址'}吗？删除后不能恢复。`)) return;
+  loading.value=true; error.value="";
+  try { await deleteQuickCapture(item.id); items.value=items.value.filter(value=>value.id!==item.id); }
+  catch(cause) { error.value=String(cause); }
+  finally { loading.value=false; }
+}
 function time(value:string) { return new Intl.DateTimeFormat("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(value)); }
 </script>
 
@@ -35,7 +42,7 @@ function time(value:string) { return new Intl.DateTimeFormat("zh-CN",{month:"num
           <p v-if="error" class="form-error">{{ error }}</p>
           <footer><small>全局快捷键 Ctrl + Shift + Space · Ctrl + Enter 保存</small><button class="button primary" :disabled="loading || !content.trim()" @click="save">{{ loading?'保存中…':'保存记录' }}</button></footer>
         </div>
-        <aside><h3>待整理记录 <span>{{ items.length }}</span></h3><div class="quick-capture-list"><article v-for="item in items" :key="item.id"><div><small>{{ item.kind==='note'?'笔记':item.kind==='idea'?'灵感':'网址' }} · {{ time(item.createdAt) }}</small><p>{{ item.content }}</p><a v-if="item.sourceUrl" :href="item.sourceUrl" target="_blank" rel="noreferrer">{{ item.sourceUrl }}</a></div><button class="text-button" @click="archive(item)">归档</button></article><p v-if="!items.length" class="panel-empty">暂无待整理记录。</p></div></aside>
+        <aside><h3>待整理记录 <span>{{ items.length }}</span></h3><div class="quick-capture-list"><article v-for="item in items" :key="item.id"><div class="quick-capture-copy"><small>{{ item.kind==='note'?'笔记':item.kind==='idea'?'灵感':'网址' }} · {{ time(item.createdAt) }}</small><p>{{ item.content }}</p><a v-if="item.sourceUrl" :href="item.sourceUrl" target="_blank" rel="noreferrer">{{ item.sourceUrl }}</a></div><div class="quick-capture-actions"><button class="text-button" :disabled="loading" @click="archive(item)">归档</button><button class="text-button danger-text" :disabled="loading" @click="remove(item)">删除</button></div></article><p v-if="!items.length" class="panel-empty">暂无待整理记录。</p></div></aside>
       </div>
     </section>
   </div>

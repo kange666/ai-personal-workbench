@@ -70,6 +70,7 @@ export interface CodexScanSummary {
 export interface GitScanConfiguration {
   roots: string[];
   maxDepth: number;
+  excludedNames: string[];
 }
 
 export interface CodexQuotaWindow {
@@ -115,6 +116,44 @@ export interface WorkbenchNotification {
   reviewedAt?: string;
 }
 
+export type InboxWorkflowStatus = "needs_decision" | "in_progress" | "done" | "archived";
+
+export interface InboxItem {
+  id: string;
+  sourceType: "codex" | "tapd" | "tapd_job" | "task_suggestion" | "test" | "repository" | "video";
+  sourceId: string;
+  project: string;
+  title: string;
+  summary: string;
+  detail: string;
+  route: string;
+  priority: "high" | "normal" | "low";
+  workflowStatus: InboxWorkflowStatus;
+  sourceStatus: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectProfile {
+  id: string;
+  displayName: string;
+  repositoryPath: string;
+  tapdWorkspaceId: string;
+  aliases: string[];
+  category: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectProfileUpdate {
+  id: string;
+  displayName: string;
+  repositoryPath: string;
+  tapdWorkspaceId: string;
+  aliases: string[];
+  category: string;
+}
+
 export interface NotificationSyncSummary {
   filesScanned: number;
   notificationsCreated: number;
@@ -139,6 +178,12 @@ export interface GitScanSummary {
   commitsImported: number;
   snapshotsCreated: number;
   errors: number;
+  errorDetails: string[];
+}
+
+export interface GitScanStatus {
+  lastScannedAt: string;
+  errors: string[];
 }
 
 export interface RepositoryAsset {
@@ -158,6 +203,9 @@ export interface RepositoryAsset {
   remoteUrl: string;
   defaultBranch: string;
   hasUncommittedChanges: boolean;
+  changedFileCount: number;
+  aheadCount: number;
+  behindCount: number;
   inferenceStatus: string;
   manuallyConfirmed: boolean;
   lastScannedAt: string;
@@ -166,6 +214,16 @@ export interface RepositoryAsset {
   healthSummary: string;
   commitCount: number;
   conversationCount: number;
+  lastActivityAt: string;
+  runtimeStatus: "" | "starting" | "running" | "failed" | "stopped";
+  runtimeLocalUrl: string;
+  runtimeError: string;
+  runtimeStartedAt: string;
+  runtimeLogPath: string;
+  runtimeLogExcerpt: string;
+  pendingLevel: "none" | "low" | "medium" | "high";
+  pendingSummary: string;
+  nextAction: string;
 }
 
 export interface RepositoryAssetUpdate {
@@ -182,16 +240,47 @@ export interface RepositoryAssetUpdate {
 }
 
 export interface ProjectLaunchResult {
+  projectPath: string;
   projectName: string;
   command: string;
   processId: number;
+  managed: boolean;
   message: string;
+  status: string;
+  startedAt: string;
+  localUrl: string;
+  logPath: string;
+}
+
+export interface RunningProjectProcess {
+  projectPath: string;
+  projectName: string;
+  command: string;
+  processId: number;
+  status: "starting" | "running" | "failed" | "stopped";
+  startedAt: string;
+  localUrl: string;
+  logPath: string;
+  logExcerpt: string;
+  errorMessage: string;
+}
+
+export interface RepositoryAssociation {
+  id: string;
+  kind: "codex" | "test" | "work" | "tapd" | "report" | "deployment" | "docs" | "build" | "remote" | "runtime";
+  title: string;
+  subtitle: string;
+  status: string;
+  updatedAt: string;
+  route: string;
 }
 
 export interface RepositoryAssetDetails {
   conversations: Array<{ id: string; title: string; updatedAt: string; archived: boolean }>;
   commits: Array<{ hash: string; subject: string; committedAt: string }>;
   commitPlan?: CommitPlan;
+  associations: RepositoryAssociation[];
+  nextAction: string;
 }
 
 export interface TapdStatus {
@@ -206,6 +295,41 @@ export interface TapdStatus {
   warnings: string[];
   autoFixEnabled: boolean;
   autoFixRepositoryPath: string;
+  automationPaused: boolean;
+  projects: TapdProjectConfig[];
+}
+
+export interface TapdProjectConfig {
+  workspaceId: string;
+  workspaceName: string;
+  owner: string;
+  enabled: boolean;
+  sortOrder: number;
+  repositoryPath: string;
+  autoEnabled: boolean;
+  autoExecute: boolean;
+  triggerStatuses: string[];
+  completionStatus: string;
+  lastSyncedAt?: string;
+  lastError: string;
+  itemCount: number;
+}
+
+export interface TapdProjectInput {
+  workspaceId: string;
+  workspaceName: string;
+  owner: string;
+  enabled: boolean;
+  sortOrder: number;
+}
+
+export interface TapdProjectAutomationInput {
+  workspaceId: string;
+  repositoryPath: string;
+  autoEnabled: boolean;
+  autoExecute: boolean;
+  triggerStatuses: string[];
+  completionStatus: string;
 }
 
 export interface GitCredentialStatus {
@@ -243,6 +367,7 @@ export interface GitOperationResult {
 }
 
 export interface TapdWorkItem {
+  itemKey: string;
   id: string;
   workspaceId: string;
   itemType: "bug" | "task" | "story";
@@ -263,6 +388,7 @@ export interface TapdWorkItem {
 }
 
 export interface TapdSyncSummary {
+  projectsSynced: number;
   bugs: number;
   tasks: number;
   stories: number;
@@ -271,12 +397,15 @@ export interface TapdSyncSummary {
   warnings: string[];
   syncedAt: string;
   autoJobsStarted: number;
+  autoJobsQueued: number;
   autoJobsSkipped: number;
 }
 
 export interface TapdCodexJob {
   id: string;
+  itemKey: string;
   itemId: string;
+  workspaceId: string;
   repositoryPath: string;
   status: "queued" | "running" | "completed" | "failed";
   threadId?: string;
@@ -291,6 +420,13 @@ export interface TapdCodexJob {
   reviewNote: string;
   reviewedAt?: string;
   triggerSource: "manual" | "auto";
+  sourceModifiedAt: string;
+  triggerReason: string;
+  executionMode: "automatic" | "manual";
+  executionBlockReason: string;
+  startedAt?: string;
+  completedAt?: string;
+  testRequired: boolean;
   processReportPath: string;
   createdAt: string;
   updatedAt: string;
@@ -470,7 +606,7 @@ export interface ReportRecord {
 }
 
 export interface ReportSource {
-  kind: "Codex 对话" | "Git 提交" | "任务" | "测试";
+  kind: "Codex 对话" | "Git 提交" | "任务" | "测试" | "TAPD 缺陷";
   id: string;
   title: string;
   project: string;
@@ -869,6 +1005,28 @@ export async function archiveQuickCapture(id: string): Promise<void> {
   await invoke("archive_quick_capture", { id });
 }
 
+export interface TapdAutomationPreviewItem {
+  itemKey: string;
+  itemId: string;
+  title: string;
+  statusLabel: string;
+  priority: string;
+  dueDate: string;
+  triggerReason: string;
+}
+
+export interface TapdAutomationPreview {
+  workspaceId: string;
+  totalItems: number;
+  matchedCount: number;
+  pendingCount: number;
+  items: TapdAutomationPreviewItem[];
+}
+
+export async function deleteQuickCapture(id: string): Promise<void> {
+  await invoke("delete_quick_capture", { id });
+}
+
 export async function getDailyCheckin(date: string): Promise<DailyCheckin | null> {
   return invoke<DailyCheckin | null>("get_daily_checkin", { date });
 }
@@ -907,6 +1065,26 @@ export async function markAllNotificationsRead(): Promise<void> {
 
 export async function reviewNotification(id: string, decision: "accepted" | "follow_up", note = ""): Promise<void> {
   await invoke("review_notification", { id, decision, note });
+}
+
+export async function listInboxItems(status?: InboxWorkflowStatus, limit = 200): Promise<InboxItem[]> {
+  return invoke<InboxItem[]>("list_inbox_items", { status: status || null, limit });
+}
+
+export async function updateInboxStatus(id: string, status: InboxWorkflowStatus): Promise<void> {
+  await invoke("update_inbox_status", { id, status });
+}
+
+export async function createTaskFromInbox(id: string): Promise<string> {
+  return invoke<string>("create_task_from_inbox", { id });
+}
+
+export async function listProjectProfiles(): Promise<ProjectProfile[]> {
+  return invoke<ProjectProfile[]>("list_project_profiles");
+}
+
+export async function saveProjectProfile(profile: ProjectProfileUpdate): Promise<ProjectProfile> {
+  return invoke<ProjectProfile>("save_project_profile", { profile });
 }
 
 export async function getEmailNotificationStatus(): Promise<EmailNotificationStatus> {
@@ -953,6 +1131,10 @@ export async function getGitScanConfiguration(): Promise<GitScanConfiguration> {
   return invoke<GitScanConfiguration>("git_scan_configuration");
 }
 
+export async function getGitScanStatus(): Promise<GitScanStatus> {
+  return invoke<GitScanStatus>("git_scan_status");
+}
+
 export async function saveGitScanConfiguration(configuration: GitScanConfiguration): Promise<void> {
   await invoke("save_git_scan_configuration", { configuration });
 }
@@ -989,6 +1171,18 @@ export async function startRepositoryProject(path: string): Promise<ProjectLaunc
   return invoke<ProjectLaunchResult>("start_repository_project", { path });
 }
 
+export async function stopRepositoryProject(path: string): Promise<ProjectLaunchResult> {
+  return invoke<ProjectLaunchResult>("stop_repository_project", { path });
+}
+
+export async function listRunningRepositoryProjects(): Promise<RunningProjectProcess[]> {
+  return invoke<RunningProjectProcess[]>("list_running_repository_projects");
+}
+
+export async function openRepositoryRuntimeUrl(url: string): Promise<void> {
+  await invoke("open_repository_runtime_url", { url });
+}
+
 export async function getGitCredentialStatus(): Promise<GitCredentialStatus> {
   return invoke<GitCredentialStatus>("git_credential_status");
 }
@@ -1013,6 +1207,14 @@ export async function pullGitRepository(path: string): Promise<GitOperationResul
   return invoke<GitOperationResult>("git_pull_repository", { path });
 }
 
+export async function stageGitRepositoryChanges(path: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_stage_repository_changes", { path });
+}
+
+export async function pushGitRepository(path: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_push_repository", { path });
+}
+
 export async function switchGitRepositoryBranch(path: string, branch: string): Promise<GitOperationResult> {
   return invoke<GitOperationResult>("git_switch_repository_branch", { path, branch });
 }
@@ -1031,6 +1233,30 @@ export async function commitGitPlanGroup(path: string, groupId: string, commitMe
 
 export async function getTapdStatus(): Promise<TapdStatus> {
   return invoke<TapdStatus>("tapd_status");
+}
+
+export async function listTapdProjects(): Promise<TapdProjectConfig[]> {
+  return invoke<TapdProjectConfig[]>("list_tapd_projects");
+}
+
+export async function saveTapdProject(project: TapdProjectInput): Promise<TapdProjectConfig> {
+  return invoke<TapdProjectConfig>("save_tapd_project", { project });
+}
+
+export async function removeTapdProject(workspaceId: string): Promise<void> {
+  await invoke("remove_tapd_project", { workspaceId });
+}
+
+export async function saveTapdProjectAutomation(settings: TapdProjectAutomationInput): Promise<TapdProjectConfig> {
+  return invoke<TapdProjectConfig>("save_tapd_project_automation", { settings });
+}
+
+export async function previewTapdProjectAutomation(settings: TapdProjectAutomationInput): Promise<TapdAutomationPreview> {
+  return invoke<TapdAutomationPreview>("preview_tapd_project_automation", { settings });
+}
+
+export async function setTapdAutomationPaused(paused: boolean): Promise<boolean> {
+  return invoke<boolean>("set_tapd_automation_paused", { paused });
 }
 
 export async function saveTapdAutoFixSettings(enabled: boolean, repositoryPath: string): Promise<TapdAutoFixSettings> {
@@ -1053,20 +1279,24 @@ export async function syncTapdItems(): Promise<TapdSyncSummary> {
   return invoke<TapdSyncSummary>("sync_tapd_items");
 }
 
-export async function listTapdItems(): Promise<TapdWorkItem[]> {
-  return invoke<TapdWorkItem[]>("list_tapd_items");
+export async function listTapdItems(workspaceId?: string): Promise<TapdWorkItem[]> {
+  return invoke<TapdWorkItem[]>("list_tapd_items", { workspaceId: workspaceId || null });
 }
 
 export async function listTapdCodexJobs(): Promise<TapdCodexJob[]> {
   return invoke<TapdCodexJob[]>("list_tapd_codex_jobs");
 }
 
+export async function executeTapdCodexJob(id: string): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("execute_tapd_codex_job", { id });
+}
+
 export async function readTapdProcessReport(id: string): Promise<string> {
   return invoke<string>("read_tapd_process_report", { id });
 }
 
-export async function startTapdCodexJob(itemId: string, repositoryPath: string, additionalNote = ""): Promise<TapdCodexJob> {
-  return invoke<TapdCodexJob>("start_tapd_codex_job", { itemId, repositoryPath, additionalNote });
+export async function startTapdCodexJob(itemKey: string, repositoryPath: string, additionalNote = ""): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("start_tapd_codex_job", { itemKey, repositoryPath, additionalNote });
 }
 
 export async function continueTapdCodexJob(id: string, note: string): Promise<TapdCodexJob> {
@@ -1077,8 +1307,8 @@ export async function runTapdCodexJobTests(id: string): Promise<TapdCodexJob> {
   return invoke<TapdCodexJob>("run_tapd_codex_job_tests", { id });
 }
 
-export async function reviewTapdCodexJob(id: string, decision: "accepted" | "changes_requested", note = ""): Promise<TapdCodexJob> {
-  return invoke<TapdCodexJob>("review_tapd_codex_job", { review: { id, decision, note } });
+export async function reviewTapdCodexJob(id: string, decision: "accepted" | "changes_requested", note = "", allowUntested = false): Promise<TapdCodexJob> {
+  return invoke<TapdCodexJob>("review_tapd_codex_job", { review: { id, decision, note, allowUntested } });
 }
 
 export async function getTokenSummary(): Promise<TokenSummary> {

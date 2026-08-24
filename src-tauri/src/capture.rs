@@ -105,3 +105,21 @@ pub fn archive_quick_capture(
         .map_err(|error| error.to_string())?;
     Ok(())
 }
+
+#[tauri::command]
+pub fn delete_quick_capture(
+    state: tauri::State<'_, DatabaseState>,
+    id: String,
+) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("快速记录 ID 无效。".into());
+    }
+    let affected = state
+        .connect()?
+        .execute("DELETE FROM quick_captures WHERE id=?1", params![id])
+        .map_err(|error| error.to_string())?;
+    if affected == 0 {
+        return Err("这条快速记录不存在或已经删除。".into());
+    }
+    Ok(())
+}

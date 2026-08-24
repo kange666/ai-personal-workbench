@@ -12,6 +12,7 @@ defineProps<{ name: string }>();
     <template v-else-if="name === 'testing'"><path d="M9 3.5h6M10 3.5v5l-5.3 8.3A2.4 2.4 0 0 0 6.7 20h10.6a2.4 2.4 0 0 0 2-3.2L14 8.5v-5"/><path d="M7.5 15h9"/></template>
     <template v-else-if="name === 'tokens'"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v9M8.8 10c0-1.4 1.3-2.3 3.2-2.3s3.2.9 3.2 2.3-1.1 2-3.2 2-3.2.7-3.2 2 1.3 2.3 3.2 2.3 3.2-.9 3.2-2.3"/></template>
     <template v-else-if="name === 'tapd'"><path d="M4 5h16M12 5v14M7.5 19h9"/></template>
+    <template v-else-if="name === 'automation'"><path d="M7 4.5h10l2 3.5-2 3.5H7L5 8z"/><path d="M7 12.5h10l2 3.5-2 3.5H7L5 16z"/><path d="M9 8h6M9 16h6"/></template>
     <template v-else-if="name === 'content'"><path d="m12 3 1.5 4.3L18 9l-4.5 1.7L12 15l-1.5-4.3L6 9l4.5-1.7z"/><path d="m18.5 15 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></template>
     <template v-else-if="name === 'videos'"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></template>
     <template v-else-if="name === 'knowledge'"><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23z"/></template>

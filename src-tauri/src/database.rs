@@ -1,8 +1,9 @@
 use rusqlite::{params, Connection, MAIN_DB};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 35;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -114,6 +115,126 @@ pub struct WorkTask {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+// TAPD 多项目下缺陷编号不能单独作为主键；升级时保留原编号并增加项目级复合键。
+fn migrate_tapd_composite_keys(connection: &Connection) -> Result<(), String> {
+    let has_item_key = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tapd_work_items') WHERE name='item_key')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !has_item_key {
+        let migration = connection.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             BEGIN IMMEDIATE;
+             CREATE TABLE tapd_work_items_v33 (
+               item_key TEXT PRIMARY KEY,
+               id TEXT NOT NULL,
+               workspace_id TEXT NOT NULL,
+               item_type TEXT NOT NULL,
+               title TEXT NOT NULL,
+               description TEXT NOT NULL DEFAULT '',
+               status TEXT NOT NULL DEFAULT '',
+               status_label TEXT NOT NULL DEFAULT '',
+               priority TEXT NOT NULL DEFAULT '',
+               owner TEXT NOT NULL DEFAULT '',
+               creator TEXT NOT NULL DEFAULT '',
+               iteration_id TEXT NOT NULL DEFAULT '',
+               begin_date TEXT NOT NULL DEFAULT '',
+               due_date TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL DEFAULT '',
+               modified_at TEXT NOT NULL DEFAULT '',
+               source_url TEXT NOT NULL DEFAULT '',
+               synced_at TEXT NOT NULL,
+               automation_version TEXT NOT NULL DEFAULT '',
+               UNIQUE(workspace_id,id)
+             );
+             INSERT INTO tapd_work_items_v33(
+               item_key,id,workspace_id,item_type,title,description,status,status_label,priority,owner,creator,iteration_id,begin_date,due_date,created_at,modified_at,source_url,synced_at,automation_version
+             )
+             SELECT workspace_id || ':' || id,id,workspace_id,item_type,title,description,status,status_label,priority,owner,creator,iteration_id,begin_date,due_date,created_at,modified_at,source_url,synced_at,
+                    COALESCE(NULLIF(modified_at,''),NULLIF(created_at,''),synced_at)
+             FROM tapd_work_items;
+             CREATE TABLE tapd_codex_jobs_v33 (
+               id TEXT PRIMARY KEY,
+               item_key TEXT NOT NULL,
+               item_id TEXT NOT NULL,
+               workspace_id TEXT NOT NULL,
+               repository_path TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'running',
+               thread_id TEXT,
+               output TEXT NOT NULL DEFAULT '',
+               error_message TEXT NOT NULL DEFAULT '',
+               baseline_head TEXT NOT NULL DEFAULT '',
+               baseline_worktree TEXT NOT NULL DEFAULT '',
+               result_head TEXT NOT NULL DEFAULT '',
+               changed_files TEXT NOT NULL DEFAULT '',
+               test_summary TEXT NOT NULL DEFAULT '',
+               review_status TEXT NOT NULL DEFAULT 'pending',
+               review_note TEXT NOT NULL DEFAULT '',
+               reviewed_at TEXT,
+               trigger_source TEXT NOT NULL DEFAULT 'manual',
+               source_modified_at TEXT NOT NULL DEFAULT '',
+               trigger_reason TEXT NOT NULL DEFAULT '',
+               execution_mode TEXT NOT NULL DEFAULT 'manual',
+               execution_block_reason TEXT NOT NULL DEFAULT '',
+               started_at TEXT,
+               completed_at TEXT,
+               test_required INTEGER NOT NULL DEFAULT 0,
+               process_report_path TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL,
+               FOREIGN KEY(item_key) REFERENCES tapd_work_items_v33(item_key) ON DELETE CASCADE
+             );
+             INSERT INTO tapd_codex_jobs_v33(
+               id,item_key,item_id,workspace_id,repository_path,status,thread_id,output,error_message,baseline_head,baseline_worktree,result_head,changed_files,test_summary,review_status,review_note,reviewed_at,trigger_source,source_modified_at,trigger_reason,execution_mode,execution_block_reason,started_at,completed_at,test_required,process_report_path,created_at,updated_at
+             )
+             SELECT j.id,i.workspace_id || ':' || i.id,i.id,i.workspace_id,j.repository_path,j.status,j.thread_id,j.output,j.error_message,j.baseline_head,j.baseline_worktree,j.result_head,j.changed_files,j.test_summary,j.review_status,j.review_note,j.reviewed_at,j.trigger_source,
+                     '',
+                    CASE WHEN j.trigger_source='auto' THEN '历史自动任务' ELSE '人工发送' END,
+                    'manual','',
+                    CASE WHEN j.status='queued' THEN NULL ELSE j.created_at END,
+                    CASE WHEN j.status IN ('completed','failed') THEN j.updated_at ELSE NULL END,
+                    CASE WHEN COALESCE((SELECT test_command FROM repository_assets r WHERE r.path=j.repository_path),'')='' THEN 0 ELSE 1 END,
+                    j.process_report_path,j.created_at,j.updated_at
+             FROM tapd_codex_jobs j
+             JOIN tapd_work_items i ON i.id=j.item_id;
+             DROP TABLE tapd_codex_jobs;
+             DROP TABLE tapd_work_items;
+             ALTER TABLE tapd_work_items_v33 RENAME TO tapd_work_items;
+             ALTER TABLE tapd_codex_jobs_v33 RENAME TO tapd_codex_jobs;
+             COMMIT;
+             PRAGMA foreign_keys=ON;",
+        );
+        if let Err(error) = migration {
+            let _ = connection.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON;");
+            return Err(format!("TAPD 多项目数据迁移失败：{error}"));
+        }
+    }
+    connection
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tapd_items_type_status ON tapd_work_items(item_type,status);
+             CREATE INDEX IF NOT EXISTS idx_tapd_items_workspace ON tapd_work_items(workspace_id,modified_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_tapd_codex_jobs_item ON tapd_codex_jobs(item_key,created_at DESC);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_tapd_codex_jobs_auto_version
+               ON tapd_codex_jobs(item_key,source_modified_at)
+               WHERE trigger_source='auto' AND source_modified_at<>'';",
+        )
+        .map_err(|error| error.to_string())?;
+    let foreign_key_errors = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if foreign_key_errors != 0 {
+        return Err(format!(
+            "TAPD 数据迁移后发现 {foreign_key_errors} 条关联异常。"
+        ));
+    }
+    Ok(())
 }
 
 impl DatabaseState {
@@ -397,6 +518,9 @@ impl DatabaseState {
                    remote_url TEXT NOT NULL DEFAULT '',
                    default_branch TEXT NOT NULL DEFAULT '',
                    has_uncommitted_changes INTEGER NOT NULL DEFAULT 0,
+                   changed_file_count INTEGER NOT NULL DEFAULT 0,
+                   ahead_count INTEGER NOT NULL DEFAULT 0,
+                   behind_count INTEGER NOT NULL DEFAULT 0,
                    inference_status TEXT NOT NULL DEFAULT 'pending',
                    manually_confirmed INTEGER NOT NULL DEFAULT 0,
                    last_scanned_at TEXT NOT NULL,
@@ -414,6 +538,22 @@ impl DatabaseState {
                    FOREIGN KEY(repository_path) REFERENCES repository_assets(path) ON DELETE CASCADE
                  );
                  CREATE INDEX IF NOT EXISTS idx_repository_health_path_time ON repository_health_snapshots(repository_path,verified_at);
+                 CREATE TABLE IF NOT EXISTS repository_runtime_runs (
+                   id TEXT PRIMARY KEY,
+                   repository_path TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'starting',
+                   command TEXT NOT NULL DEFAULT '',
+                   process_id INTEGER NOT NULL DEFAULT 0,
+                   local_url TEXT NOT NULL DEFAULT '',
+                   log_path TEXT NOT NULL DEFAULT '',
+                   log_excerpt TEXT NOT NULL DEFAULT '',
+                   error_message TEXT NOT NULL DEFAULT '',
+                   started_at TEXT NOT NULL,
+                   finished_at TEXT,
+                   exit_code INTEGER,
+                   FOREIGN KEY(repository_path) REFERENCES repository_assets(path) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_repository_runtime_path_time ON repository_runtime_runs(repository_path,started_at DESC);
                  CREATE TABLE IF NOT EXISTS commit_plans (
                    id TEXT PRIMARY KEY,
                    repository_path TEXT NOT NULL,
@@ -585,6 +725,37 @@ impl DatabaseState {
                    read_at TEXT
                  );
                  CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read,created_at);
+                 CREATE TABLE IF NOT EXISTS project_profiles (
+                   id TEXT PRIMARY KEY,
+                   display_name TEXT NOT NULL,
+                   repository_path TEXT NOT NULL DEFAULT '',
+                   tapd_workspace_id TEXT NOT NULL DEFAULT '',
+                   aliases_json TEXT NOT NULL DEFAULT '[]',
+                   category TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_project_profiles_repository ON project_profiles(repository_path) WHERE repository_path<>'';
+                 CREATE INDEX IF NOT EXISTS idx_project_profiles_name ON project_profiles(display_name);
+                 CREATE TABLE IF NOT EXISTS work_inbox_items (
+                   id TEXT PRIMARY KEY,
+                   source_type TEXT NOT NULL,
+                   source_id TEXT NOT NULL,
+                   project TEXT NOT NULL DEFAULT '未归类项目',
+                   title TEXT NOT NULL,
+                   summary TEXT NOT NULL DEFAULT '',
+                   detail TEXT NOT NULL DEFAULT '',
+                   route TEXT NOT NULL DEFAULT '/',
+                   priority TEXT NOT NULL DEFAULT 'normal',
+                   workflow_status TEXT NOT NULL DEFAULT 'needs_decision',
+                   source_status TEXT NOT NULL DEFAULT '',
+                   source_revision TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(source_type,source_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_work_inbox_status ON work_inbox_items(workflow_status,priority,updated_at);
+                 CREATE INDEX IF NOT EXISTS idx_work_inbox_source ON work_inbox_items(source_type,source_id);
                  CREATE TABLE IF NOT EXISTS quick_captures (
                    id TEXT PRIMARY KEY,
                    kind TEXT NOT NULL DEFAULT 'note',
@@ -643,8 +814,26 @@ impl DatabaseState {
                    FOREIGN KEY(notification_id) REFERENCES notifications(id) ON DELETE CASCADE
                  );
                  CREATE INDEX IF NOT EXISTS idx_email_deliveries_due ON email_deliveries(status,next_attempt_at);
+                  CREATE TABLE IF NOT EXISTS tapd_projects (
+                    workspace_id TEXT PRIMARY KEY,
+                    workspace_name TEXT NOT NULL,
+                    owner TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    repository_path TEXT NOT NULL DEFAULT '',
+                    auto_enabled INTEGER NOT NULL DEFAULT 0,
+                    auto_execute INTEGER NOT NULL DEFAULT 1,
+                    trigger_statuses TEXT NOT NULL DEFAULT 'new,reopened',
+                    completion_status TEXT NOT NULL DEFAULT '已解决',
+                    last_synced_at TEXT,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_tapd_projects_enabled ON tapd_projects(enabled,updated_at DESC);
                   CREATE TABLE IF NOT EXISTS tapd_work_items (
-                    id TEXT PRIMARY KEY,
+                    item_key TEXT PRIMARY KEY,
+                    id TEXT NOT NULL,
                     workspace_id TEXT NOT NULL,
                     item_type TEXT NOT NULL,
                     title TEXT NOT NULL,
@@ -660,12 +849,16 @@ impl DatabaseState {
                     created_at TEXT NOT NULL DEFAULT '',
                     modified_at TEXT NOT NULL DEFAULT '',
                     source_url TEXT NOT NULL DEFAULT '',
-                    synced_at TEXT NOT NULL
+                    synced_at TEXT NOT NULL,
+                    automation_version TEXT NOT NULL DEFAULT '',
+                    UNIQUE(workspace_id,id)
                   );
                   CREATE INDEX IF NOT EXISTS idx_tapd_items_type_status ON tapd_work_items(item_type,status);
                   CREATE TABLE IF NOT EXISTS tapd_codex_jobs (
                     id TEXT PRIMARY KEY,
+                    item_key TEXT NOT NULL,
                     item_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
                     repository_path TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'running',
                     thread_id TEXT,
@@ -680,12 +873,19 @@ impl DatabaseState {
                     review_note TEXT NOT NULL DEFAULT '',
                     reviewed_at TEXT,
                     trigger_source TEXT NOT NULL DEFAULT 'manual',
+                    source_modified_at TEXT NOT NULL DEFAULT '',
+                    trigger_reason TEXT NOT NULL DEFAULT '',
+                    execution_mode TEXT NOT NULL DEFAULT 'manual',
+                    execution_block_reason TEXT NOT NULL DEFAULT '',
+                    started_at TEXT,
+                    completed_at TEXT,
+                    test_required INTEGER NOT NULL DEFAULT 0,
                     process_report_path TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    FOREIGN KEY(item_id) REFERENCES tapd_work_items(id) ON DELETE CASCADE
+                    FOREIGN KEY(item_key) REFERENCES tapd_work_items(item_key) ON DELETE CASCADE
                   );
-                  CREATE INDEX IF NOT EXISTS idx_tapd_codex_jobs_item ON tapd_codex_jobs(item_id,created_at);",
+                  CREATE INDEX IF NOT EXISTS idx_tapd_codex_jobs_item ON tapd_codex_jobs(item_key,created_at);",
             )
             .map_err(|error| error.to_string())?;
         for migration in [
@@ -731,9 +931,15 @@ impl DatabaseState {
             "ALTER TABLE notifications ADD COLUMN reviewed_at TEXT",
             "ALTER TABLE repository_assets ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE repository_assets ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE repository_assets ADD COLUMN changed_file_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE repository_assets ADD COLUMN ahead_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE repository_assets ADD COLUMN behind_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tapd_projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tapd_projects ADD COLUMN completion_status TEXT NOT NULL DEFAULT '已解决'",
         ] {
             let _ = connection.execute(migration, []);
         }
+        migrate_tapd_composite_keys(&connection)?;
         connection
             .execute(
                 "UPDATE tasks SET source='conversation' WHERE source='ai'",
@@ -759,6 +965,7 @@ impl DatabaseState {
             ("codex_email_enabled_at", ""),
             ("codex_email_config_status", "unconfigured"),
             ("codex_email_last_error", ""),
+            ("tapd_automation_paused", "0"),
         ] {
             connection
                 .execute(
@@ -767,6 +974,21 @@ impl DatabaseState {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        let now = chrono::Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO tapd_projects(workspace_id,workspace_name,owner,enabled,sort_order,repository_path,auto_enabled,auto_execute,trigger_statuses,completion_status,last_synced_at,last_error,created_at,updated_at)
+                 VALUES('37583308','安全生产管理',
+                   COALESCE(NULLIF((SELECT value FROM app_meta WHERE key='tapd_owner'),''),'刘子世康'),
+                   1,0,
+                   COALESCE((SELECT value FROM app_meta WHERE key='tapd_auto_fix_repository_path'),''),
+                   CASE WHEN LOWER(COALESCE((SELECT value FROM app_meta WHERE key='tapd_auto_fix_enabled'),'')) IN ('true','1','yes','on') THEN 1 ELSE 0 END,
+                   1,'new,reopened','已解决',
+                   (SELECT value FROM app_meta WHERE key='tapd_last_synced_at'),'',?1,?1)
+                 ON CONFLICT(workspace_id) DO NOTHING",
+                [&now],
+            )
+            .map_err(|error| error.to_string())?;
         connection
             .execute(
                 "INSERT INTO app_meta(key,value) VALUES('schema_version',?1)
@@ -957,6 +1179,7 @@ pub fn token_trend(
 pub fn project_token_metrics(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<Vec<ProjectTokenMetric>, String> {
+    crate::project_identity::sync_project_profiles_for_state(&state)?;
     let connection = state.connect()?;
     let mut statement = connection.prepare(
         "SELECT COALESCE(NULLIF(project_override,''),COALESCE(NULLIF(cwd,''),'未归类项目')),COUNT(*),SUM(input_tokens),SUM(cached_input_tokens),SUM(output_tokens),SUM(reasoning_output_tokens),SUM(total_tokens)
@@ -975,8 +1198,38 @@ pub fn project_token_metrics(
             })
         })
         .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let raw = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    let mut grouped = BTreeMap::<String, ProjectTokenMetric>::new();
+    for item in raw {
+        let project = crate::project_identity::canonical_project_name(
+            &connection,
+            &item.project,
+            &item.project,
+        );
+        let entry = grouped
+            .entry(project.clone())
+            .or_insert(ProjectTokenMetric {
+                project,
+                conversation_count: 0,
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                reasoning_output_tokens: 0,
+                total_tokens: 0,
+            });
+        entry.conversation_count += item.conversation_count;
+        entry.input_tokens += item.input_tokens;
+        entry.cached_input_tokens += item.cached_input_tokens;
+        entry.output_tokens += item.output_tokens;
+        entry.reasoning_output_tokens += item.reasoning_output_tokens;
+        entry.total_tokens += item.total_tokens;
+    }
+    let mut values = grouped.into_values().collect::<Vec<_>>();
+    values.sort_by_key(|item| std::cmp::Reverse(item.total_tokens));
+    Ok(values)
 }
 
 #[tauri::command]
@@ -1139,6 +1392,32 @@ mod migration_tests {
             )
             .unwrap();
         assert!(repository_hidden_column_exists);
+        for column in ["changed_file_count", "ahead_count", "behind_count"] {
+            let exists: bool = upgraded
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('repository_assets') WHERE name=?1)",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "repository_assets 缺少 {column}");
+        }
+        let repository_runtime_runs_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='repository_runtime_runs')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(repository_runtime_runs_exists);
+        let tapd_sort_column_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tapd_projects') WHERE name='sort_order')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(tapd_sort_column_exists);
         let email_deliveries_exists: bool = upgraded
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_deliveries')",
@@ -1189,5 +1468,112 @@ mod migration_tests {
         DatabaseState::new(database_path).unwrap();
         assert_eq!(backup_files(&directory).len(), 1);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn tapd_composite_key_migration_preserves_history_and_allows_same_id_per_project() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE repository_assets (
+                   path TEXT PRIMARY KEY,
+                   test_command TEXT NOT NULL DEFAULT ''
+                 );
+                 INSERT INTO repository_assets(path,test_command) VALUES('F:/client','npm test');
+                 CREATE TABLE tapd_work_items (
+                   id TEXT PRIMARY KEY,
+                   workspace_id TEXT NOT NULL,
+                   item_type TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   description TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT '',
+                   status_label TEXT NOT NULL DEFAULT '',
+                   priority TEXT NOT NULL DEFAULT '',
+                   owner TEXT NOT NULL DEFAULT '',
+                   creator TEXT NOT NULL DEFAULT '',
+                   iteration_id TEXT NOT NULL DEFAULT '',
+                   begin_date TEXT NOT NULL DEFAULT '',
+                   due_date TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL DEFAULT '',
+                   modified_at TEXT NOT NULL DEFAULT '',
+                   source_url TEXT NOT NULL DEFAULT '',
+                   synced_at TEXT NOT NULL
+                 );
+                 INSERT INTO tapd_work_items VALUES(
+                   '1001','63985424','bug','旧缺陷','','new','待处理','高','张三','','','','',
+                   '2026-08-01T08:00:00Z','2026-08-02T08:00:00Z','https://tapd.cn','2026-08-02T08:01:00Z'
+                 );
+                 CREATE TABLE tapd_codex_jobs (
+                   id TEXT PRIMARY KEY,
+                   item_id TEXT NOT NULL,
+                   repository_path TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'running',
+                   thread_id TEXT,
+                   output TEXT NOT NULL DEFAULT '',
+                   error_message TEXT NOT NULL DEFAULT '',
+                   baseline_head TEXT NOT NULL DEFAULT '',
+                   baseline_worktree TEXT NOT NULL DEFAULT '',
+                   result_head TEXT NOT NULL DEFAULT '',
+                   changed_files TEXT NOT NULL DEFAULT '',
+                   test_summary TEXT NOT NULL DEFAULT '',
+                   review_status TEXT NOT NULL DEFAULT 'pending',
+                   review_note TEXT NOT NULL DEFAULT '',
+                   reviewed_at TEXT,
+                   trigger_source TEXT NOT NULL DEFAULT 'manual',
+                   process_report_path TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO tapd_codex_jobs VALUES(
+                   'job-1','1001','F:/client','completed',NULL,'','', '', '', '', '',
+                   '项目测试通过','accepted','',NULL,'auto','',
+                   '2026-08-02T09:00:00Z','2026-08-02T09:10:00Z'
+                 );
+                 INSERT INTO tapd_codex_jobs VALUES(
+                   'job-2','1001','F:/client','completed',NULL,'','', '', '', '', '',
+                   '项目测试通过','accepted','',NULL,'auto','',
+                   '2026-08-03T09:00:00Z','2026-08-03T09:10:00Z'
+                 );",
+            )
+            .unwrap();
+
+        migrate_tapd_composite_keys(&connection).unwrap();
+
+        let item_key: String = connection
+            .query_row("SELECT item_key FROM tapd_work_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(item_key, "63985424:1001");
+        let jobs: (i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*),SUM(CASE WHEN source_modified_at='' THEN 1 ELSE 0 END) FROM tapd_codex_jobs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(jobs, (2, 2));
+        connection
+            .execute_batch(
+                "INSERT INTO tapd_work_items(
+                   item_key,id,workspace_id,item_type,title,synced_at,automation_version
+                 ) VALUES(
+                   '99887766:1001','1001','99887766','bug','另一项目的同号缺陷','2026-08-04T08:00:00Z',''
+                 );",
+            )
+            .unwrap();
+        let same_raw_id_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM tapd_work_items WHERE id='1001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(same_raw_id_count, 2);
+        let foreign_key_errors: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_errors, 0);
     }
 }
