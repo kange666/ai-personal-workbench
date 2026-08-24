@@ -89,7 +89,7 @@ $installerHash = (Get-FileHash -LiteralPath $installerOutput -Algorithm SHA256).
 $portableHash = (Get-FileHash -LiteralPath $portableOutput -Algorithm SHA256).Hash
 $signature = (Get-Content -LiteralPath $signatureOutput -Raw).Trim()
 $releaseBaseUrl = "https://github.com/kange666/ai-personal-workbench-download/releases/download/$tag"
-$updaterMirrorUrl = "https://kange666.github.io/ai-personal-workbench-download/downloads/$tag/$installerName"
+$updaterDownloadUrl = "$releaseBaseUrl/$installerName"
 $sourceCommit = (git -C $projectRoot rev-parse HEAD).Trim()
 $publishedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
 
@@ -118,8 +118,8 @@ $manifest = [ordered]@{
     platforms = [ordered]@{
         "windows-x86_64" = [ordered]@{
             signature = $signature
-            # The updater uses the Pages mirror to avoid GitHub Release redirect stalls.
-            url = $updaterMirrorUrl
+            # Use the canonical Release asset. It is more reliable for the Tauri updater stream.
+            url = $updaterDownloadUrl
         }
     }
 }
