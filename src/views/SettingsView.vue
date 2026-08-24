@@ -19,6 +19,7 @@ import {
   getBackupStatus,
   getEmailNotificationStatus,
   getTapdStatus,
+  getUpdaterProxy,
   getVipStatus,
   getWorkTimeSettings,
   isTauriRuntime,
@@ -102,7 +103,23 @@ async function prepareSignedUpdate() {
   if (pendingUpdate.value) await pendingUpdate.value.close();
   pendingUpdate.value = null;
   updatePhase.value = "checking";
-  const available = await check({ timeout: 30_000 });
+  const proxy = await getUpdaterProxy();
+  let available: Update | null = null;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      available = await check({ timeout: 30_000, ...(proxy ? { proxy } : {}) });
+      lastError = undefined;
+      break;
+    } catch (cause) {
+      lastError = cause;
+      if (attempt === 0) {
+        updateHint.value = "更新服务连接不稳定，正在自动重试…";
+        await new Promise(resolve => window.setTimeout(resolve, 1_200));
+      }
+    }
+  }
+  if (lastError) throw lastError;
   if (!available) {
     updatePhase.value = "idle";
     return null;
@@ -110,6 +127,34 @@ async function prepareSignedUpdate() {
   pendingUpdate.value = available;
   updatePhase.value = "ready";
   return available;
+}
+async function downloadSignedUpdate(update: Update) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    updateDownloaded.value=0;
+    updateTotal.value=0;
+    try {
+      await update.download((event) => {
+        if (event.event === "Started") {
+          updateTotal.value=event.data.contentLength || 0;
+          updateHint.value="更新包已连接，正在下载并校验签名。";
+        }
+        if (event.event === "Progress") {
+          updateDownloaded.value += event.data.chunkLength;
+          updateHint.value="正在下载更新包；下载完成后将自动启动安装器。";
+        }
+        if (event.event === "Finished") updateHint.value="下载完成，正在准备安装。";
+      }, { timeout: 2 * 60_000 });
+      return;
+    } catch (cause) {
+      lastError = cause;
+      if (attempt === 0) {
+        updateHint.value="下载连接中断，正在通过系统代理自动重试…";
+        await new Promise(resolve => window.setTimeout(resolve, 1_200));
+      }
+    }
+  }
+  throw lastError;
 }
 async function refreshUpdateStatus() {
   loading.value=true; error.value=""; message.value=""; updateHint.value="";
@@ -144,17 +189,7 @@ async function installAvailableUpdate() {
         updateHint.value="下载源响应较慢；可继续等待，或点击“手工下载”使用浏览器下载。";
       }
     }, 15_000);
-    await update.download((event) => {
-      if (event.event === "Started") {
-        updateTotal.value=event.data.contentLength || 0;
-        updateHint.value="更新包已连接，正在下载并校验签名。";
-      }
-      if (event.event === "Progress") {
-        updateDownloaded.value += event.data.chunkLength;
-        updateHint.value="正在下载更新包；下载完成后将自动启动安装器。";
-      }
-      if (event.event === "Finished") updateHint.value="下载完成，正在准备安装。";
-    }, { timeout: 2 * 60_000 });
+    await downloadSignedUpdate(update);
     if (updateSlowTimer) window.clearTimeout(updateSlowTimer);
     updateSlowTimer=undefined;
     updatePhase.value="installing";

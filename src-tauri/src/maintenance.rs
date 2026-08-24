@@ -6,10 +6,99 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::process::Command;
+
 const RELEASE_MANIFEST_URL: &str =
     "https://kange666.github.io/ai-personal-workbench-download/release.json";
 const RELEASE_PAGE_URL: &str = "https://kange666.github.io/ai-personal-workbench-download/";
 const DAILY_BACKUP_RETENTION: usize = 14;
+
+fn normalize_proxy_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mapped = value
+        .split(';')
+        .filter_map(|entry| entry.split_once('='))
+        .find(|(scheme, _)| scheme.trim().eq_ignore_ascii_case("https"))
+        .or_else(|| {
+            value
+                .split(';')
+                .filter_map(|entry| entry.split_once('='))
+                .find(|(scheme, _)| scheme.trim().eq_ignore_ascii_case("http"))
+        })
+        .map(|(_, address)| address.trim())
+        .unwrap_or(value);
+    let normalized = if mapped.contains("://") {
+        mapped.to_string()
+    } else {
+        format!("http://{mapped}")
+    };
+    let parsed = reqwest::Url::parse(&normalized).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+#[cfg(windows)]
+fn windows_registry_value(name: &str, kind: &str) -> Option<String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = Command::new("reg.exe")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            name,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            line.split_once(kind)
+                .map(|(_, value)| value.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn detected_updater_proxy() -> Option<String> {
+    for name in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        if let Ok(value) = std::env::var(name) {
+            if let Some(proxy) = normalize_proxy_url(&value) {
+                return Some(proxy);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let enabled = windows_registry_value("ProxyEnable", "REG_DWORD")?;
+        if enabled != "0x1" && enabled != "1" {
+            return None;
+        }
+        return windows_registry_value("ProxyServer", "REG_SZ")
+            .and_then(|value| normalize_proxy_url(&value));
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+#[tauri::command]
+pub fn updater_proxy() -> Option<String> {
+    detected_updater_proxy()
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -280,6 +369,19 @@ mod tests {
         assert!(is_newer_version("1.3.2", "V1.3.1"));
         assert!(!is_newer_version("V1.3.1", "1.3.1"));
         assert!(!is_newer_version("1.2", "1.3.1"));
+    }
+
+    #[test]
+    fn normalizes_windows_proxy_values() {
+        assert_eq!(
+            normalize_proxy_url("127.0.0.1:10808"),
+            Some("http://127.0.0.1:10808".into())
+        );
+        assert_eq!(
+            normalize_proxy_url("http=127.0.0.1:8080;https=127.0.0.1:10808"),
+            Some("http://127.0.0.1:10808".into())
+        );
+        assert_eq!(normalize_proxy_url("socks5://127.0.0.1:10808"), None);
     }
 
     #[test]

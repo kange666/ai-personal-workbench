@@ -426,6 +426,7 @@ pub fn run() {
             maintenance::export_database_backup,
             maintenance::restore_database_backup,
             maintenance::check_for_updates,
+            maintenance::updater_proxy,
             database::list_tasks,
             database::save_task,
             database::delete_task,

@@ -1083,6 +1083,10 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
   return invoke<UpdateStatus>("check_for_updates");
 }
 
+export async function getUpdaterProxy(): Promise<string | null> {
+  return invoke<string | null>("updater_proxy");
+}
+
 export async function listQuickCaptures(includeArchived = false): Promise<QuickCapture[]> {
   return invoke<QuickCapture[]>("list_quick_captures", { includeArchived });
 }
