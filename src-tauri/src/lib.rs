@@ -194,6 +194,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(git::ProjectProcessState::default())
+        .manage(testing::TestProcessState::default())
         .setup(|app| {
             app.handle().plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -293,6 +294,7 @@ pub fn run() {
             let path = app.path().app_data_dir()?.join("workbench.sqlite3");
             ensure_parent(&path).map_err(std::io::Error::other)?;
             let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
+            testing::recover_incomplete_test_runs(&state).map_err(std::io::Error::other)?;
             app.manage(state.clone());
             email::initialize_for_state(&state).map_err(std::io::Error::other)?;
             email::sync_tray_menu(app.handle(), &state);
@@ -528,10 +530,17 @@ pub fn run() {
             ai::refine_report_with_ai,
             ai::ask_knowledge,
             testing::list_test_menus,
+            testing::list_test_projects,
+            testing::list_test_scenarios,
             testing::recommend_tests_from_git,
             testing::list_test_runs,
             testing::read_test_report,
+            testing::read_test_artifact,
+            testing::preflight_test,
             testing::start_test_run,
+            testing::get_test_run,
+            testing::cancel_test_run,
+            testing::export_test_report_pdf,
             parity::sync_feature_parity,
             parity::list_feature_parity,
             parity::save_feature_parity_review,

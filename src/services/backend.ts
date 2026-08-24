@@ -655,16 +655,68 @@ export interface TestCapabilities {
   browserStyle: boolean;
 }
 
+export type TestMode = "mock" | "real" | "source-style" | "browser-style";
+export type TestRunStatus = "queued" | "running" | "passed" | "failed" | "blocked" | "error" | "cancelled";
+
+export interface TestProject {
+  path: string;
+  name: string;
+  projectKind: "vue" | "uni-app" | "web" | "unknown";
+  caseCount: number;
+  pageCount: number;
+  capabilities: TestCapabilities;
+  warnings: string[];
+}
+
+export interface TestScenario {
+  id: string;
+  title: string;
+  description: string;
+  mode: TestMode;
+  defaultSelected: boolean;
+}
+
+export interface TestArtifact {
+  name: string;
+  path: string;
+  contentType: string;
+  kind: "screenshot" | "trace" | "log" | "attachment";
+}
+
+export interface TestScenarioResult {
+  id: string;
+  title: string;
+  status: "passed" | "failed" | "skipped" | "blocked";
+  durationMs: number;
+  purpose: string;
+  steps: string[];
+  checks: string[];
+  errorMessage: string;
+  artifacts: TestArtifact[];
+}
+
+export interface TestPreflight {
+  ready: boolean;
+  status: "ready" | "blocked";
+  checks: Array<{ name: string; passed: boolean; detail: string }>;
+  warnings: string[];
+}
+
 export interface TestMenu {
   id: string;
-  project: "client" | "APP";
+  project: string;
+  projectPath: string;
+  projectKind: TestProject["projectKind"];
   name: string;
   route: string;
   sourcePath: string;
   caseId?: string;
+  hasCaseFile: boolean;
+  caseFilePath?: string;
+  canCreateCaseFile: boolean;
   capabilities: TestCapabilities;
   tested: boolean;
-  latestStatus?: "passed" | "failed";
+  latestStatus?: TestRunStatus;
   latestTime?: string;
   latestReportPath?: string;
 }
@@ -672,21 +724,37 @@ export interface TestMenu {
 export interface TestRun {
   id: string;
   menuId: string;
-  project: "client" | "APP";
+  project: string;
+  projectPath: string;
   menuName: string;
-  mode: "mock" | "real" | "source-style" | "browser-style";
-  status: "passed" | "failed";
+  mode: TestMode;
+  status: TestRunStatus;
   startedAt: string;
   finishedAt?: string;
   reportMarkdown: string;
   sourceReportPath?: string;
   outputExcerpt: string;
   errorMessage: string;
+  selectedScenarios: string[];
+  scenarioResults: TestScenarioResult[];
+  artifacts: TestArtifact[];
+  totalCount: number;
+  passedCount: number;
+  failedCount: number;
+  skippedCount: number;
+  durationMs: number;
+  exitCode?: number;
+  environmentSummary: string;
+  cleanupStatus: "not-applicable" | "completed" | "failed" | "unknown";
 }
 
 export interface StartTestOptions {
+  projectPath: string;
   menuId: string;
-  mode: TestRun["mode"];
+  mode: TestMode;
+  selectedScenarios: string[];
+  createCaseFile?: boolean;
+  confirmedRealWrite?: boolean;
   account?: string;
   token?: string;
   useEnvironmentToken?: boolean;
@@ -967,6 +1035,7 @@ export interface KnowledgeCodexJob {
 export interface TestRecommendation {
   menuId: string;
   project: string;
+  projectPath: string;
   menuName: string;
   changedFiles: string[];
   reason: string;
@@ -1439,16 +1508,20 @@ export async function askKnowledge(question: string): Promise<KnowledgeAnswer> {
   return invoke<KnowledgeAnswer>("ask_knowledge", { question });
 }
 
-export async function listTestMenus(): Promise<TestMenu[]> {
-  return invoke<TestMenu[]>("list_test_menus");
+export async function listTestProjects(): Promise<TestProject[]> {
+  return invoke<TestProject[]>("list_test_projects");
 }
 
-export async function recommendTestsFromGit(): Promise<TestRecommendation[]> {
-  return invoke<TestRecommendation[]>("recommend_tests_from_git");
+export async function listTestMenus(projectPath?: string): Promise<TestMenu[]> {
+  return invoke<TestMenu[]>("list_test_menus", { projectPath: projectPath || null });
 }
 
-export async function listTestRuns(menuId?: string): Promise<TestRun[]> {
-  return invoke<TestRun[]>("list_test_runs", { menuId });
+export async function recommendTestsFromGit(projectPath?: string): Promise<TestRecommendation[]> {
+  return invoke<TestRecommendation[]>("recommend_tests_from_git", { projectPath: projectPath || null });
+}
+
+export async function listTestRuns(menuId?: string, projectPath?: string): Promise<TestRun[]> {
+  return invoke<TestRun[]>("list_test_runs", { menuId, projectPath: projectPath || null });
 }
 
 export async function readTestReport(path: string): Promise<string> {
@@ -1457,6 +1530,30 @@ export async function readTestReport(path: string): Promise<string> {
 
 export async function startTestRun(options: StartTestOptions): Promise<TestRun> {
   return invoke<TestRun>("start_test_run", { options });
+}
+
+export async function getTestRun(runId: string): Promise<TestRun> {
+  return invoke<TestRun>("get_test_run", { runId });
+}
+
+export async function cancelTestRun(runId: string): Promise<TestRun> {
+  return invoke<TestRun>("cancel_test_run", { runId });
+}
+
+export async function listTestScenarios(projectPath: string, menuId: string, mode: TestMode): Promise<TestScenario[]> {
+  return invoke<TestScenario[]>("list_test_scenarios", { projectPath, menuId, mode });
+}
+
+export async function preflightTest(options: StartTestOptions): Promise<TestPreflight> {
+  return invoke<TestPreflight>("preflight_test", { options });
+}
+
+export async function readTestArtifact(runId: string, path: string): Promise<string> {
+  return invoke<string>("read_test_artifact", { runId, path });
+}
+
+export async function exportTestReportPdf(runId: string): Promise<string> {
+  return invoke<string>("export_test_report_pdf", { runId });
 }
 
 export async function syncFeatureParity(): Promise<ParitySyncSummary> {

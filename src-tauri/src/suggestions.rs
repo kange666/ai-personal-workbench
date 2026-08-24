@@ -258,6 +258,10 @@ pub fn sync_task_suggestions_for_state(
                 .map_err(|cause| cause.to_string())?;
             continue;
         }
+        if status != "failed" {
+            // 环境阻塞、执行异常和人工取消不等同于业务缺陷，不自动生成整改任务。
+            continue;
+        }
         let note = format!(
             "最近一次测试失败：{}。请先查看测试报告中的问题、可能原因、建议检查和建议验证。",
             clean_title(&error)

@@ -1,26 +1,29 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { ensureWeeklyAudit, isTauriRuntime, listFeatureParity, listTestMenus, listTestRuns, listToolchains, listWeeklyAudits, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestRecommendation, type TestRun, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
+import { cancelTestRun, ensureWeeklyAudit, getTestRun, isTauriRuntime, listFeatureParity, listTestMenus, listTestProjects, listTestRuns, listTestScenarios, listToolchains, listWeeklyAudits, preflightTest, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestPreflight, type TestProject, type TestRecommendation, type TestRun, type TestScenario, type TestMode, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
+import TestReportDialog from "../components/TestReportDialog.vue";
 
 const demoMenus: TestMenu[] = [
-  { id: "client:safe-responsibility", project: "client", name: "安全责任", route: "/safetyManagement/safeResponsibility", sourcePath: "src/views/safe/safetyManagement/safeResponsibility/index.vue", caseId: "safe-responsibility", capabilities: { mock: true, realApi: true, sourceStyle: true, browserStyle: true }, tested: true, latestStatus: "passed", latestTime: "2026-07-21T17:36:51+08:00" },
-  { id: "app:pages/mainPackage/tabbar/index", project: "APP", name: "首页", route: "/pages/mainPackage/tabbar/index", sourcePath: "pages/mainPackage/tabbar/index.vue", capabilities: { mock: false, realApi: false, sourceStyle: true, browserStyle: false }, tested: false },
+  { id: "project:safe-responsibility", project: "client", projectPath: "F:/TB-project/client", projectKind: "vue", name: "安全责任", route: "/safetyManagement/safeResponsibility", sourcePath: "src/views/safe/safetyManagement/safeResponsibility/index.vue", caseId: "safe-responsibility", hasCaseFile: true, canCreateCaseFile: false, capabilities: { mock: true, realApi: true, sourceStyle: true, browserStyle: true }, tested: true, latestStatus: "failed", latestTime: "2026-08-24T14:21:18+08:00" },
+  { id: "project:inspection-plan", project: "client", projectPath: "F:/TB-project/client", projectKind: "vue", name: "检查计划", route: "/safetyManagement/inspectionPlan", sourcePath: "src/views/safe/safetyManagement/inspectionPlan/index.vue", hasCaseFile: false, canCreateCaseFile: true, capabilities: { mock: false, realApi: false, sourceStyle: true, browserStyle: false }, tested: false },
 ];
-const demoRuns: TestRun[] = [{ id:"demo-run", menuId:"client:safe-responsibility", project:"client", menuName:"安全责任", mode:"mock", status:"passed", startedAt:"2026-08-04T14:20:00+08:00", finishedAt:"2026-08-04T14:21:18+08:00", reportMarkdown:"# 测试结论\n\n✅ 安全责任菜单核心功能测试通过。\n\n## 覆盖范围\n\n- ✅ 页面加载与查询条件\n- ✅ 新增、编辑和详情弹窗\n- ✅ 表格分页和行操作\n\n## 执行信息\n\n- 使用项目已有菜单用例\n- 使用模拟接口，不写入真实数据\n\n## 命令输出\n\n```text\n3 tests passed\nDuration: 78s\n```", outputExcerpt:"3 tests passed", errorMessage:"" }];
+const demoRuns: TestRun[] = [{ id:"demo-run", menuId:"project:safe-responsibility", project:"client", projectPath:"F:/TB-project/client", menuName:"安全责任", mode:"browser-style", status:"failed", startedAt:"2026-08-24T14:20:00+08:00", finishedAt:"2026-08-24T14:21:18+08:00", reportMarkdown:"# 测试结论", outputExcerpt:"1 passed · 1 failed", errorMessage:"点击搜索后列表没有刷新", selectedScenarios:["页面基础区域正常显示","搜索结果正确刷新"], scenarioResults:[{id:"scenario-1",title:"搜索结果正确刷新",status:"failed",durationMs:980,purpose:"确认输入关键词并点击搜索后，页面会发起请求并刷新列表。",steps:["进入安全责任页面","输入责任单位关键词","点击搜索按钮"],checks:["筛选参数正确传递","列表只显示匹配结果"],errorMessage:"等待列表刷新超时：点击搜索后没有观察到接口请求。",artifacts:[{name:"搜索失败页面",path:"/src/assets/app-logo.png",contentType:"image/png",kind:"screenshot"}]},{id:"scenario-2",title:"页面基础区域正常显示",status:"passed",durationMs:220,purpose:"确认页面核心区域可以正常显示。",steps:["进入页面"],checks:["标题和列表可见"],errorMessage:"",artifacts:[]}], artifacts:[{name:"搜索失败页面",path:"/src/assets/app-logo.png",contentType:"image/png",kind:"screenshot"}], totalCount:2,passedCount:1,failedCount:1,skippedCount:0,durationMs:1200,exitCode:1,environmentSummary:"浏览器预览示例 · Node + Playwright",cleanupStatus:"not-applicable" }];
 const store = useWorkbenchStore();
 const route = useRoute();
 const menus = ref<TestMenu[]>(isTauriRuntime() ? [] : demoMenus);
 const runs = ref<TestRun[]>(isTauriRuntime() ? [] : demoRuns);
+const projects = ref<TestProject[]>(isTauriRuntime() ? [] : [{ path:"F:/TB-project/client", name:"client", projectKind:"vue", caseCount:1, pageCount:2, capabilities:{mock:true,realApi:true,sourceStyle:true,browserStyle:true}, warnings:[] }]);
+const selectedProjectPath = ref(projects.value[0]?.path || "");
 const recommendations = ref<TestRecommendation[]>([]);
 const parities = ref<FeatureParity[]>([]);
-const activeSection = ref<"menus" | "parity" | "audit">("menus");
+const activeSection = ref<"menus" | "history" | "parity" | "audit">("menus");
 const selectedParity = ref<FeatureParity | null>(null);
 const toolchains = ref<ToolchainInventory>({installations:[],conflicts:[]});
 const audits = ref<WeeklyAudit[]>([]);
 const projectFilter = ref<"all" | "client" | "APP">("all");
-const statusFilter = ref<"all" | "tested" | "untested" | "passed" | "failed">("all");
+const statusFilter = ref<"all" | "tested" | "untested" | "passed" | "failed" | "blocked">("all");
 const typeFilter = ref<"all" | "functional" | "style">("all");
 const query = ref("");
 const parityQuery = ref("");
@@ -34,11 +37,21 @@ const configuring = ref<TestMenu | null>(null);
 const reportTitle = ref("");
 const reportContent = ref("");
 const activeReportRun = ref<TestRun | null>(null);
-const activeReportStatus = ref<"passed" | "failed" | "unknown">("unknown");
 const useEnvironmentToken = ref(true);
+const confirmedRealWrite = ref(false);
 const account = ref("");
 const token = ref("");
-const mode = ref<TestRun["mode"]>("mock");
+const mode = ref<TestMode>("mock");
+const createCaseFile = ref(false);
+const scenarios = ref<TestScenario[]>([]);
+const selectedScenarios = ref<string[]>([]);
+const preflight = ref<TestPreflight | null>(null);
+const scenarioLoading = ref(false);
+const selectedRecommendations = ref<string[]>([]);
+const batchRunning = ref(false);
+const testRunning = ref(false);
+const cancellingTest = ref(false);
+const activeRunningRun = ref<TestRun | null>(null);
 const verificationKinds: RegressionEvidence["verificationType"][] = ["static", "api", "browser"];
 const parityPlatforms: Array<"PC" | "APP"> = ["PC", "APP"];
 
@@ -53,11 +66,11 @@ function parityLabel(status: FeatureParity["parityStatus"]) {
 }
 
 const filteredMenus = computed(() => menus.value.filter((menu) => {
-  if (projectFilter.value !== "all" && menu.project !== projectFilter.value) return false;
   if (statusFilter.value === "tested" && !menu.tested) return false;
   if (statusFilter.value === "untested" && menu.tested) return false;
   if (statusFilter.value === "passed" && menu.latestStatus !== "passed") return false;
   if (statusFilter.value === "failed" && menu.latestStatus !== "failed") return false;
+  if (statusFilter.value === "blocked" && !["blocked", "error", "cancelled"].includes(menu.latestStatus || "")) return false;
   if (typeFilter.value === "functional" && !menu.capabilities.mock) return false;
   if (typeFilter.value === "style" && !menu.capabilities.sourceStyle) return false;
   return !query.value.trim() || `${menu.name} ${menu.route} ${menu.sourcePath}`.toLowerCase().includes(query.value.trim().toLowerCase());
@@ -67,8 +80,9 @@ const stats = computed(() => ({
   tested: menus.value.filter((menu) => menu.tested).length,
   passed: menus.value.filter((menu) => menu.latestStatus === "passed").length,
   failed: menus.value.filter((menu) => menu.latestStatus === "failed").length,
+  blocked: menus.value.filter((menu) => ["blocked", "error", "cancelled"].includes(menu.latestStatus || "")).length,
 }));
-const projectCounts = computed(() => ({ client: menus.value.filter(menu=>menu.project==="client").length, app: menus.value.filter(menu=>menu.project==="APP").length }));
+const selectedProject = computed(() => projects.value.find((item) => item.path === selectedProjectPath.value));
 const parityDomains = computed(() => ["全部领域", ...new Set(parities.value.map(item=>item.domain).filter(Boolean))]);
 const parityStats = computed(() => ({
   total: parities.value.length,
@@ -113,38 +127,82 @@ function modeLabel(value: TestRun["mode"]) {
 }
 function statusLabel(menu: TestMenu) {
   if (!menu.tested) return "未测试";
-  return menu.latestStatus === "passed" ? "通过" : "未通过";
+  return ({ passed:"通过", failed:"未通过", blocked:"环境阻塞", error:"执行异常", cancelled:"已取消", queued:"等待中", running:"执行中" } as const)[menu.latestStatus || "blocked"];
 }
 function formatTime(value?: string) {
   return value ? new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "—";
 }
 function localDate(value: string) { return new Date(value).toLocaleDateString("sv-SE"); }
-function availableModes(menu: TestMenu): TestRun["mode"][] {
-  const values: TestRun["mode"][] = [];
-  if (menu.capabilities.mock) values.push("mock");
-  if (menu.capabilities.realApi) values.push("real");
-  if (menu.capabilities.sourceStyle) values.push("source-style");
-  if (menu.capabilities.browserStyle) values.push("browser-style");
+function wait(milliseconds: number) { return new Promise(resolve => window.setTimeout(resolve, milliseconds)); }
+async function waitForTestCompletion(initial: TestRun): Promise<TestRun> {
+  let current = initial;
+  const deadline = Date.now() + 60 * 60 * 1000;
+  while (["queued", "running"].includes(current.status)) {
+    if (Date.now() > deadline) throw new Error("测试运行超过 60 分钟，工作台已停止等待；测试进程可能仍在后台运行。");
+    await wait(650);
+    current = await getTestRun(current.id);
+    activeRunningRun.value = current;
+  }
+  return current;
+}
+function availableModes(menu: TestMenu): TestMode[] {
+  const values: TestMode[] = [];
+  const capabilities = menu.hasCaseFile || !createCaseFile.value ? menu.capabilities : selectedProject.value?.capabilities || menu.capabilities;
+  if (capabilities.mock) values.push("mock");
+  if (capabilities.realApi) values.push("real");
+  if (capabilities.sourceStyle) values.push("source-style");
+  if (capabilities.browserStyle) values.push("browser-style");
   return values;
 }
-function openConfig(menu: TestMenu) {
-  configuring.value = menu;
-  mode.value = menu.project === "APP" ? "source-style" : "mock";
-  account.value = ""; token.value = ""; useEnvironmentToken.value = true; error.value = ""; message.value = "";
+async function loadScenarios() {
+  if (!configuring.value || !selectedProjectPath.value) return;
+  scenarioLoading.value = true; preflight.value = null;
+  try {
+    scenarios.value = isTauriRuntime() ? await listTestScenarios(selectedProjectPath.value, configuring.value.id, mode.value) : [{id:"scenario-1",title:"页面基础区域正常显示",description:"确认页面核心区域可以正常显示。",mode:mode.value,defaultSelected:true}];
+    selectedScenarios.value = scenarios.value.filter(item => item.defaultSelected).map(item => item.title);
+  } catch (cause) { scenarios.value = []; selectedScenarios.value = []; error.value = String(cause); }
+  finally { scenarioLoading.value = false; }
 }
-function openRecommendation(item:TestRecommendation) {
+async function openConfig(menu: TestMenu) {
+  configuring.value = menu;
+  createCaseFile.value = false;
+  const values = availableModes(menu);
+  mode.value = menu.hasCaseFile && values.includes("mock") ? "mock" : "source-style";
+  account.value = ""; token.value = ""; useEnvironmentToken.value = true; confirmedRealWrite.value = false; error.value = ""; message.value = "";
+  await loadScenarios();
+}
+async function openRecommendation(item:TestRecommendation) {
   const menu=menus.value.find(value=>value.id===item.menuId);
   if (!menu) return;
-  openConfig(menu);
+  await openConfig(menu);
   mode.value=item.recommendedMode;
+  await loadScenarios();
 }
 async function refresh() {
   if (!isTauriRuntime()) return;
+  const availableProjects = await listTestProjects();
+  projects.value = availableProjects;
+  if (!availableProjects.some(item => item.path === selectedProjectPath.value)) selectedProjectPath.value = availableProjects[0]?.path || "";
   const paritySummary = await syncFeatureParity();
   paritySourceMessage.value = paritySummary.sourceMessage;
   await ensureWeeklyAudit();
-  [menus.value, runs.value, parities.value, toolchains.value, audits.value, recommendations.value] = await Promise.all([listTestMenus(), listTestRuns(), listFeatureParity(), listToolchains(), listWeeklyAudits(), recommendTestsFromGit()]);
+  [menus.value, runs.value, parities.value, toolchains.value, audits.value, recommendations.value] = await Promise.all([
+    selectedProjectPath.value ? listTestMenus(selectedProjectPath.value) : Promise.resolve([]),
+    selectedProjectPath.value ? listTestRuns(undefined, selectedProjectPath.value) : Promise.resolve([]),
+    listFeatureParity(), listToolchains(), listWeeklyAudits(),
+    selectedProjectPath.value ? recommendTestsFromGit(selectedProjectPath.value) : Promise.resolve([]),
+  ]);
   if (!toolchains.value.installations.length) toolchains.value = await scanToolchains();
+}
+
+async function refreshSelectedProject() {
+  if (!isTauriRuntime() || !selectedProjectPath.value) return;
+  loading.value = true; error.value = "";
+  try {
+    [menus.value, runs.value, recommendations.value] = await Promise.all([listTestMenus(selectedProjectPath.value), listTestRuns(undefined, selectedProjectPath.value), recommendTestsFromGit(selectedProjectPath.value)]);
+    selectedRecommendations.value = [];
+  } catch (cause) { error.value = String(cause); }
+  finally { loading.value = false; }
 }
 async function runAudit() {
   if (!isTauriRuntime() || loading.value) return;
@@ -169,23 +227,39 @@ async function saveParity(feature: FeatureParity) {
   finally { loading.value = false; }
 }
 async function runTest() {
-  if (!configuring.value || loading.value) return;
-  loading.value = true; error.value = ""; message.value = "";
-  const options: StartTestOptions = { menuId: configuring.value.id, mode: mode.value, account: account.value.trim() || undefined, token: token.value || undefined, useEnvironmentToken: useEnvironmentToken.value };
+  if (!configuring.value || loading.value || testRunning.value) return;
+  testRunning.value = true; cancellingTest.value = false; error.value = ""; message.value = "";
+  const options: StartTestOptions = { projectPath: selectedProjectPath.value, menuId: configuring.value.id, mode: mode.value, selectedScenarios: [...selectedScenarios.value], createCaseFile: createCaseFile.value, confirmedRealWrite: confirmedRealWrite.value, account: account.value.trim() || undefined, token: token.value || undefined, useEnvironmentToken: useEnvironmentToken.value };
   token.value = "";
   try {
     if (!isTauriRuntime()) throw new Error("浏览器预览只能查看界面，请在桌面开发版中运行测试。");
-    const run = await startTestRun(options);
+    preflight.value = await preflightTest(options);
+    const queued = await startTestRun(options);
+    activeRunningRun.value = queued;
+    const run = await waitForTestCompletion(queued);
     activeReportRun.value = run;
-    activeReportStatus.value = run.status;
     reportTitle.value = `${run.menuName} · ${modeLabel(run.mode)}`;
     reportContent.value = run.reportMarkdown;
-    message.value = run.status === "passed" ? "测试已完成并通过，报告已保存。" : "测试已完成但未通过，请查看报告中的失败项。";
+    message.value = run.status === "passed" ? "测试已完成并通过，报告已保存。" : run.status === "blocked" ? "测试未启动：执行前环境检查未通过。" : "测试已完成但未通过，请查看问题场景。";
     configuring.value = null;
-    await refresh();
+    activeRunningRun.value = null;
+    await refreshSelectedProject();
     await store.hydrate();
   } catch (cause) { error.value = String(cause); }
-  finally { loading.value = false; }
+  finally { testRunning.value = false; cancellingTest.value = false; }
+}
+
+async function cancelCurrentTest() {
+  const run = activeRunningRun.value;
+  if (!run || cancellingTest.value) return;
+  cancellingTest.value = true; error.value = "";
+  try {
+    await cancelTestRun(run.id);
+    message.value = "已发送取消指令，正在等待测试进程安全结束并保存记录。";
+  } catch (cause) {
+    error.value = String(cause);
+    cancellingTest.value = false;
+  }
 }
 async function openReport(menu: TestMenu) {
   error.value = "";
@@ -193,7 +267,6 @@ async function openReport(menu: TestMenu) {
   try {
     reportTitle.value = `${menu.name} · 最近测试报告`;
     activeReportRun.value = run || null;
-    activeReportStatus.value = run?.status || menu.latestStatus || "unknown";
     if (run) reportContent.value = run.reportMarkdown;
     else if (menu.latestReportPath && isTauriRuntime()) reportContent.value = await readTestReport(menu.latestReportPath);
     else reportContent.value = "当前菜单还没有可查看的测试报告。";
@@ -202,11 +275,43 @@ async function openReport(menu: TestMenu) {
 
 function openRun(run: TestRun) {
   activeReportRun.value = run;
-  activeReportStatus.value = run.status;
   reportTitle.value = `${run.menuName} · ${modeLabel(run.mode)}`;
   reportContent.value = run.reportMarkdown || run.errorMessage || "该次测试没有可显示的报告内容。";
 }
-function closeReport() { reportContent.value=""; activeReportRun.value=null; activeReportStatus.value="unknown"; }
+function closeReport() { reportContent.value=""; activeReportRun.value=null; }
+
+function toggleAllScenarios(checked: boolean) {
+  selectedScenarios.value = checked ? scenarios.value.map(item => item.title) : [];
+}
+function onToggleAllScenarios(event: Event) { toggleAllScenarios((event.target as HTMLInputElement).checked); }
+
+async function runRecommendedBatch() {
+  if (batchRunning.value || !selectedRecommendations.value.length) return;
+  batchRunning.value = true; error.value = ""; message.value = "";
+  let completed = 0; let failed = 0;
+  try {
+    for (const menuId of selectedRecommendations.value) {
+      const recommendation = recommendations.value.find(item => item.menuId === menuId);
+      const menu = menus.value.find(item => item.id === menuId);
+      if (!recommendation || !menu || !menu.hasCaseFile) { failed += 1; continue; }
+      const available = await listTestScenarios(selectedProjectPath.value, menuId, recommendation.recommendedMode);
+      const queued = await startTestRun({ projectPath:selectedProjectPath.value, menuId, mode:recommendation.recommendedMode, selectedScenarios:available.map(item=>item.title), useEnvironmentToken:true });
+      const run = await waitForTestCompletion(queued);
+      completed += 1; if (run.status !== "passed") failed += 1;
+      activeReportRun.value = run; reportTitle.value = `${run.menuName} · ${modeLabel(run.mode)}`; reportContent.value = run.reportMarkdown;
+    }
+    message.value = `推荐测试完成：执行 ${completed} 项，${failed} 项需要处理或未能执行。`;
+    await refreshSelectedProject();
+  } catch (cause) { error.value = String(cause); }
+  finally { batchRunning.value = false; }
+}
+
+watch(mode, () => { if (configuring.value) void loadScenarios(); });
+watch(createCaseFile, (enabled) => {
+  if (!configuring.value || !enabled) return;
+  const values = availableModes(configuring.value);
+  if (!values.includes(mode.value)) mode.value = values[0] || "source-style";
+});
 
 onMounted(async () => {
   loading.value = true;
@@ -223,15 +328,20 @@ onMounted(async () => {
 
 <template>
   <div class="view testing-view">
-    <header class="page-header"><div><h1>测试中心</h1><p>复用项目已有用例，并将 PC 与 APP 的静态、接口、浏览器证据分层记录</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">↻ 刷新菜单、矩阵与报告</button></div></header>
+    <header class="page-header testing-page-header"><div><div class="testing-title-row"><h1>测试中心</h1><select v-model="selectedProjectPath" :disabled="loading" @change="refreshSelectedProject"><option v-if="!projects.length" value="">项目资产中暂无项目</option><option v-for="item in projects" :key="item.path" :value="item.path">{{ item.name }} · {{ item.projectKind }}</option></select></div><p>选择项目资产中的本地项目，分层记录静态、接口与浏览器测试证据</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">↻ 刷新项目、矩阵与报告</button></div></header>
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
-    <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">菜单自动化测试</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button><button :class="{active:activeSection==='audit'}" @click="activeSection='audit'">系统周检与工具链</button></div>
-    <section v-if="activeSection==='menus'" class="metric-grid testing-metrics"><article class="clickable-card" @click="statusFilter='all'"><span>菜单 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article></section>
-    <section v-if="activeSection==='menus' && recommendations.length" class="panel test-recommendations"><header><div><b>根据 Git 变更推荐测试</b><p>读取 client / APP 当前工作区和最近一次提交，只推荐能与现有菜单源码直接对应的测试。</p></div><span>{{ recommendations.length }} 项</span></header><div><article v-for="item in recommendations.slice(0,8)" :key="item.menuId"><span class="project-badge" :class="item.project.toLowerCase()">{{ item.project }}</span><div><b>{{ item.menuName }}</b><small>{{ item.reason }} · {{ item.changedFiles.slice(0,2).join('、') }}</small></div><button class="button primary small" @click="openRecommendation(item)">按建议测试</button></article></div></section>
+    <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">功能 / 页面测试</button><button :class="{active:activeSection==='history'}" @click="activeSection='history'">测试历史</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button><button :class="{active:activeSection==='audit'}" @click="activeSection='audit'">系统周检与工具链</button></div>
+    <section v-if="activeSection==='menus'" class="metric-grid testing-metrics testing-metrics-v2"><article class="clickable-card" @click="statusFilter='all'"><span>功能 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='blocked'"><span>环境 / 执行问题</span><b>{{ stats.blocked }}</b><p :class="stats.blocked ? 'warning-text' : ''">● 点击筛选</p></article></section>
+    <section v-if="activeSection==='menus' && recommendations.length" class="panel test-recommendations"><header><div><b>根据 Git 变更推荐测试</b><p>只推荐与当前项目页面源码直接关联的测试；可勾选多项顺序执行。</p></div><div class="recommendation-actions"><span>{{ recommendations.length }} 项</span><button class="button primary small" :disabled="batchRunning || !selectedRecommendations.length" @click="runRecommendedBatch">{{ batchRunning ? '执行中…' : `执行已选 ${selectedRecommendations.length} 项` }}</button></div></header><div><article v-for="item in recommendations.slice(0,8)" :key="item.menuId"><input v-model="selectedRecommendations" type="checkbox" :value="item.menuId"><span class="project-badge">{{ item.project }}</span><div><b>{{ item.menuName }}</b><small>{{ item.reason }} · {{ item.changedFiles.slice(0,2).join('、') }}</small></div><button class="button secondary small" @click="openRecommendation(item)">配置</button></article></div></section>
     <section v-if="activeSection==='menus'" class="panel testing-panel">
-      <div class="testing-toolbar"><label>⌕<input v-model="query" placeholder="搜索菜单名称、路由或源码路径"></label><select v-model="projectFilter"><option value="all">全部项目</option><option value="client">client</option><option value="APP">APP</option></select><select v-model="statusFilter"><option value="all">全部状态</option><option value="tested">已测试</option><option value="untested">未测试</option><option value="passed">最近通过</option><option value="failed">最近未通过</option></select><select v-model="typeFilter"><option value="all">全部能力</option><option value="functional">已有功能用例</option><option value="style">页面 / 样式检查</option></select></div>
-      <div class="testing-note"><b>执行边界</b><span>当前读取 client {{ projectCounts.client }} 个已有菜单用例、APP {{ projectCounts.app }} 个 pages.json 注册页面。项目目录不存在时列表为空；真实接口测试可能创建、修改和清理 E2E 前缀测试数据，默认不启用。</span></div>
-      <div class="test-table-wrap"><table class="test-table"><thead><tr><th>项目</th><th>功能菜单 / 页面</th><th>已有测试能力</th><th>最近结果</th><th>测试报告</th><th>操作</th></tr></thead><tbody><tr v-for="menu in filteredMenus" :key="menu.id"><td><span class="project-badge" :class="menu.project.toLowerCase()">{{ menu.project }}</span></td><td><b>{{ menu.name }}</b><small>{{ menu.route }}</small><em>{{ menu.sourcePath }}</em></td><td><div class="capability-tags"><span v-if="menu.capabilities.mock">功能用例</span><span v-if="menu.capabilities.realApi">真实接口</span><span v-if="menu.capabilities.sourceStyle">源码 / 样式</span><span v-if="menu.capabilities.browserStyle">浏览器样式</span><span v-if="!menu.caseId" class="muted">暂无交互用例</span></div></td><td><span class="test-status" :class="menu.latestStatus || 'untested'">{{ statusLabel(menu) }}</span><small>{{ formatTime(menu.latestTime) }}</small></td><td><button class="text-button" :disabled="!menu.tested" @click="openReport(menu)">{{ menu.tested ? '查看报告' : '暂无报告' }}</button></td><td><button class="button primary small" :disabled="loading" @click="openConfig(menu)">▶ 测试</button></td></tr></tbody></table><div v-if="!filteredMenus.length" class="empty-state"><b>没有符合条件的菜单</b><p>请调整项目、状态、测试能力或关键词筛选。</p></div></div>
+      <div class="testing-toolbar testing-toolbar-v2"><label>⌕<input v-model="query" placeholder="搜索功能名称、路由或源码路径"></label><select v-model="statusFilter"><option value="all">全部状态</option><option value="tested">已测试</option><option value="untested">未测试</option><option value="passed">最近通过</option><option value="failed">最近未通过</option><option value="blocked">环境 / 执行问题</option></select><select v-model="typeFilter"><option value="all">全部能力</option><option value="functional">已有功能用例</option><option value="style">页面 / 样式检查</option></select></div>
+      <div class="testing-note"><b>当前项目</b><span>{{ selectedProject?.name || '尚未选择' }} · {{ selectedProjectPath || '请先在项目资产中扫描本地项目' }}。缺少菜单用例的页面可以在测试配置中勾选“添加测试文件”；不会覆盖同名文件。</span></div>
+      <div class="test-table-wrap"><table class="test-table"><thead><tr><th>配置</th><th>功能 / 页面</th><th>可用测试能力</th><th>最近结果</th><th>测试报告</th><th>操作</th></tr></thead><tbody><tr v-for="menu in filteredMenus" :key="menu.id"><td><span class="project-badge" :class="{app:menu.projectKind==='uni-app'}">{{ menu.hasCaseFile ? '已有用例' : '仅页面' }}</span></td><td><b>{{ menu.name }}</b><small>{{ menu.route }}</small><em>{{ menu.sourcePath }}</em></td><td><div class="capability-tags"><span v-if="menu.capabilities.mock">模拟接口</span><span v-if="menu.capabilities.realApi">真实接口</span><span v-if="menu.capabilities.sourceStyle">源码 / 样式</span><span v-if="menu.capabilities.browserStyle">浏览器样式</span><span v-if="!menu.hasCaseFile" class="muted">可选择添加测试配置</span></div></td><td><span class="test-status" :class="menu.latestStatus || 'untested'">{{ statusLabel(menu) }}</span><small>{{ formatTime(menu.latestTime) }}</small></td><td><button class="text-button" :disabled="!menu.tested" @click="openReport(menu)">{{ menu.tested ? '查看报告' : '暂无报告' }}</button></td><td><button class="button primary small" :disabled="loading" @click="openConfig(menu)">▶ 测试</button></td></tr></tbody></table><div v-if="!filteredMenus.length" class="empty-state"><b>没有符合条件的功能或页面</b><p>请调整状态、测试能力或关键词筛选；也可以先在项目资产中扫描项目。</p></div></div>
+    </section>
+
+    <section v-else-if="activeSection==='history'" class="panel test-history-panel">
+      <header><div><small>REGRESSION HISTORY</small><h2>测试历史与回归</h2><p>同一项目的每次执行独立保留；环境阻塞与业务失败分开显示。</p></div><span>{{ runs.length }} 条记录</span></header>
+      <div class="history-table-wrap"><table><thead><tr><th>时间</th><th>功能 / 页面</th><th>测试类型</th><th>结果</th><th>场景</th><th>耗时</th><th></th></tr></thead><tbody><tr v-for="run in runs" :key="run.id"><td>{{ new Date(run.startedAt).toLocaleString('zh-CN') }}</td><td><b>{{ run.menuName }}</b><small>{{ run.project }}</small></td><td>{{ modeLabel(run.mode) }}</td><td><span class="test-status" :class="run.status">{{ run.status==='passed'?'通过':run.status==='failed'?'未通过':run.status==='blocked'?'环境阻塞':run.status==='error'?'执行异常':run.status==='cancelled'?'已取消':'执行中' }}</span></td><td>{{ run.passedCount }} / {{ run.totalCount }} 通过</td><td>{{ run.durationMs < 1000 ? `${run.durationMs} ms` : `${(run.durationMs/1000).toFixed(1)} 秒` }}</td><td><button class="text-button" @click="openRun(run)">查看报告</button></td></tr></tbody></table><div v-if="!runs.length" class="empty-state"><b>当前项目还没有测试记录</b><p>运行一次页面测试后，历史结果会显示在这里。</p></div></div>
     </section>
 
     <section v-else-if="activeSection==='parity'" class="panel parity-panel">
@@ -260,16 +370,38 @@ onMounted(async () => {
       <footer class="parity-review"><label>核对结论<select v-model="selectedParity.parityStatus"><option value="static-aligned">已匹配，待实际测试</option><option value="confirmed">人工确认一致</option><option value="different">存在差异</option><option value="pc-only">仅 PC 存在</option><option value="app-only">仅 APP 存在</option><option value="pending">待核对</option></select></label><label class="check-row"><input v-model="selectedParity.intentionalDifference" type="checkbox">差异属于有意设计</label><button class="button primary" :disabled="loading" @click="saveParity(selectedParity)">保存人工核对</button></footer>
     </section></div>
 
-    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && (configuring = null)"><section class="panel test-config-dialog"><header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading" @click="configuring = null">×</button></header><div class="test-config-body"><label>测试类型<select v-model="mode"><option v-for="value in availableModes(configuring)" :key="value" :value="value">{{ modeLabel(value) }}</option></select></label><div v-if="mode === 'real'" class="real-test-warning"><b>真实接口写入提醒</b><p>现有 client 真实用例会创建、修改或删除 E2E 前缀测试数据，并在结束时尝试清理。只有确认测试环境允许写入时才执行。</p></div><label v-if="mode === 'real'" class="check-row"><input v-model="useEnvironmentToken" type="checkbox">读取 Windows 用户环境变量 HLZT_TOKEN</label><label v-if="mode === 'real' && !useEnvironmentToken">临时 Token<input v-model="token" type="password" autocomplete="off" placeholder="只传给本次测试子进程，不保存"></label><label v-if="mode === 'real'">测试账号（可选）<input v-model="account" autocomplete="off" placeholder="仅传给支持 E2E_TEST_ACCOUNT 的已有用例"><small>当前多数 client 用例使用 Token 登录；账号字段不会写入数据库。</small></label><div class="reuse-source"><b>复用来源</b><code v-if="configuring.caseId">client/e2e/menu-cases/{{ configuring.caseId }}.json</code><code v-else>APP/pages.json + {{ configuring.sourcePath }}</code></div></div><footer><span>{{ loading ? '正在运行项目现有测试，完成后自动打开报告…' : '测试结果和报告保存在个人工作台本地数据库；凭据不保存。' }}</span><button class="button secondary" :disabled="loading" @click="configuring = null">取消</button><button class="button primary" :disabled="loading" @click="runTest">{{ loading ? '测试中…' : '开始测试' }}</button></footer></section></div>
+    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && !testRunning && (configuring = null)">
+      <section class="panel test-config-dialog test-config-v2">
+        <header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading || testRunning" @click="configuring = null">×</button></header>
+        <div class="test-config-body" :class="{locked:testRunning}">
+          <label v-if="!configuring.hasCaseFile" class="case-create-option"><span><input v-model="createCaseFile" type="checkbox"><b>添加测试文件</b></span><small>将在 {{ configuring.projectPath }}\e2e\menu-cases 中新增 JSON 配置；如果同名文件已经存在会停止，不覆盖原文件。</small></label>
+          <label>测试类型<select v-model="mode"><option v-for="value in availableModes(configuring)" :key="value" :value="value">{{ modeLabel(value) }}</option></select><small v-if="!configuring.hasCaseFile && !createCaseFile">当前没有功能用例，只能执行页面源码与样式检查；勾选添加测试文件后会显示项目运行器实际支持的类型。</small></label>
+          <section class="scenario-selector"><header><div><b>测试场景</b><small>默认全选，可以只运行本次需要核对的场景。</small></div><label><input type="checkbox" :checked="selectedScenarios.length === scenarios.length && scenarios.length > 0" @change="onToggleAllScenarios">全选</label></header><div v-if="scenarioLoading" class="scenario-empty">正在读取项目测试场景…</div><label v-for="item in scenarios" v-else :key="item.id"><input v-model="selectedScenarios" type="checkbox" :value="item.title"><span><b>{{ item.title }}</b><small>{{ item.description }}</small></span></label><div v-if="!scenarioLoading && !scenarios.length" class="scenario-empty">当前测试类型没有可识别的场景，请检查项目运行器。</div></section>
+          <div v-if="mode === 'real'" class="real-test-warning"><b>真实接口写入提醒</b><p>真实用例可能创建、修改或删除 E2E 前缀测试数据，并在结束时尝试清理。只有确认测试环境允许写入时才执行。</p></div>
+          <label v-if="mode === 'real'" class="check-row real-confirm"><input v-model="confirmedRealWrite" type="checkbox">我确认当前是允许写入和清理测试数据的环境</label>
+          <label v-if="mode === 'real'" class="check-row"><input v-model="useEnvironmentToken" type="checkbox">读取 Windows 用户环境变量 HLZT_TOKEN</label>
+          <label v-if="mode === 'real' && !useEnvironmentToken">临时 Token<input v-model="token" type="password" autocomplete="off" placeholder="只传给本次测试子进程，不保存"></label>
+          <label v-if="mode === 'real'">测试账号（可选）<input v-model="account" autocomplete="off" placeholder="仅传给支持 E2E_TEST_ACCOUNT 的已有用例"><small>账号和 Token 都不会写入数据库或报告。</small></label>
+          <div v-if="preflight" class="preflight-list" :class="{ready:preflight.ready}"><b>{{ preflight.ready ? '执行前检查通过' : '执行前检查未通过' }}</b><ul><li v-for="item in preflight.checks" :key="item.name" :class="{passed:item.passed}"><i>{{ item.passed?'✓':'×' }}</i><span>{{ item.name }}<small>{{ item.detail }}</small></span></li></ul></div>
+          <section v-if="testRunning" class="test-run-progress"><header><b>{{ cancellingTest ? '正在取消测试' : '测试正在后台执行' }}</b><span>运行编号 {{ activeRunningRun?.id.slice(0,8) }}</span></header><div><i class="done">✓</i><span><b>执行前检查</b><small>项目、运行器、场景和凭据检查已完成</small></span></div><div><i class="active">2</i><span><b>{{ cancellingTest ? '停止测试进程' : '执行所选场景' }}</b><small>{{ cancellingTest ? '正在终止浏览器及其子进程' : `正在运行 ${activeRunningRun?.totalCount || selectedScenarios.length} 个场景` }}</small></span></div><div><i>3</i><span><b>整理测试报告</b><small>执行结束后自动汇总问题、截图和修复入口</small></span></div></section>
+          <div class="reuse-source"><b>测试来源</b><code v-if="configuring.caseFilePath">{{ configuring.caseFilePath }}</code><code v-else>{{ configuring.sourcePath }}（尚未添加测试配置）</code></div>
+        </div>
+        <footer><span>{{ testRunning ? '运行期间可离开页面，但请不要关闭桌面程序。' : '测试结果保存在工作台本地数据库；真实凭据不会保存。' }}</span><button v-if="testRunning" class="button secondary" :disabled="cancellingTest" @click="cancelCurrentTest">{{ cancellingTest ? '正在取消…' : '停止本次测试' }}</button><button v-else class="button secondary" :disabled="loading" @click="configuring = null">取消</button><button v-if="!testRunning" class="button primary" :disabled="loading || scenarioLoading || !selectedScenarios.length || (mode==='real' && !confirmedRealWrite)" @click="runTest">开始测试 {{ selectedScenarios.length }} 个场景</button></footer>
+      </section>
+    </div>
 
-    <div v-if="reportContent" class="activity-backdrop report-dialog-backdrop" @click.self="closeReport"><section class="panel test-report-dialog designed-report"><header><div><small>TEST REPORT</small><h2>{{ reportTitle }}</h2><p>项目现有测试报告 / 工作台静态检查报告</p></div><div class="report-header-actions"><span class="report-result-pill" :class="activeReportStatus">{{ activeReportStatus === 'passed' ? '✓ 测试通过' : activeReportStatus === 'failed' ? '× 测试未通过' : '— 结果未知' }}</span><button class="icon-button" @click="closeReport">×</button></div></header><div class="report-overview"><article><small>执行结果</small><b :class="activeReportStatus">{{ activeReportStatus === 'passed' ? '通过' : activeReportStatus === 'failed' ? '需处理' : '待确认' }}</b><span>{{ activeReportStatus === 'passed' ? '当前用例达到预期' : activeReportStatus === 'failed' ? '请查看失败项和输出' : '报告未包含明确状态' }}</span></article><article><small>测试方式</small><b>{{ activeReportRun ? modeLabel(activeReportRun.mode) : '已有报告' }}</b><span>{{ activeReportRun?.project || '本地项目' }} · {{ activeReportRun ? formatTime(activeReportRun.startedAt) : '历史记录' }}</span></article><article><small>报告结构</small><b>{{ reportStats.sections }} 个分区</b><span>{{ reportStats.passed }} 个通过标记 · {{ reportStats.failed }} 个失败标记</span></article></div><div class="structured-report-body"><article v-for="(section,index) in reportSections" :key="`${section.title}-${index}`" class="report-section-card"><header><i>{{ String(index+1).padStart(2,'0') }}</i><h3>{{ section.title }}</h3></header><div class="report-section-content"><p v-for="(text,textIndex) in section.paragraphs" :key="textIndex">{{ text }}</p><ul v-if="section.bullets.length"><li v-for="item in section.bullets" :key="item"><span :class="{good:/✅|通过|passed/i.test(item),bad:/❌|失败|未通过|failed/i.test(item)}"></span>{{ item }}</li></ul><pre v-if="section.code.length"><code>{{ section.code.join('\n') }}</code></pre></div></article></div></section></div>
+    <TestReportDialog v-if="reportContent" :run="activeReportRun" :title="reportTitle" :fallback-markdown="reportContent" @close="closeReport" />
   </div>
 </template>
 
 <style scoped>
+.testing-title-row{display:flex;align-items:center;gap:12px}.testing-title-row h1{margin:0}.testing-title-row select{max-width:430px;height:36px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text);padding:0 11px}.testing-metrics-v2{grid-template-columns:repeat(5,minmax(0,1fr))}.testing-toolbar-v2{grid-template-columns:minmax(320px,1fr) 170px 170px}.test-status.blocked,.test-status.cancelled{background:color-mix(in srgb,var(--warning) 13%,transparent);color:var(--warning)}.test-status.error{background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger)}
 .testing-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 .testing-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}.testing-tabs button.active{background:var(--primary);color:#fff}
-.test-recommendations{margin-bottom:14px;padding:16px}.test-recommendations>header{display:flex;justify-content:space-between;gap:12px}.test-recommendations header p{margin:5px 0 0;color:var(--muted)}.test-recommendations>header>span{color:var(--primary);font-weight:800}.test-recommendations>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.test-recommendations article{min-width:0;padding:10px;border:1px solid var(--line);border-radius:9px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;background:var(--surface-2)}.test-recommendations article>div{min-width:0;display:flex;flex-direction:column;gap:5px}.test-recommendations article small{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.test-recommendations{margin-bottom:14px;padding:16px}.test-recommendations>header{display:flex;justify-content:space-between;gap:12px}.test-recommendations header p{margin:5px 0 0;color:var(--muted)}.recommendation-actions{display:flex;align-items:center;gap:10px}.recommendation-actions>span{color:var(--primary);font-weight:800}.test-recommendations>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.test-recommendations article{min-width:0;padding:10px;border:1px solid var(--line);border-radius:9px;display:grid;grid-template-columns:auto auto minmax(0,1fr) auto;align-items:center;gap:9px;background:var(--surface-2)}.test-recommendations article>div{min-width:0;display:flex;flex-direction:column;gap:5px}.test-recommendations article small{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.test-config-v2{width:min(760px,calc(100vw - 50px));max-height:calc(100vh - 60px)}.case-create-option{padding:12px;border:1px solid color-mix(in srgb,var(--primary) 35%,var(--line));border-radius:9px;background:color-mix(in srgb,var(--primary) 6%,transparent)}.case-create-option>span{display:flex;align-items:center;gap:8px;color:var(--text)}.scenario-selector{border:1px solid var(--line);border-radius:10px;overflow:hidden}.scenario-selector>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;background:var(--surface-2)}.scenario-selector>header>div{display:flex;flex-direction:column;gap:4px}.scenario-selector>header small{color:var(--muted)}.scenario-selector>header label{display:flex;align-items:center;gap:6px;white-space:nowrap}.scenario-selector>label{display:grid;grid-template-columns:auto minmax(0,1fr);gap:9px;padding:10px 12px;border-top:1px solid var(--line);cursor:pointer}.scenario-selector>label>span{display:flex;flex-direction:column;gap:4px}.scenario-selector>label small{color:var(--muted);line-height:1.45}.scenario-empty{padding:15px;text-align:center;color:var(--muted)}.real-confirm{font-weight:700;color:var(--danger)!important}.preflight-list{padding:12px;border:1px solid color-mix(in srgb,var(--danger) 35%,var(--line));border-radius:9px;background:color-mix(in srgb,var(--danger) 5%,transparent)}.preflight-list.ready{border-color:color-mix(in srgb,var(--success) 35%,var(--line));background:color-mix(in srgb,var(--success) 5%,transparent)}.preflight-list ul{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:10px 0 0;padding:0;list-style:none}.preflight-list li{display:flex;gap:7px;color:var(--danger)}.preflight-list li.passed{color:var(--success)}.preflight-list li span{display:flex;flex-direction:column}.preflight-list li small{color:var(--muted);line-height:1.4}
+.test-config-body.locked>label,.test-config-body.locked>.scenario-selector,.test-config-body.locked>.real-test-warning{pointer-events:none;opacity:.58}.test-run-progress{display:grid;gap:10px;padding:13px;border:1px solid color-mix(in srgb,var(--primary) 38%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--primary) 6%,transparent)}.test-run-progress>header{display:flex;justify-content:space-between;align-items:center}.test-run-progress>header span{font:11px ui-monospace,monospace;color:var(--muted)}.test-run-progress>div{display:grid;grid-template-columns:26px minmax(0,1fr);align-items:center;gap:9px}.test-run-progress i{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--surface-2);color:var(--muted);font-style:normal;font-size:11px}.test-run-progress i.done{background:color-mix(in srgb,var(--success) 15%,transparent);color:var(--success)}.test-run-progress i.active{background:var(--primary);color:#fff;animation:test-pulse 1.5s ease-in-out infinite}.test-run-progress span{display:flex;flex-direction:column;gap:3px}.test-run-progress small{color:var(--muted)}@keyframes test-pulse{50%{box-shadow:0 0 0 6px color-mix(in srgb,var(--primary) 12%,transparent)}}
+.test-history-panel{padding:18px}.test-history-panel>header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px}.test-history-panel>header small{color:var(--primary);letter-spacing:2px}.test-history-panel h2{margin:5px 0}.test-history-panel header p{margin:0;color:var(--muted)}.test-history-panel>header>span{color:var(--muted)}.history-table-wrap{max-height:650px;overflow:auto;border:1px solid var(--line);border-radius:10px}.history-table-wrap table{width:100%;border-collapse:collapse}.history-table-wrap th{position:sticky;top:0;padding:11px;background:var(--surface-2);text-align:left;color:var(--muted)}.history-table-wrap td{padding:11px;border-top:1px solid var(--line)}.history-table-wrap td:nth-child(2){display:flex;flex-direction:column;gap:4px}.history-table-wrap td:nth-child(2) small{color:var(--muted)}
 .parity-panel{padding:18px}.parity-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0}.parity-overview button{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:var(--muted);cursor:pointer}.parity-overview button:hover,.parity-overview button.active{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 8%,var(--surface))}.parity-overview b{font-size:22px;color:var(--text)}
 .parity-toolbar{display:grid;grid-template-columns:minmax(280px,1fr) 180px 170px auto;gap:10px;align-items:center;margin-bottom:12px}.parity-toolbar label{display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}.parity-toolbar input{width:100%;padding:10px 0;border:0;background:transparent;color:var(--text);outline:0}.parity-toolbar select{padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text)}.parity-toolbar>span{color:var(--muted);font-size:12px;text-align:right}
 .parity-table-wrap{max-height:610px;overflow:auto;border:1px solid var(--line);border-radius:11px}.parity-table{width:100%;border-collapse:collapse}.parity-table th{position:sticky;top:0;z-index:1;padding:11px 12px;background:var(--surface-2);color:var(--muted);text-align:left;font-size:12px}.parity-table td{padding:12px;border-top:1px solid var(--line);vertical-align:middle}.parity-table tbody tr{cursor:pointer}.parity-table tbody tr:hover{background:color-mix(in srgb,var(--primary) 5%,transparent)}.parity-table td:first-child{min-width:180px}.parity-table td:first-child small,.parity-table td:first-child b{display:block}.parity-table td:first-child small{margin-bottom:5px;color:var(--muted)}.parity-table td:nth-child(2),.parity-table td:nth-child(3){max-width:270px}.parity-table td:nth-child(2) span,.parity-table td:nth-child(3) span{display:block;overflow:hidden;color:var(--muted);font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.parity-table span.missing{color:var(--warning)}

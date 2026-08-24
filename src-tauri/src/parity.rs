@@ -228,6 +228,22 @@ pub fn sync_feature_parity_for_state(state: &DatabaseState) -> Result<ParitySync
         )?;
         let app_source = existing_run(&transaction, &feature.app_menu_ids, "source-style")?;
         let app_browser = existing_run(&transaction, &feature.app_menu_ids, "browser-style")?;
+        if let Some((status, verified_at)) = app_source.as_ref() {
+            upsert_regression(
+                &transaction,
+                &feature.id,
+                "APP",
+                "static",
+                status,
+                "来自工作台保存的 APP 源码与样式检查",
+                feature
+                    .app_menu_ids
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                Some(verified_at),
+            )?;
+        }
         upsert_regression(
             &transaction,
             &feature.id,
@@ -253,13 +269,10 @@ pub fn sync_feature_parity_for_state(state: &DatabaseState) -> Result<ParitySync
             "browser",
             app_browser
                 .as_ref()
-                .or(app_source.as_ref())
                 .map(|value| value.0.as_str())
                 .unwrap_or("unverified"),
             if app_browser.is_some() {
                 "来自工作台保存的 APP 浏览器测试"
-            } else if app_source.is_some() {
-                "当前仅完成 APP 源码样式检查"
             } else if has_app {
                 "尚未执行 APP 浏览器测试"
             } else {
@@ -270,10 +283,7 @@ pub fn sync_feature_parity_for_state(state: &DatabaseState) -> Result<ParitySync
                 .first()
                 .map(String::as_str)
                 .unwrap_or(""),
-            app_browser
-                .as_ref()
-                .or(app_source.as_ref())
-                .map(|value| value.1.as_str()),
+            app_browser.as_ref().map(|value| value.1.as_str()),
         )?;
     }
     for legacy_id in [

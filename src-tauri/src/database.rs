@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 35;
+pub const SCHEMA_VERSION: i64 = 36;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -478,6 +478,7 @@ impl DatabaseState {
                    id TEXT PRIMARY KEY,
                    menu_id TEXT NOT NULL,
                    project TEXT NOT NULL,
+                   project_path TEXT NOT NULL DEFAULT '',
                    menu_name TEXT NOT NULL,
                    mode TEXT NOT NULL,
                    status TEXT NOT NULL,
@@ -486,8 +487,20 @@ impl DatabaseState {
                    report_markdown TEXT NOT NULL DEFAULT '',
                    source_report_path TEXT,
                    output_excerpt TEXT NOT NULL DEFAULT '',
-                   error_message TEXT NOT NULL DEFAULT ''
+                   error_message TEXT NOT NULL DEFAULT '',
+                   selected_scenarios TEXT NOT NULL DEFAULT '[]',
+                   scenario_results TEXT NOT NULL DEFAULT '[]',
+                   artifacts TEXT NOT NULL DEFAULT '[]',
+                   total_count INTEGER NOT NULL DEFAULT 0,
+                   passed_count INTEGER NOT NULL DEFAULT 0,
+                   failed_count INTEGER NOT NULL DEFAULT 0,
+                   skipped_count INTEGER NOT NULL DEFAULT 0,
+                   duration_ms INTEGER NOT NULL DEFAULT 0,
+                   exit_code INTEGER,
+                   environment_summary TEXT NOT NULL DEFAULT '',
+                   cleanup_status TEXT NOT NULL DEFAULT 'not-applicable'
                  );
+                 CREATE INDEX IF NOT EXISTS idx_test_runs_project_menu ON test_runs(project_path,menu_id,started_at DESC);
                  CREATE TABLE IF NOT EXISTS work_sessions (
                    id TEXT PRIMARY KEY,
                    date TEXT NOT NULL,
@@ -936,9 +949,27 @@ impl DatabaseState {
             "ALTER TABLE repository_assets ADD COLUMN behind_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE tapd_projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE tapd_projects ADD COLUMN completion_status TEXT NOT NULL DEFAULT '已解决'",
+            "ALTER TABLE test_runs ADD COLUMN project_path TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE test_runs ADD COLUMN selected_scenarios TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE test_runs ADD COLUMN scenario_results TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE test_runs ADD COLUMN artifacts TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE test_runs ADD COLUMN total_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE test_runs ADD COLUMN passed_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE test_runs ADD COLUMN failed_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE test_runs ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE test_runs ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE test_runs ADD COLUMN exit_code INTEGER",
+            "ALTER TABLE test_runs ADD COLUMN environment_summary TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE test_runs ADD COLUMN cleanup_status TEXT NOT NULL DEFAULT 'not-applicable'",
         ] {
             let _ = connection.execute(migration, []);
         }
+        connection
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_test_runs_project_menu ON test_runs(project_path,menu_id,started_at DESC)",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
         migrate_tapd_composite_keys(&connection)?;
         connection
             .execute(
