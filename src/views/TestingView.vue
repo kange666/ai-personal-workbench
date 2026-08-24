@@ -10,12 +10,20 @@ const demoMenus: TestMenu[] = [
   { id: "project:inspection-plan", project: "client", projectPath: "F:/TB-project/client", projectKind: "vue", name: "检查计划", route: "/safetyManagement/inspectionPlan", sourcePath: "src/views/safe/safetyManagement/inspectionPlan/index.vue", hasCaseFile: false, canCreateCaseFile: true, capabilities: { mock: false, realApi: false, sourceStyle: true, browserStyle: false }, tested: false },
 ];
 const demoRuns: TestRun[] = [{ id:"demo-run", menuId:"project:safe-responsibility", project:"client", projectPath:"F:/TB-project/client", menuName:"安全责任", mode:"browser-style", status:"failed", startedAt:"2026-08-24T14:20:00+08:00", finishedAt:"2026-08-24T14:21:18+08:00", reportMarkdown:"# 测试结论", outputExcerpt:"1 passed · 1 failed", errorMessage:"点击搜索后列表没有刷新", selectedScenarios:["页面基础区域正常显示","搜索结果正确刷新"], scenarioResults:[{id:"scenario-1",title:"搜索结果正确刷新",status:"failed",durationMs:980,purpose:"确认输入关键词并点击搜索后，页面会发起请求并刷新列表。",steps:["进入安全责任页面","输入责任单位关键词","点击搜索按钮"],checks:["筛选参数正确传递","列表只显示匹配结果"],errorMessage:"等待列表刷新超时：点击搜索后没有观察到接口请求。",artifacts:[{name:"搜索失败页面",path:"/src/assets/app-logo.png",contentType:"image/png",kind:"screenshot"}]},{id:"scenario-2",title:"页面基础区域正常显示",status:"passed",durationMs:220,purpose:"确认页面核心区域可以正常显示。",steps:["进入页面"],checks:["标题和列表可见"],errorMessage:"",artifacts:[]}], artifacts:[{name:"搜索失败页面",path:"/src/assets/app-logo.png",contentType:"image/png",kind:"screenshot"}], totalCount:2,passedCount:1,failedCount:1,skippedCount:0,durationMs:1200,exitCode:1,environmentSummary:"浏览器预览示例 · Node + Playwright",cleanupStatus:"not-applicable" }];
+const selectedProjectStorageKey = "ai-workbench.testing.selected-project.v1";
+function storedProjectPath() {
+  try { return window.localStorage.getItem(selectedProjectStorageKey) || ""; }
+  catch { return ""; }
+}
+function normalizedProjectPath(value: string) {
+  return value.replace(/^\\\\\?\\/, "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
 const store = useWorkbenchStore();
 const route = useRoute();
 const menus = ref<TestMenu[]>(isTauriRuntime() ? [] : demoMenus);
 const runs = ref<TestRun[]>(isTauriRuntime() ? [] : demoRuns);
 const projects = ref<TestProject[]>(isTauriRuntime() ? [] : [{ path:"F:/TB-project/client", name:"client", projectKind:"vue", caseCount:1, pageCount:2, capabilities:{mock:true,realApi:true,sourceStyle:true,browserStyle:true}, warnings:[] }]);
-const selectedProjectPath = ref(projects.value[0]?.path || "");
+const selectedProjectPath = ref(storedProjectPath() || projects.value[0]?.path || "");
 const recommendations = ref<TestRecommendation[]>([]);
 const parities = ref<FeatureParity[]>([]);
 const activeSection = ref<"menus" | "history" | "parity" | "audit">("menus");
@@ -182,7 +190,8 @@ async function refresh() {
   if (!isTauriRuntime()) return;
   const availableProjects = await listTestProjects();
   projects.value = availableProjects;
-  if (!availableProjects.some(item => item.path === selectedProjectPath.value)) selectedProjectPath.value = availableProjects[0]?.path || "";
+  const restoredProject = availableProjects.find(item => normalizedProjectPath(item.path) === normalizedProjectPath(selectedProjectPath.value));
+  selectedProjectPath.value = restoredProject?.path || availableProjects[0]?.path || "";
   const paritySummary = await syncFeatureParity();
   paritySourceMessage.value = paritySummary.sourceMessage;
   await ensureWeeklyAudit();
@@ -236,17 +245,19 @@ async function runTest() {
     preflight.value = await preflightTest(options);
     const queued = await startTestRun(options);
     activeRunningRun.value = queued;
+    configuring.value = null;
+    message.value = "测试已进入后台执行，可在右侧“正在执行”查看进度。";
+    window.dispatchEvent(new CustomEvent("workbench-active-operations-changed"));
     const run = await waitForTestCompletion(queued);
     activeReportRun.value = run;
     reportTitle.value = `${run.menuName} · ${modeLabel(run.mode)}`;
     reportContent.value = run.reportMarkdown;
     message.value = run.status === "passed" ? "测试已完成并通过，报告已保存。" : run.status === "blocked" ? "测试未启动：执行前环境检查未通过。" : "测试已完成但未通过，请查看问题场景。";
-    configuring.value = null;
     activeRunningRun.value = null;
     await refreshSelectedProject();
     await store.hydrate();
   } catch (cause) { error.value = String(cause); }
-  finally { testRunning.value = false; cancellingTest.value = false; }
+  finally { testRunning.value = false; cancellingTest.value = false; window.dispatchEvent(new CustomEvent("workbench-active-operations-changed")); }
 }
 
 async function cancelCurrentTest() {
@@ -263,12 +274,14 @@ async function cancelCurrentTest() {
 }
 async function openReport(menu: TestMenu) {
   error.value = "";
-  const run = runs.value.find((item) => item.menuId === menu.id);
+  const run = runs.value.find((item) => item.menuId === menu.id && (item.scenarioResults.length || item.reportMarkdown.trim() || item.errorMessage.trim()));
   try {
     reportTitle.value = `${menu.name} · 最近测试报告`;
     activeReportRun.value = run || null;
-    if (run) reportContent.value = run.reportMarkdown;
-    else if (menu.latestReportPath && isTauriRuntime()) reportContent.value = await readTestReport(menu.latestReportPath);
+    if (run?.reportMarkdown.trim()) reportContent.value = run.reportMarkdown;
+    else if (run?.sourceReportPath?.toLowerCase().endsWith(".md") && isTauriRuntime()) reportContent.value = await readTestReport(run.sourceReportPath);
+    else if (run) reportContent.value = run.errorMessage || "该次测试没有生成文字报告，请查看结构化执行结果。";
+    else if (menu.latestReportPath?.toLowerCase().endsWith(".md") && isTauriRuntime()) reportContent.value = await readTestReport(menu.latestReportPath);
     else reportContent.value = "当前菜单还没有可查看的测试报告。";
   } catch (cause) { error.value = String(cause); }
 }
@@ -311,6 +324,11 @@ watch(createCaseFile, (enabled) => {
   if (!configuring.value || !enabled) return;
   const values = availableModes(configuring.value);
   if (!values.includes(mode.value)) mode.value = values[0] || "source-style";
+});
+watch(selectedProjectPath, (value) => {
+  if (!value) return;
+  try { window.localStorage.setItem(selectedProjectStorageKey, value); }
+  catch { /* WebView 禁用本地存储时不阻断测试中心。 */ }
 });
 
 onMounted(async () => {
@@ -390,7 +408,7 @@ onMounted(async () => {
       </section>
     </div>
 
-    <TestReportDialog v-if="reportContent" :run="activeReportRun" :title="reportTitle" :fallback-markdown="reportContent" @close="closeReport" />
+    <TestReportDialog v-if="activeReportRun || reportContent" :run="activeReportRun" :title="reportTitle" :fallback-markdown="reportContent" @close="closeReport" />
   </div>
 </template>
 

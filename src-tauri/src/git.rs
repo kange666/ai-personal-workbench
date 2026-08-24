@@ -1957,8 +1957,14 @@ fn spawn_hbuilderx_h5_project(path: &Path) -> Result<(Child, String), String> {
     let output = path.join("unpackage").join("dist").join("dev").join("h5");
     let mut command = Command::new(&compiler.node);
     command
+        .arg("--max-old-space-size=5120")
+        .arg("--no-warnings")
         .arg(&compiler.cli)
-        .current_dir(path)
+        .arg("-p")
+        .arg("h5")
+        // 必须从编译器目录运行，HBuilderX 的 Babel 配置才会生效；
+        // 项目源码和输出位置仍分别由 UNI_INPUT_DIR、UNI_OUTPUT_DIR 指定。
+        .current_dir(&cli_context)
         .env("NODE_ENV", "development")
         // 只允许本机访问，避免对局域网开放端口和触发 Windows 防火墙授权框。
         .env("HOST", "127.0.0.1")
@@ -1966,7 +1972,7 @@ fn spawn_hbuilderx_h5_project(path: &Path) -> Result<(Child, String), String> {
         .env("UNI_INPUT_DIR", path)
         .env("UNI_OUTPUT_DIR", output)
         .env("UNI_HBUILDERX_PLUGINS", &compiler.plugins)
-        .env("VUE_CLI_CONTEXT", cli_context)
+        .env("VUE_CLI_CONTEXT", &cli_context)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2014,7 +2020,27 @@ fn validated_local_runtime_url(value: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+fn strip_ansi_escape_sequences(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            output.push(character);
+            continue;
+        }
+        if characters.next_if_eq(&'[').is_some() {
+            for code in characters.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        }
+    }
+    output
+}
+
 fn extract_local_url(line: &str) -> Option<String> {
+    let line = strip_ansi_escape_sequences(line);
     ["http://", "https://"].into_iter().find_map(|prefix| {
         let index = line.find(prefix)?;
         let url = line[index..]
@@ -2059,6 +2085,7 @@ fn runtime_line_failed(line: &str) -> bool {
     [
         "failed to compile",
         "compile failed",
+        "module parse failed",
         "module build failed",
         "internal server error",
         "error in ",
@@ -3081,10 +3108,17 @@ mod tests {
             extract_local_url("Local: http://localhost:82/\u{1b}[39m"),
             Some("http://localhost:82/".to_string())
         );
+        assert_eq!(
+            extract_local_url(
+                "Local: \u{1b}[36mhttp://127.0.0.1:\u{1b}[1m8086\u{1b}[22m/h5/\u{1b}[0m"
+            ),
+            Some("http://127.0.0.1:8086/h5/".to_string())
+        );
         assert_eq!(extract_local_url("Docs: https://vite.dev/guide"), None);
         assert!(validated_local_runtime_url("file:///C:/temp").is_err());
         assert!(validated_local_runtime_url("https://example.com").is_err());
         assert!(runtime_line_failed("Failed to compile with 1 error"));
+        assert!(runtime_line_failed("Module parse failed: Unexpected token"));
         assert!(!runtime_line_failed("0 errors found"));
     }
 

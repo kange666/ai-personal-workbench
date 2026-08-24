@@ -1,5 +1,26 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { WorkTask } from "../types/workbench";
+
+let activeBackendRequests = 0;
+
+function emitBackendLoading(command: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("workbench-backend-loading", {
+    detail: { active: activeBackendRequests, command },
+  }));
+}
+
+/** 统一记录本地命令的请求状态，供页面壳层展示加载反馈。 */
+async function invoke<T = void>(command: string, args?: Record<string, unknown>): Promise<T> {
+  activeBackendRequests += 1;
+  emitBackendLoading(command);
+  try {
+    return await tauriInvoke<T>(command, args);
+  } finally {
+    activeBackendRequests = Math.max(0, activeBackendRequests - 1);
+    emitBackendLoading(command);
+  }
+}
 
 export interface DatabaseHealth {
   path: string;
@@ -1554,6 +1575,18 @@ export async function readTestArtifact(runId: string, path: string): Promise<str
 
 export async function exportTestReportPdf(runId: string): Promise<string> {
   return invoke<string>("export_test_report_pdf", { runId });
+}
+
+export async function exportTestReportMarkdown(runId: string): Promise<string> {
+  return invoke<string>("export_test_report_markdown", { runId });
+}
+
+export async function getExistingTestReportPdf(runId: string): Promise<string | null> {
+  return invoke<string | null>("get_existing_test_report_pdf", { runId });
+}
+
+export async function openTestReportPdf(path: string): Promise<void> {
+  await invoke("open_test_report_pdf", { path });
 }
 
 export async function syncFeatureParity(): Promise<ParitySyncSummary> {

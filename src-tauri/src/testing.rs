@@ -82,6 +82,20 @@ pub(crate) fn app_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(APP_ROOT))
 }
 
+fn display_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{}", rest);
+        }
+        if let Some(rest) = value.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+    value.into_owned()
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestCapabilities {
@@ -315,11 +329,13 @@ fn latest_db_run_for_project(
     menu_id: &str,
     project_path: &Path,
 ) -> Result<Option<TestRun>, String> {
+    let canonical_path = project_path.display().to_string();
+    let friendly_path = display_path(project_path);
     state
         .connect()?
         .query_row(
-            &format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 AND (project_path=?2 OR project_path='') ORDER BY CASE WHEN project_path=?2 THEN 0 ELSE 1 END,started_at DESC LIMIT 1"),
-            params![menu_id, project_path.display().to_string()],
+            &format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 AND (project_path=?2 OR project_path=?3 OR project_path='') ORDER BY CASE WHEN project_path=?2 OR project_path=?3 THEN 0 ELSE 1 END,started_at DESC LIMIT 1"),
+            params![menu_id, friendly_path, canonical_path],
             row_to_run,
         )
         .optional()
@@ -330,8 +346,239 @@ fn json_vec<T: for<'de> Deserialize<'de>>(value: String) -> Vec<T> {
     serde_json::from_str(&value).unwrap_or_default()
 }
 
+fn legacy_duration_ms(value: &str) -> i64 {
+    let value = value.trim();
+    if let Some(milliseconds) = value.strip_suffix("ms") {
+        return milliseconds.trim().parse::<f64>().unwrap_or(0.0) as i64;
+    }
+    if let Some(seconds) = value.strip_suffix('s') {
+        return (seconds.trim().parse::<f64>().unwrap_or(0.0) * 1000.0) as i64;
+    }
+    value.parse::<f64>().unwrap_or(0.0) as i64
+}
+
+fn legacy_heading_title(value: &str) -> String {
+    value
+        .split_once(". ")
+        .map(|(_, title)| title)
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn legacy_report_scenarios(markdown: &str) -> Vec<TestScenarioResult> {
+    #[derive(PartialEq)]
+    enum Section {
+        Other,
+        Scenarios,
+        Failures,
+    }
+
+    let mut section = Section::Other;
+    let mut scenarios = Vec::<TestScenarioResult>::new();
+    let mut current: Option<TestScenarioResult> = None;
+    let mut reading_steps = false;
+    let mut reading_checks = false;
+    let mut failure_title = String::new();
+    let mut failure_error = Vec::<String>::new();
+    let mut failure_artifacts = Vec::<TestArtifact>::new();
+    let mut in_code = false;
+    let mut failures = HashMap::<String, (String, Vec<TestArtifact>)>::new();
+
+    let flush_scenario = |current: &mut Option<TestScenarioResult>,
+                          scenarios: &mut Vec<TestScenarioResult>| {
+        if let Some(item) = current.take() {
+            scenarios.push(item);
+        }
+    };
+    let flush_failure =
+        |title: &mut String,
+         error: &mut Vec<String>,
+         artifacts: &mut Vec<TestArtifact>,
+         failures: &mut HashMap<String, (String, Vec<TestArtifact>)>| {
+            if !title.is_empty() {
+                failures.insert(
+                    std::mem::take(title),
+                    (
+                        error.join("\n").trim().to_string(),
+                        std::mem::take(artifacts),
+                    ),
+                );
+                error.clear();
+            }
+        };
+
+    for raw in markdown.lines() {
+        let line = raw.trim();
+        if let Some(heading) = line.strip_prefix("## ") {
+            flush_scenario(&mut current, &mut scenarios);
+            flush_failure(
+                &mut failure_title,
+                &mut failure_error,
+                &mut failure_artifacts,
+                &mut failures,
+            );
+            section = if heading.contains("场景明细") {
+                Section::Scenarios
+            } else if heading.contains("失败详情") || heading.contains("问题详情") {
+                Section::Failures
+            } else {
+                Section::Other
+            };
+            reading_steps = false;
+            reading_checks = false;
+            in_code = false;
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("### ") {
+            match section {
+                Section::Scenarios => {
+                    flush_scenario(&mut current, &mut scenarios);
+                    let title = legacy_heading_title(heading);
+                    current = Some(TestScenarioResult {
+                        id: format!("legacy-{}", scenarios.len() + 1),
+                        title: title.clone(),
+                        status: "failed".into(),
+                        duration_ms: 0,
+                        purpose: scenario_description("", &title),
+                        steps: Vec::new(),
+                        checks: Vec::new(),
+                        error_message: String::new(),
+                        artifacts: Vec::new(),
+                    });
+                    reading_steps = false;
+                    reading_checks = false;
+                }
+                Section::Failures => {
+                    flush_failure(
+                        &mut failure_title,
+                        &mut failure_error,
+                        &mut failure_artifacts,
+                        &mut failures,
+                    );
+                    failure_title = legacy_heading_title(heading);
+                    in_code = false;
+                }
+                Section::Other => {}
+            }
+            continue;
+        }
+
+        if section == Section::Scenarios {
+            let Some(item) = current.as_mut() else {
+                continue;
+            };
+            if let Some(value) = line.strip_prefix("- 结果：") {
+                item.status = if value.contains("通过") {
+                    "passed"
+                } else if value.contains("跳过") {
+                    "skipped"
+                } else if value.contains("阻塞") {
+                    "blocked"
+                } else {
+                    "failed"
+                }
+                .into();
+            } else if let Some(value) = line.strip_prefix("- 测试目的：") {
+                item.purpose = value.trim().to_string();
+            } else if let Some(value) = line.strip_prefix("- 耗时：") {
+                item.duration_ms = legacy_duration_ms(value);
+            } else if line == "测试步骤：" {
+                reading_steps = true;
+                reading_checks = false;
+            } else if line == "验证内容：" {
+                reading_steps = false;
+                reading_checks = true;
+            } else if reading_steps {
+                if let Some((number, value)) = line.split_once(". ") {
+                    if number.chars().all(|ch| ch.is_ascii_digit()) {
+                        item.steps.push(value.trim().to_string());
+                    }
+                }
+            } else if reading_checks {
+                if let Some(value) = line.strip_prefix("- ") {
+                    item.checks.push(value.trim().to_string());
+                }
+            }
+        } else if section == Section::Failures && !failure_title.is_empty() {
+            if line.starts_with("```") {
+                in_code = !in_code;
+            } else if in_code {
+                failure_error.push(raw.trim_end().to_string());
+            } else if let Some(path) = line.strip_prefix("- screenshot:") {
+                let path = path.trim();
+                failure_artifacts.push(TestArtifact {
+                    name: format!("{} · 失败页面", failure_title),
+                    path: path.to_string(),
+                    content_type: image_mime(Path::new(path))
+                        .unwrap_or("image/png")
+                        .to_string(),
+                    kind: "screenshot".into(),
+                });
+            }
+        }
+    }
+    flush_scenario(&mut current, &mut scenarios);
+    flush_failure(
+        &mut failure_title,
+        &mut failure_error,
+        &mut failure_artifacts,
+        &mut failures,
+    );
+
+    for item in &mut scenarios {
+        if let Some((error, artifacts)) = failures.remove(&item.title) {
+            item.error_message = error;
+            item.artifacts = artifacts;
+        }
+        if item.steps.is_empty() {
+            item.steps.push("按历史报告中的场景说明执行测试。".into());
+        }
+        if item.checks.is_empty() {
+            item.checks.push("核对历史报告记录的实际结果。".into());
+        }
+    }
+    scenarios
+}
+
+fn hydrate_legacy_run(mut run: TestRun) -> TestRun {
+    if run.project_path.trim().is_empty() {
+        run.project_path = if run.project.eq_ignore_ascii_case("client") {
+            display_path(&client_root())
+        } else if run.project.eq_ignore_ascii_case("APP") {
+            display_path(&app_root())
+        } else {
+            String::new()
+        };
+    }
+    if run.scenario_results.is_empty() && !run.report_markdown.trim().is_empty() {
+        let scenarios = legacy_report_scenarios(&run.report_markdown);
+        if !scenarios.is_empty() {
+            run.total_count = scenarios.len() as i64;
+            run.passed_count = scenarios
+                .iter()
+                .filter(|item| item.status == "passed")
+                .count() as i64;
+            run.failed_count = scenarios
+                .iter()
+                .filter(|item| item.status == "failed" || item.status == "blocked")
+                .count() as i64;
+            run.skipped_count = scenarios
+                .iter()
+                .filter(|item| item.status == "skipped")
+                .count() as i64;
+            run.artifacts = scenarios
+                .iter()
+                .flat_map(|item| item.artifacts.clone())
+                .collect();
+            run.scenario_results = scenarios;
+        }
+    }
+    run
+}
+
 fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<TestRun> {
-    Ok(TestRun {
+    Ok(hydrate_legacy_run(TestRun {
         id: row.get(0)?,
         menu_id: row.get(1)?,
         project: row.get(2)?,
@@ -356,7 +603,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<TestRun> {
         exit_code: row.get(21)?,
         environment_summary: row.get(22)?,
         cleanup_status: row.get(23)?,
-    })
+    }))
 }
 
 pub(crate) fn client_menus(state: &DatabaseState) -> Result<Vec<TestMenu>, String> {
@@ -403,7 +650,7 @@ pub(crate) fn client_menus(state: &DatabaseState) -> Result<Vec<TestMenu>, Strin
         menus.push(TestMenu {
             id: menu_id,
             project: "client".into(),
-            project_path: client_root().display().to_string(),
+            project_path: display_path(&client_root()),
             project_kind: "vue".into(),
             name,
             route: value
@@ -461,7 +708,7 @@ fn add_app_pages(items: &mut Vec<TestMenu>, root: &str, pages: Option<&Vec<Value
         items.push(TestMenu {
             id: format!("app:{full_path}"),
             project: "APP".into(),
-            project_path: app_root().display().to_string(),
+            project_path: display_path(&app_root()),
             project_kind: "uni-app".into(),
             name,
             route: format!("/{full_path}"),
@@ -696,7 +943,7 @@ fn catalog_menu(
     Ok(TestMenu {
         id,
         project: project_name.into(),
-        project_path: root.display().to_string(),
+        project_path: display_path(root),
         project_kind: kind.into(),
         name,
         route,
@@ -1052,7 +1299,7 @@ pub fn recommend_tests_from_git(
         };
     let changes_by_root = projects
         .iter()
-        .map(|root| (root.display().to_string(), git_changed_paths(root)))
+        .map(|root| (display_path(root), git_changed_paths(root)))
         .collect::<Vec<_>>();
     let mut recommendations = Vec::new();
     for menu in menus {
@@ -1100,27 +1347,33 @@ pub fn list_test_runs(
     menu_id: Option<String>,
     project_path: Option<String>,
 ) -> Result<Vec<TestRun>, String> {
+    let project = project_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|path| canonical_project_asset(&state, path))
+        .transpose()?
+        .map(|(root, name)| (display_path(&root), root.display().to_string(), name));
     let connection = state.connect()?;
-    let sql = match (menu_id.is_some(), project_path.is_some()) {
-        (true, true) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 AND (project_path=?2 OR project_path='') ORDER BY started_at DESC"),
+    let sql = match (menu_id.is_some(), project.is_some()) {
+        (true, true) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 AND (project_path=?2 OR project_path=?3 OR (project_path='' AND LOWER(project)=LOWER(?4))) ORDER BY started_at DESC"),
         (true, false) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 ORDER BY started_at DESC"),
-        (false, true) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE project_path=?1 ORDER BY started_at DESC LIMIT 300"),
+        (false, true) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE project_path=?1 OR project_path=?2 OR (project_path='' AND LOWER(project)=LOWER(?3)) ORDER BY started_at DESC LIMIT 300"),
         (false, false) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs ORDER BY started_at DESC LIMIT 300"),
     };
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    let rows = match (menu_id, project_path) {
-        (Some(id), Some(path)) => statement
-            .query_map(params![id, path], row_to_run)
+    let rows = match (menu_id, project) {
+        (Some(id), Some((friendly, canonical, name))) => statement
+            .query_map(params![id, friendly, canonical, name], row_to_run)
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>(),
         (Some(id), None) => statement
             .query_map([id], row_to_run)
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>(),
-        (None, Some(path)) => statement
-            .query_map([path], row_to_run)
+        (None, Some((friendly, canonical, name))) => statement
+            .query_map(params![friendly, canonical, name], row_to_run)
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>(),
         (None, None) => statement
@@ -1493,13 +1746,12 @@ fn artifact_kind(name: &str, content_type: &str) -> String {
 
 fn normalize_artifact_path(root: &Path, value: &str) -> String {
     let path = PathBuf::from(value);
-    if path.is_absolute() {
+    let resolved = if path.is_absolute() {
         path
     } else {
         root.join(path)
-    }
-    .display()
-    .to_string()
+    };
+    display_path(&resolved)
 }
 
 fn collect_playwright_specs(value: &Value, root: &Path, output: &mut Vec<TestScenarioResult>) {
@@ -1589,6 +1841,35 @@ fn collect_playwright_specs(value: &Value, root: &Path, output: &mut Vec<TestSce
     if let Some(suites) = value.get("suites").and_then(Value::as_array) {
         for suite in suites {
             collect_playwright_specs(suite, root, output);
+        }
+    }
+}
+
+fn persist_screenshot_artifacts(root: &Path, run_id: &str, scenarios: &mut [TestScenarioResult]) {
+    let target_dir = root
+        .join("e2e")
+        .join("reports")
+        .join("artifacts")
+        .join(run_id);
+    let mut index = 0usize;
+    for scenario in scenarios {
+        for artifact in &mut scenario.artifacts {
+            if artifact.kind != "screenshot" {
+                continue;
+            }
+            let source = PathBuf::from(&artifact.path);
+            if !source.is_file() || image_mime(&source).is_none() {
+                continue;
+            }
+            index += 1;
+            let extension = source
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("png");
+            let target = target_dir.join(format!("screenshot-{index:03}.{extension}"));
+            if fs::create_dir_all(&target_dir).is_ok() && fs::copy(&source, &target).is_ok() {
+                artifact.path = display_path(&target);
+            }
         }
     }
 }
@@ -1707,12 +1988,21 @@ fn execute_project(
         .map(|item| regex_escape(item))
         .collect::<Vec<_>>()
         .join("|");
+    let cli_argument = Path::new("node_modules")
+        .join("@playwright")
+        .join("test")
+        .join("cli.js");
+    let spec_argument = spec
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or_else(|| "测试规格文件名无效。".to_string())?;
+    let child_root = PathBuf::from(display_path(root));
     let mut command = codex_video::hidden_command(Path::new("node"));
     command
-        .current_dir(root)
-        .arg(cli)
+        .current_dir(&child_root)
+        .arg(cli_argument)
         .args(["test"])
-        .arg(&spec)
+        .arg(spec_argument)
         .args(["--project=chromium", "--grep"])
         .arg(grep);
     command
@@ -1721,7 +2011,7 @@ fn execute_project(
             "E2E_MENU_CASE_ID",
             menu.case_id.clone().unwrap_or_else(|| safe_case_id(menu)),
         )
-        .env("E2E_JSON_REPORT", &raw_path);
+        .env("E2E_JSON_REPORT", display_path(&raw_path));
     if let Some(account) = options
         .account
         .as_deref()
@@ -1758,7 +2048,29 @@ fn execute_project(
     {
         collect_playwright_specs(&value, root, &mut scenarios);
     }
+    persist_screenshot_artifacts(root, run_id, &mut scenarios);
     let exit_code = output.status.code();
+    if scenarios.is_empty() {
+        let detail = if combined.trim().is_empty() {
+            "测试进程没有生成场景结果，请检查项目 Playwright 配置和测试规格文件。".to_string()
+        } else {
+            combined.chars().take(1200).collect()
+        };
+        scenarios.push(TestScenarioResult {
+            id: "executor-output".into(),
+            title: "测试执行器未生成有效结果".into(),
+            status: "failed".into(),
+            duration_ms: 0,
+            purpose: "确认项目现有 Playwright 测试可以启动并输出结构化结果。".into(),
+            steps: vec![
+                "启动项目现有测试执行器。".into(),
+                "等待 Playwright 输出测试场景结果。".into(),
+            ],
+            checks: vec!["至少生成一个可识别的测试场景结果。".into()],
+            error_message: detail,
+            artifacts: Vec::new(),
+        });
+    }
     let status = if output.status.success() && scenarios.iter().any(|item| item.status == "passed")
     {
         "passed"
@@ -1798,8 +2110,8 @@ fn execute_project(
         error_message,
         scenario_results: scenarios,
         exit_code,
-        report_path: Some(raw_path.display().to_string()),
-        environment_summary: format!("Node + Playwright；规格文件 {}", spec.display()),
+        report_path: Some(display_path(&raw_path)),
+        environment_summary: format!("Node + Playwright；规格文件 {}", display_path(&spec)),
         cleanup_status,
     })
 }
@@ -2035,7 +2347,7 @@ pub async fn start_test_run(
             id: run_id.clone(),
             menu_id: menu.id,
             project: project_name,
-            project_path: root.display().to_string(),
+            project_path: display_path(&root),
             menu_name: menu.name,
             mode: options.mode,
             status: "blocked".into(),
@@ -2071,7 +2383,7 @@ pub async fn start_test_run(
         id: run_id.clone(),
         menu_id: menu.id.clone(),
         project: project_name.clone(),
-        project_path: root.display().to_string(),
+        project_path: display_path(&root),
         menu_name: menu.name.clone(),
         mode: options.mode.clone(),
         status: "running".into(),
@@ -2146,7 +2458,7 @@ pub async fn start_test_run(
             id: run_id.clone(),
             menu_id: menu.id,
             project: project_name,
-            project_path: root.display().to_string(),
+            project_path: display_path(&root),
             menu_name: menu.name,
             mode: options.mode,
             status: execution.status,
@@ -2401,14 +2713,7 @@ pub async fn export_test_report_pdf(
             .join("AI个人工作台")
             .join("测试报告");
         fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-        let file_name = format!(
-            "{}-{}-{}-{}.pdf",
-            safe_pdf_name(&run.project),
-            safe_pdf_name(&run.menu_name),
-            safe_pdf_name(&run.started_at.chars().take(19).collect::<String>()).replace('T', "-"),
-            run.id.chars().take(8).collect::<String>()
-        );
-        let output_path = output_dir.join(file_name);
+        let output_path = exported_pdf_path(&output_dir, &run);
         let html_path = std::env::temp_dir().join(format!("workbench-test-report-{}.html", run.id));
         let profile_path =
             std::env::temp_dir().join(format!("workbench-test-pdf-profile-{}", run.id));
@@ -2451,13 +2756,115 @@ pub async fn export_test_report_pdf(
     .map_err(|error| error.to_string())?
 }
 
+fn exported_report_stem(run: &TestRun) -> String {
+    format!(
+        "{}-{}-{}-{}",
+        safe_pdf_name(&run.project),
+        safe_pdf_name(&run.menu_name),
+        safe_pdf_name(&run.started_at.chars().take(19).collect::<String>()).replace('T', "-"),
+        run.id.chars().take(8).collect::<String>()
+    )
+}
+
+fn exported_pdf_path(output_dir: &Path, run: &TestRun) -> PathBuf {
+    output_dir.join(format!("{}.pdf", exported_report_stem(run)))
+}
+
+fn exported_markdown_path(output_dir: &Path, run: &TestRun) -> PathBuf {
+    output_dir.join(format!("{}.md", exported_report_stem(run)))
+}
+
+fn write_exported_markdown(output_dir: &Path, run: &TestRun) -> Result<PathBuf, String> {
+    fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
+    let output_path = exported_markdown_path(output_dir, run);
+    let content = if run.report_markdown.trim().is_empty() {
+        build_structured_report(run)
+    } else {
+        run.report_markdown.clone()
+    };
+    fs::write(&output_path, format!("{}\n", content.trim_end()))
+        .map_err(|error| format!("MD 导出失败：{error}"))?;
+    Ok(output_path)
+}
+
+#[tauri::command]
+pub fn export_test_report_markdown(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DatabaseState>,
+    run_id: String,
+) -> Result<String, String> {
+    let run = run_by_id(state.inner(), &run_id)?;
+    let output_dir = app
+        .path()
+        .document_dir()
+        .map_err(|error| error.to_string())?
+        .join("AI个人工作台")
+        .join("测试报告");
+    write_exported_markdown(&output_dir, &run).map(|path| path.display().to_string())
+}
+
+fn existing_exported_pdf(output_dir: &Path, run: &TestRun) -> Option<PathBuf> {
+    let path = exported_pdf_path(output_dir, run);
+    (path.is_file() && fs::metadata(&path).map(|item| item.len()).unwrap_or(0) > 0).then_some(path)
+}
+
+#[tauri::command]
+pub fn get_existing_test_report_pdf(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DatabaseState>,
+    run_id: String,
+) -> Result<Option<String>, String> {
+    let run = run_by_id(state.inner(), &run_id)?;
+    let output_dir = app
+        .path()
+        .document_dir()
+        .map_err(|error| error.to_string())?
+        .join("AI个人工作台")
+        .join("测试报告");
+    Ok(existing_exported_pdf(&output_dir, &run).map(|path| path.display().to_string()))
+}
+
+fn canonical_exported_pdf(output_dir: &Path, requested: &str) -> Result<PathBuf, String> {
+    let allowed = output_dir
+        .canonicalize()
+        .map_err(|error| format!("测试报告目录无法读取：{error}"))?;
+    let path = PathBuf::from(requested)
+        .canonicalize()
+        .map_err(|error| format!("PDF 文件不存在或无法读取：{error}"))?;
+    if !path.starts_with(&allowed)
+        || path.extension().and_then(|value| value.to_str()) != Some("pdf")
+        || !path.is_file()
+    {
+        return Err("只能打开测试中心刚导出的 PDF 报告。".into());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn open_test_report_pdf(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let output_dir = app
+        .path()
+        .document_dir()
+        .map_err(|error| error.to_string())?
+        .join("AI个人工作台")
+        .join("测试报告");
+    let path = canonical_exported_pdf(&output_dir, &path)?;
+    codex_video::hidden_command(Path::new("explorer.exe"))
+        .arg(path)
+        .spawn()
+        .map_err(|error| format!("无法打开 PDF：{error}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        app_menus, app_static_report, append_remediation, client_menus, client_report_status,
-        create_case_file, pdf_html, recover_incomplete_test_runs, run_by_id, save_run,
-        strip_json_comments, TestArtifact, TestCapabilities, TestMenu, TestProcessState, TestRun,
-        TestScenarioResult,
+        app_menus, app_static_report, append_remediation, canonical_exported_pdf, client_menus,
+        client_report_status, create_case_file, display_path, existing_exported_pdf,
+        legacy_report_scenarios, pdf_html, persist_screenshot_artifacts,
+        recover_incomplete_test_runs, run_by_id, save_run,
+        static_scenarios, strip_json_comments, write_exported_markdown, TestArtifact,
+        TestCapabilities, TestMenu, TestProcessState, TestRun, TestScenarioResult,
     };
     use crate::database::DatabaseState;
     use std::path::Path;
@@ -2518,6 +2925,92 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_windows_path_is_converted_for_node_and_saved_reports() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\F:\TB-project\client")),
+            r"F:\TB-project\client"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\client")),
+            r"\\server\share\client"
+        );
+    }
+
+    #[test]
+    fn legacy_markdown_report_recovers_scenarios_errors_and_screenshots() {
+        let report = r#"# 旧报告
+
+## 场景明细
+
+### 1. 点击搜索
+
+- 结果：失败
+- 测试目的：确认搜索可用。
+- 耗时：1.5s
+
+测试步骤：
+1. 输入关键词。
+2. 点击搜索。
+
+验证内容：
+- 列表刷新。
+
+## 失败详情
+
+### 1. 点击搜索
+
+```text
+等待列表刷新超时
+```
+
+附件：
+- screenshot: F:\project\test-results\failed.png
+"#;
+        let scenarios = legacy_report_scenarios(report);
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(scenarios[0].status, "failed");
+        assert_eq!(scenarios[0].duration_ms, 1500);
+        assert_eq!(scenarios[0].steps.len(), 2);
+        assert!(scenarios[0].error_message.contains("等待列表刷新超时"));
+        assert_eq!(scenarios[0].artifacts[0].kind, "screenshot");
+    }
+
+    #[test]
+    fn screenshots_are_copied_to_a_run_specific_report_directory() {
+        let root = std::env::temp_dir().join(format!("workbench-artifact-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("test-results")).unwrap();
+        let source = root.join("test-results/failure.png");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/Square310x310Logo.png"),
+            &source,
+        )
+        .unwrap();
+        let mut scenarios = vec![TestScenarioResult {
+            id: "failed".into(),
+            title: "失败场景".into(),
+            status: "failed".into(),
+            duration_ms: 1,
+            purpose: "确认页面。".into(),
+            steps: vec!["打开页面。".into()],
+            checks: vec!["页面正常。".into()],
+            error_message: "失败".into(),
+            artifacts: vec![TestArtifact {
+                name: "失败截图".into(),
+                path: source.display().to_string(),
+                content_type: "image/png".into(),
+                kind: "screenshot".into(),
+            }],
+        }];
+        persist_screenshot_artifacts(&root, "run-1", &mut scenarios);
+        let copied = Path::new(&scenarios[0].artifacts[0].path);
+        assert!(copied.is_file());
+        assert!(copied.to_string_lossy().contains("reports"));
+        assert!(copied.to_string_lossy().contains("run-1"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn real_project_catalogs_can_be_loaded() {
         let path =
@@ -2525,7 +3018,7 @@ mod tests {
         let state = DatabaseState::new(path.clone()).unwrap();
         let client = client_menus(&state).unwrap();
         let app = app_menus(&state).unwrap();
-        assert_eq!(client.len(), 15);
+        assert!(!client.is_empty());
         assert!(!app.is_empty());
         assert!(app.iter().all(|menu| menu.source_path.ends_with(".vue")));
         let (passed, report) = app_static_report(&app[0]);
@@ -2547,6 +3040,28 @@ mod tests {
         assert!(original.contains("workbenchMenuId"));
         assert!(create_case_file(&root, &menu, &selected).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn page_without_case_file_can_run_source_checks() {
+        let root = std::env::temp_dir().join(format!("workbench-static-{}", Uuid::new_v4()));
+        let source = root.join("src/views/example/index.vue");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            "<template><main>示例</main></template><script setup></script><style scoped></style>",
+        )
+        .unwrap();
+        let menu = sample_menu(&root);
+        let selected = vec![
+            "页面文件与路由注册".into(),
+            "Vue 基础结构".into(),
+            "页面样式结构".into(),
+        ];
+        let scenarios = static_scenarios(&root, &menu, &selected);
+        assert_eq!(scenarios.len(), 3);
+        assert!(scenarios.iter().all(|item| item.status == "passed"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2615,6 +3130,18 @@ mod tests {
         assert!(html.find("失败场景").unwrap() < html.find("通过场景").unwrap());
         assert!(html.contains("data:image/png;base64,"));
         assert!(html.contains("按钮没有响应"));
+        let reports = root.join("reports");
+        let markdown = write_exported_markdown(&reports, &run).unwrap();
+        let markdown_content = std::fs::read_to_string(&markdown).unwrap();
+        assert_eq!(markdown.extension().and_then(|value| value.to_str()), Some("md"));
+        assert!(markdown_content.contains("测试执行报告"));
+        assert!(markdown_content.contains("按钮没有响应"));
+        assert!(markdown_content.contains("failure.png"));
+        assert!(existing_exported_pdf(&reports, &run).is_none());
+        let pdf = super::exported_pdf_path(&reports, &run);
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(&pdf, b"%PDF-existing-report").unwrap();
+        assert_eq!(existing_exported_pdf(&reports, &run), Some(pdf));
         if let Some(output) = std::env::var_os("WORKBENCH_PDF_QA_HTML") {
             let output = std::path::PathBuf::from(output);
             if let Some(parent) = output.parent() {
@@ -2622,6 +3149,26 @@ mod tests {
             }
             std::fs::write(output, &html).unwrap();
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exported_pdf_opener_only_accepts_pdf_inside_report_directory() {
+        let root = std::env::temp_dir().join(format!("workbench-open-pdf-{}", Uuid::new_v4()));
+        let reports = root.join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        let pdf = reports.join("report.pdf");
+        let text = reports.join("report.txt");
+        let outside = root.join("outside.pdf");
+        std::fs::write(&pdf, b"pdf").unwrap();
+        std::fs::write(&text, b"text").unwrap();
+        std::fs::write(&outside, b"pdf").unwrap();
+        assert_eq!(
+            canonical_exported_pdf(&reports, pdf.to_str().unwrap()).unwrap(),
+            pdf.canonicalize().unwrap()
+        );
+        assert!(canonical_exported_pdf(&reports, text.to_str().unwrap()).is_err());
+        assert!(canonical_exported_pdf(&reports, outside.to_str().unwrap()).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 

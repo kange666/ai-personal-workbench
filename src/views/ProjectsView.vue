@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
   clearGitDefaultCredential,
   commitGitPlanGroup,
@@ -39,6 +39,7 @@ import {
 } from "../services/backend";
 
 const router = useRouter();
+const route = useRoute();
 const assets = ref<RepositoryAsset[]>([]);
 const selected = ref<RepositoryAsset | null>(null);
 const details = ref<RepositoryAssetDetails>({ conversations: [], commits: [], associations: [], nextAction: "" });
@@ -256,6 +257,13 @@ async function toggleProjectProcess(item: RepositoryAsset) {
   } catch (cause) { error.value = String(cause); }
   finally { startingPath.value = ""; }
 }
+async function openProjectFromRoute() {
+  const projectPath = typeof route.query.project === "string" ? route.query.project.trim().toLocaleLowerCase() : "";
+  if (!projectPath || !assets.value.length) return;
+  const item = assets.value.find(asset => asset.path.trim().toLocaleLowerCase() === projectPath);
+  if (item) await openAsset(item, route.query.tab === "git" ? "git" : "overview");
+}
+watch(() => `${String(route.query.project || "")}|${String(route.query.tab || "")}`, () => { void openProjectFromRoute(); });
 async function openScanConfiguration() {
   error.value = "";
   try {
@@ -344,6 +352,7 @@ function exportText(format: "markdown" | "csv") {
 async function copyExport(format: "markdown" | "csv") { await navigator.clipboard.writeText(exportText(format)); message.value = `${format === "csv" ? "CSV" : "Markdown"} 清单已复制，可直接保存为文件。`; }
 onMounted(async () => {
   await load();
+  await openProjectFromRoute();
   runtimeTimer = window.setInterval(() => {
     nowTick.value = Date.now();
     void refreshRuntime();

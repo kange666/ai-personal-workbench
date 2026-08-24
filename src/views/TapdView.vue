@@ -127,7 +127,7 @@ async function sync() {
 async function sendToCodex() {
   if (!selected.value || !repositoryPath.value) return;
   loading.value=true; error.value=""; message.value="";
-  try { const job=await startTapdCodexJob(selected.value.itemKey,repositoryPath.value,codexNote.value); jobs.value.unshift(job); codexNote.value=""; message.value="已发送给 Codex，完成后会在工作台产生未读提醒。"; }
+  try { const job=await startTapdCodexJob(selected.value.itemKey,repositoryPath.value,codexNote.value); jobs.value.unshift(job); codexNote.value=""; message.value="已发送给 Codex，完成后会在工作台产生未读提醒。"; window.dispatchEvent(new CustomEvent("workbench-active-operations-changed")); }
   catch(cause) { error.value=String(cause); } finally { loading.value=false; }
 }
 async function runProjectTests() {
