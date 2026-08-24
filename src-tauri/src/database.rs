@@ -500,7 +500,6 @@ impl DatabaseState {
                    environment_summary TEXT NOT NULL DEFAULT '',
                    cleanup_status TEXT NOT NULL DEFAULT 'not-applicable'
                  );
-                 CREATE INDEX IF NOT EXISTS idx_test_runs_project_menu ON test_runs(project_path,menu_id,started_at DESC);
                  CREATE TABLE IF NOT EXISTS work_sessions (
                    id TEXT PRIMARY KEY,
                    date TEXT NOT NULL,
@@ -1384,7 +1383,21 @@ mod migration_tests {
                 "CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                  INSERT INTO app_meta(key,value) VALUES('schema_version','15');
                  CREATE TABLE preserved_data (value TEXT NOT NULL);
-                 INSERT INTO preserved_data(value) VALUES('keep-me');",
+                 INSERT INTO preserved_data(value) VALUES('keep-me');
+                 CREATE TABLE test_runs (
+                   id TEXT PRIMARY KEY,
+                   menu_id TEXT NOT NULL,
+                   project TEXT NOT NULL,
+                   menu_name TEXT NOT NULL,
+                   mode TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   started_at TEXT NOT NULL,
+                   finished_at TEXT,
+                   report_markdown TEXT NOT NULL DEFAULT '',
+                   source_report_path TEXT,
+                   output_excerpt TEXT NOT NULL DEFAULT '',
+                   error_message TEXT NOT NULL DEFAULT ''
+                 );",
             )
             .unwrap();
         drop(connection);
@@ -1457,6 +1470,22 @@ mod migration_tests {
             )
             .unwrap();
         assert!(email_deliveries_exists);
+        let test_project_path_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('test_runs') WHERE name='project_path')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(test_project_path_exists);
+        let test_project_index_exists: bool = upgraded
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_test_runs_project_menu')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(test_project_index_exists);
         upgraded
             .execute(
                 "INSERT INTO notifications(id,kind,title,created_at) VALUES('codex-complete-test','codex_complete','测试完成','2026-08-07T10:00:00Z')",
