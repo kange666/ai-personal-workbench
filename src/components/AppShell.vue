@@ -612,6 +612,11 @@ onBeforeUnmount(() => {
             </article>
           </div>
           <p v-else class="quota-empty">没有未过期的额度快照。使用一次 Codex 后刷新即可读取，工作台不会继续显示旧周期额度。</p>
+          <div class="quota-reset-credit">
+            <span><b>可用额度重置</b><small>读取当前 Codex 账户的本地状态</small></span>
+            <strong v-if="quota.resetCreditsAvailable !== undefined">{{ quota.resetCreditsAvailable }} 次</strong>
+            <em v-else>暂未读取到</em>
+          </div>
           <p v-if="quota.available" class="quota-source" :title="quota.selectionReason">来源：{{ quota.sourceFile || '本地 Codex 日志' }}</p>
           <footer><span>{{ capturedText(quota.capturedAt) }} · {{ quotaFreshnessText }}</span><button class="text-button" :disabled="quotaLoading" @click="loadQuota">{{ quotaLoading ? '读取中…' : '刷新' }}</button></footer>
         </section>

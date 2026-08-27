@@ -105,6 +105,7 @@ export interface CodexQuotaSnapshot {
   available: boolean;
   capturedAt?: string;
   planType?: string;
+  resetCreditsAvailable?: number;
   primary?: CodexQuotaWindow;
   secondary?: CodexQuotaWindow;
   sourceFile?: string;
@@ -462,8 +463,21 @@ export interface CommitPlanGroup {
   id: string; title: string; commitMessage: string; files: string[]; riskNotes: string; verificationNotes: string; status: string;
 }
 
+export type CommitGroupingMode = "single" | "feature";
+
 export interface CommitPlan {
-  id: string; repositoryPath: string; status: string; riskLevel: string; summary: string; createdAt: string; groups: CommitPlanGroup[];
+  id: string;
+  repositoryPath: string;
+  status: string;
+  riskLevel: string;
+  summary: string;
+  groupingMode: CommitGroupingMode;
+  generator: "deepseek" | "rules";
+  model: string;
+  generationWarning: string;
+  excludedFiles: string[];
+  createdAt: string;
+  groups: CommitPlanGroup[];
 }
 
 export interface TokenSummary {
@@ -1245,8 +1259,8 @@ export async function saveRepositoryAsset(asset: RepositoryAssetUpdate): Promise
   await invoke("save_repository_asset", { asset });
 }
 
-export async function generateCommitPlan(path: string): Promise<CommitPlan> {
-  return invoke<CommitPlan>("generate_commit_plan", { path });
+export async function generateCommitPlan(path: string, groupingMode: CommitGroupingMode): Promise<CommitPlan> {
+  return invoke<CommitPlan>("generate_commit_plan", { path, groupingMode });
 }
 
 export async function setRepositoryPinned(path: string, pinned: boolean): Promise<void> {

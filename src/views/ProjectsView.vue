@@ -30,6 +30,7 @@ import {
   stopRepositoryProject,
   switchGitRepositoryBranch,
   type GitOperationResult,
+  type CommitGroupingMode,
   type GitRepositoryStatus,
   type GitScanConfiguration,
   type RepositoryAsset,
@@ -76,6 +77,7 @@ const lastScanAt = ref("");
 const nowTick = ref(Date.now());
 let runtimeTimer: number | undefined;
 const commitMessages = reactive<Record<string, string>>({});
+const commitGroupingMode = ref<CommitGroupingMode>("single");
 const form = reactive<RepositoryAssetUpdate>({
   path: "", category: "待确认", purpose: "", technologyStack: "", mainModules: "",
   installCommand: "", startCommand: "", testCommand: "", buildCommand: "", commandSource: "",
@@ -164,7 +166,10 @@ function discardStaleCommitPlan() {
   if (!plan || !gitStatus.value) return;
   const normalize = (path: string) => path.replaceAll("\\", "/");
   const current = new Set(gitStatus.value.changedFiles.map((file) => normalize(file.path)));
-  const planned = new Set(plan.groups.filter((group) => group.status !== "committed").flatMap((group) => group.files.map(normalize)));
+  const planned = new Set([
+    ...plan.groups.filter((group) => group.status !== "committed").flatMap((group) => group.files.map(normalize)),
+    ...plan.excludedFiles.map(normalize),
+  ]);
   if (current.size !== planned.size || [...current].some((path) => !planned.has(path))) details.value.commitPlan = undefined;
 }
 
@@ -316,7 +321,7 @@ async function openRuntimeUrl(url: string) {
 }
 async function planCommit() {
   if (!selected.value) return; loading.value = true; error.value = "";
-  try { details.value.commitPlan = await generateCommitPlan(selected.value.path); syncCommitMessages(); message.value = "提交建议已生成，Git 暂存区没有变化。"; }
+  try { details.value.commitPlan = await generateCommitPlan(selected.value.path, commitGroupingMode.value); syncCommitMessages(); message.value = "提交建议已生成，Git 暂存区没有变化。"; }
   catch (cause) { error.value = String(cause); } finally { loading.value = false; }
 }
 async function runGitAction(action: () => Promise<GitOperationResult>) {
@@ -401,7 +406,39 @@ onBeforeUnmount(() => { if (runtimeTimer) window.clearInterval(runtimeTimer); })
         <section class="asset-related"><div><h3>最近 Codex 任务</h3><button v-for="item in details.conversations.slice(0, 5)" :key="item.id" @click="router.push({ path: '/tokens', query: { conversation: item.id } })"><span><b>{{ item.title }}</b><small>{{ item.updatedAt.slice(0, 10) }}</small></span><em>继续 →</em></button><p v-if="!details.conversations.length">暂无直接关联任务。</p></div><div><h3>最近 Git 提交</h3><article v-for="item in details.commits.slice(0, 5)" :key="item.hash"><code>{{ item.hash.slice(0, 7) }}</code><span><b>{{ item.subject }}</b><small>{{ item.committedAt.slice(0, 10) }}</small></span></article><p v-if="!details.commits.length">暂无可读取提交。</p></div></section>
       </template>
       <template v-else-if="activeTab === 'git'">
-        <section class="commit-plan"><header><div><h3>提交修改</h3><p>自动按功能分组并生成 type(scope): 描述；提交前可以修改信息。</p></div><button class="button secondary" :disabled="loading || !gitStatus?.hasUncommittedChanges" @click="planCommit">{{ details.commitPlan ? "重新分析" : "生成提交建议" }}</button></header><p v-if="!gitStatus?.hasUncommittedChanges" class="git-empty">当前工作区干净，没有可提交修改。</p><div v-if="details.commitPlan && gitStatus?.hasUncommittedChanges" class="commit-plan-summary"><span>风险 {{ details.commitPlan.riskLevel }}</span><p>{{ details.commitPlan.summary }}</p><article v-for="group in details.commitPlan.groups" :key="group.id"><div class="commit-group-title"><b>{{ group.title }}</b><i :class="{ committed: group.status === 'committed' }">{{ group.status === "committed" ? "已提交" : `${group.files.length} 个文件` }}</i></div><input v-model="commitMessages[group.id]" :disabled="group.status === 'committed'" aria-label="提交信息"><small>{{ group.riskNotes }}</small><details><summary>查看文件</summary><p v-for="file in group.files" :key="file">{{ file }}</p></details><button class="button primary small" :disabled="loading || group.status === 'committed'" @click="commitGroup(group.id, group.files)">提交本组</button></article></div></section>
+        <section class="commit-plan">
+          <header>
+            <div><h3>提交修改</h3><p>AI 根据实际代码差异生成中文提交信息；提交前可以修改。</p></div>
+            <div class="commit-plan-actions">
+              <div class="commit-grouping-switch" role="group" aria-label="提交分组方式">
+                <button :class="{ active: commitGroupingMode === 'single' }" @click="commitGroupingMode = 'single'">全部合成一次</button>
+                <button :class="{ active: commitGroupingMode === 'feature' }" @click="commitGroupingMode = 'feature'">按功能关联分组</button>
+              </div>
+              <button class="button secondary" :disabled="loading || !gitStatus?.hasUncommittedChanges" @click="planCommit">{{ loading ? "AI 分析中…" : details.commitPlan ? "重新生成" : "AI 生成提交建议" }}</button>
+            </div>
+          </header>
+          <p v-if="!gitStatus?.hasUncommittedChanges" class="git-empty">当前工作区干净，没有可提交修改。</p>
+          <div v-if="details.commitPlan && gitStatus?.hasUncommittedChanges" class="commit-plan-summary">
+            <div class="commit-plan-meta">
+              <span>风险 {{ details.commitPlan.riskLevel }}</span>
+              <span :class="{ fallback: details.commitPlan.generator === 'rules' }">{{ details.commitPlan.generator === "deepseek" ? `AI 生成 · ${details.commitPlan.model}` : "本地规则降级" }}</span>
+              <span>{{ details.commitPlan.groupingMode === "single" ? "全部合成一次" : "按功能关联分组" }}</span>
+            </div>
+            <p>{{ details.commitPlan.summary }}</p>
+            <p v-if="details.commitPlan.generationWarning" class="commit-generation-warning">{{ details.commitPlan.generationWarning }}</p>
+            <details v-if="details.commitPlan.excludedFiles.length" class="commit-excluded-files">
+              <summary>{{ details.commitPlan.excludedFiles.length }} 个敏感文件、二进制或生成物未纳入提交</summary>
+              <p v-for="file in details.commitPlan.excludedFiles" :key="file">{{ file }}</p>
+            </details>
+            <article v-for="group in details.commitPlan.groups" :key="group.id">
+              <div class="commit-group-title"><b>{{ group.title }}</b><i :class="{ committed: group.status === 'committed' }">{{ group.status === "committed" ? "已提交" : `${group.files.length} 个文件` }}</i></div>
+              <input v-model="commitMessages[group.id]" :disabled="group.status === 'committed'" aria-label="提交信息">
+              <small>{{ group.riskNotes }}</small>
+              <details><summary>查看文件</summary><p v-for="file in group.files" :key="file">{{ file }}</p></details>
+              <button class="button primary small" :disabled="loading || group.status === 'committed'" @click="commitGroup(group.id, group.files)">{{ details.commitPlan.groupingMode === "single" ? "提交全部修改" : "提交本组" }}</button>
+            </article>
+          </div>
+        </section>
         <section v-if="gitStatus" class="git-dashboard"><header><div><h3>仓库状态</h3><p>{{ gitStatus.remoteUrl || "未配置 origin 远程仓库" }}</p></div><button class="button secondary small" :disabled="loading" @click="loadGitStatus(selected.path)">刷新状态</button></header><div class="git-metrics"><article><small>当前分支</small><b>{{ gitStatus.currentBranch }}</b></article><article><small>上游分支</small><b>{{ gitStatus.upstream || "未关联" }}</b></article><article><small>领先 / 落后</small><b>{{ gitStatus.ahead }} / {{ gitStatus.behind }}</b></article><article><small>工作区</small><b>{{ gitStatus.changedFiles.length }} 个文件</b></article></div><div class="git-remote-actions"><button class="button secondary" :disabled="loading || !gitStatus.hasUncommittedChanges" @click="runGitAction(() => stageGitRepositoryChanges(selected!.path))">添加到暂存区</button><button class="button secondary" :disabled="loading || !gitStatus.remoteUrl" @click="runGitAction(() => fetchGitRepository(selected!.path))">更新远程</button><button class="button secondary" :disabled="loading || !gitStatus.remoteUrl" @click="runGitAction(() => pullGitRepository(selected!.path))">拉取代码</button><button class="button primary" :disabled="loading || !gitStatus.remoteUrl" @click="runGitAction(() => pushGitRepository(selected!.path))">推送</button></div><small class="git-action-help">添加只改变 Git 暂存区；更新远程不会修改本地文件；拉取会快进或创建合并提交，冲突时自动中止并恢复；推送只发送已经提交的内容。</small><details v-if="gitStatus.changedFiles.length" class="git-changed-files"><summary>查看 {{ gitStatus.changedFiles.length }} 个变更文件</summary><article v-for="file in gitStatus.changedFiles" :key="`${file.indexStatus}${file.worktreeStatus}:${file.path}`"><i>{{ file.label }}</i><code>{{ file.path }}</code></article></details></section>
         <section v-if="gitStatus" class="git-branch-panel"><h3>分支操作</h3><div><label>切换本地分支<select v-model="switchBranch"><option v-for="branch in gitStatus.branches" :key="branch">{{ branch }}</option></select></label><button class="button secondary" :disabled="loading || switchBranch === gitStatus.currentBranch" @click="runGitAction(() => switchGitRepositoryBranch(selected!.path, switchBranch))">切换</button></div><div><label>合并来源分支<select v-model="mergeBranch"><option value="" disabled>请选择分支</option><option v-for="branch in mergeOptions" :key="branch">{{ branch }}</option></select></label><button class="button secondary" :disabled="loading || !mergeBranch" @click="runGitAction(() => mergeGitRepositoryBranch(selected!.path, mergeBranch))">合并</button></div></section>
         <section class="git-credential-panel"><header><div><h3>默认 Git 凭据</h3><p>项目自身没有可用登录凭据时使用；只保存在 Windows 凭据库。</p></div><span :class="{ configured: gitStatus?.credential.configured }">{{ gitStatus?.credential.configured ? `已配置 · ${gitStatus.credential.username}` : "未配置" }}</span></header><div><input v-model="credentialUsername" placeholder="用户名（默认 lzsk）"><input v-model="credentialSecret" type="password" autocomplete="new-password" placeholder="密码或访问令牌"><button class="button primary" :disabled="loading || !credentialSecret" @click="saveCredential">保存凭据</button><button v-if="gitStatus?.credential.configured" class="button danger-button" @click="clearCredential">删除</button></div><small>GitHub 已不支持账号密码拉取，请在这里填写个人访问令牌；密码或令牌不会写入项目配置、数据库或日志。</small></section>
@@ -431,4 +468,6 @@ onBeforeUnmount(() => { if (runtimeTimer) window.clearInterval(runtimeTimer); })
 .asset-drawer{width:min(920px,calc(100vw - 40px))}.drawer-header-actions{flex-wrap:wrap}.continue-card>div>p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:900px){.asset-metrics{grid-template-columns:repeat(2,1fr)}.asset-drawer{width:100vw}.association-grid{grid-template-columns:1fr}.runtime-metrics{grid-template-columns:1fr}.scan-settings-dialog{width:calc(100vw - 24px)}}
 .asset-table-wrap{overflow-x:hidden;overflow-y:auto}.asset-table{width:100%;min-width:0;max-width:100%;table-layout:fixed}.asset-table th:nth-child(1){width:52px}.asset-table th:nth-child(2){width:16%}.asset-table th:nth-child(3){width:13%}.asset-table th:nth-child(4){width:11%}.asset-table th:nth-child(5){width:14%}.asset-table th:nth-child(6){width:19%}.asset-table th:nth-child(7){width:11%}.asset-table th:nth-child(8){width:8%}.asset-table td{overflow:hidden}.asset-table td b,.asset-table td small{max-width:100%}.asset-table th,.asset-table td{padding-left:8px;padding-right:8px}.asset-row-actions{display:grid;grid-template-columns:1fr;gap:5px;white-space:normal}.asset-row-actions .asset-row-button{width:100%;min-width:0;padding:0 4px}.status-stack>*{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.runtime-address-button{display:block;max-width:100%;border:0;background:transparent;color:var(--primary);padding:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;text-decoration:underline;text-underline-offset:2px;cursor:pointer}.runtime-address-empty{color:var(--muted)}
+.commit-plan-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.commit-grouping-switch{height:36px;display:flex;align-items:center;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}.commit-grouping-switch button{height:28px;border:0;border-radius:6px;background:transparent;color:var(--muted);padding:0 10px;white-space:nowrap}.commit-grouping-switch button.active{background:var(--primary-soft);color:var(--primary);font-weight:800}.commit-plan-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:10px 0}.commit-plan-meta>span{margin:0;padding:5px 8px;border-radius:6px;background:var(--primary-soft);color:var(--primary);font-size:9px}.commit-plan-meta>span:first-child,.commit-plan-meta>span.fallback{background:color-mix(in srgb,var(--warning) 12%,transparent);color:var(--warning)}.commit-generation-warning{padding:8px 10px;border-radius:7px;background:color-mix(in srgb,var(--warning) 10%,transparent);color:var(--warning)!important}.commit-excluded-files{margin:9px 0;padding:9px 11px;border:1px solid color-mix(in srgb,var(--warning) 35%,var(--line));border-radius:8px;color:var(--warning)}.commit-excluded-files summary{cursor:pointer}.commit-excluded-files p{margin:5px 0 0;color:var(--muted);font:9px/1.5 monospace;overflow-wrap:anywhere}
+@media(max-width:900px){.commit-plan>header{flex-direction:column}.commit-plan-actions{width:100%;justify-content:flex-start}.commit-grouping-switch{max-width:100%}.commit-grouping-switch button{padding:0 7px}}
 </style>

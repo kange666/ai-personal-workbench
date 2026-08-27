@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 36;
+pub const SCHEMA_VERSION: i64 = 37;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -572,6 +572,11 @@ impl DatabaseState {
                    status TEXT NOT NULL DEFAULT 'draft',
                    risk_level TEXT NOT NULL DEFAULT 'unverified',
                    summary TEXT NOT NULL DEFAULT '',
+                   grouping_mode TEXT NOT NULL DEFAULT 'single',
+                   generator TEXT NOT NULL DEFAULT 'rules',
+                   model TEXT NOT NULL DEFAULT '',
+                   generation_warning TEXT NOT NULL DEFAULT '',
+                   excluded_files_json TEXT NOT NULL DEFAULT '[]',
                    created_at TEXT NOT NULL,
                    updated_at TEXT NOT NULL
                  );
@@ -960,6 +965,11 @@ impl DatabaseState {
             "ALTER TABLE test_runs ADD COLUMN exit_code INTEGER",
             "ALTER TABLE test_runs ADD COLUMN environment_summary TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE test_runs ADD COLUMN cleanup_status TEXT NOT NULL DEFAULT 'not-applicable'",
+            "ALTER TABLE commit_plans ADD COLUMN grouping_mode TEXT NOT NULL DEFAULT 'single'",
+            "ALTER TABLE commit_plans ADD COLUMN generator TEXT NOT NULL DEFAULT 'rules'",
+            "ALTER TABLE commit_plans ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE commit_plans ADD COLUMN generation_warning TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE commit_plans ADD COLUMN excluded_files_json TEXT NOT NULL DEFAULT '[]'",
         ] {
             let _ = connection.execute(migration, []);
         }
@@ -1454,6 +1464,22 @@ mod migration_tests {
             )
             .unwrap();
         assert!(repository_runtime_runs_exists);
+        for column in [
+            "grouping_mode",
+            "generator",
+            "model",
+            "generation_warning",
+            "excluded_files_json",
+        ] {
+            let exists: bool = upgraded
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('commit_plans') WHERE name=?1)",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "commit_plans 缺少 {column}");
+        }
         let tapd_sort_column_exists: bool = upgraded
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tapd_projects') WHERE name='sort_order')",

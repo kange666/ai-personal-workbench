@@ -44,6 +44,7 @@ pub struct CodexQuotaSnapshot {
     available: bool,
     captured_at: Option<String>,
     plan_type: Option<String>,
+    reset_credits_available: Option<u32>,
     primary: Option<CodexQuotaWindow>,
     secondary: Option<CodexQuotaWindow>,
     source_file: Option<String>,
@@ -140,6 +141,7 @@ fn quota_from_event(value: &Value) -> Option<CodexQuotaSnapshot> {
             .get("plan_type")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        reset_credits_available: None,
         primary,
         secondary,
         source_file: None,
@@ -147,6 +149,38 @@ fn quota_from_event(value: &Value) -> Option<CodexQuotaSnapshot> {
         freshness: String::new(),
         selection_reason: String::new(),
     })
+}
+
+fn reset_credits_from_state(state: &Value, account_id: Option<&str>) -> Option<u32> {
+    let accounts = state
+        .pointer(
+            "/electron-persisted-atom-state/rate-limit-reset-home-announcement-dismissal-by-account-id",
+        )?
+        .as_object()?;
+    let account = match account_id {
+        Some(account_id) => accounts.get(account_id)?,
+        None if accounts.len() == 1 => accounts.values().next()?,
+        None => return None,
+    };
+    account
+        .get("availableCount")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn available_reset_credits(codex_home: &Path) -> Option<u32> {
+    let state: Value =
+        serde_json::from_reader(File::open(codex_home.join(".codex-global-state.json")).ok()?)
+            .ok()?;
+    let account_id = File::open(codex_home.join("auth.json"))
+        .ok()
+        .and_then(|file| serde_json::from_reader::<_, Value>(file).ok())
+        .and_then(|auth| {
+            auth.pointer("/tokens/account_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+    reset_credits_from_state(&state, account_id.as_deref())
 }
 
 fn quota_from_file_tail(path: &Path) -> Option<CodexQuotaSnapshot> {
@@ -247,6 +281,8 @@ fn latest_quota_snapshot_from_files(
 }
 
 fn latest_quota_snapshot() -> CodexQuotaSnapshot {
+    let profile = std::env::var("USERPROFILE").unwrap_or_default();
+    let codex_home = PathBuf::from(profile).join(".codex");
     let files = roots()
         .into_iter()
         .filter(|(root, _)| root.exists())
@@ -266,7 +302,9 @@ fn latest_quota_snapshot() -> CodexQuotaSnapshot {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    latest_quota_snapshot_from_files(files, Utc::now().timestamp())
+    let mut snapshot = latest_quota_snapshot_from_files(files, Utc::now().timestamp());
+    snapshot.reset_credits_available = available_reset_credits(&codex_home);
+    snapshot
 }
 
 pub(crate) fn latest_tray_quota() -> Option<TrayQuota> {
@@ -596,6 +634,36 @@ mod quota_tests {
         assert_eq!(quota.plan_type.as_deref(), Some("prolite"));
     }
 
+    #[test]
+    fn reads_reset_credits_for_the_active_account() {
+        let state = serde_json::json!({
+            "electron-persisted-atom-state": {
+                "rate-limit-reset-home-announcement-dismissal-by-account-id": {
+                    "active-account": {"availableCount": 1},
+                    "other-account": {"availableCount": 3}
+                }
+            }
+        });
+        assert_eq!(
+            reset_credits_from_state(&state, Some("active-account")),
+            Some(1)
+        );
+        assert_eq!(reset_credits_from_state(&state, Some("missing")), None);
+        assert_eq!(reset_credits_from_state(&state, None), None);
+    }
+
+    #[test]
+    fn keeps_zero_reset_credits_distinct_from_missing_data() {
+        let state = serde_json::json!({
+            "electron-persisted-atom-state": {
+                "rate-limit-reset-home-announcement-dismissal-by-account-id": {
+                    "only-account": {"availableCount": 0}
+                }
+            }
+        });
+        assert_eq!(reset_credits_from_state(&state, None), Some(0));
+    }
+
     fn quota_event(timestamp: &str, used_percent: f64, resets_at: i64) -> String {
         serde_json::json!({
             "timestamp": timestamp,
@@ -669,6 +737,10 @@ mod quota_tests {
     fn reads_latest_local_quota_snapshot() {
         let quota = latest_quota_snapshot();
         assert!(quota.available, "本机 Codex 日志应包含额度快照");
+        assert!(
+            quota.reset_credits_available.is_some(),
+            "本机 Codex 状态应包含可用重置次数"
+        );
         let window = quota.primary.or(quota.secondary).expect("应当包含额度周期");
         assert!((0.0..=100.0).contains(&window.remaining_percent));
         assert!(window.window_minutes > 0);
