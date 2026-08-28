@@ -18,6 +18,7 @@ import WorkspaceSearch from "./WorkspaceSearch.vue";
 import NotificationDrawer from "./NotificationDrawer.vue";
 import QuickCapture from "./QuickCapture.vue";
 import { loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
+import { estimateTestRunProgress } from "../utils/testRunProgress";
 
 const store = useWorkbenchStore();
 const router = useRouter();
@@ -87,14 +88,19 @@ const healthSummary = computed(() => healthLoading.value ? "检查中" : healthI
 const unreadCount = computed(() => notifications.value.filter(item => !item.isRead).length);
 const pendingReviewCount = computed(() => notifications.value.filter(item => item.kind !== "tapd_item" && item.reviewStatus === "pending").length);
 const activeOperations = computed(() => [
-  ...activeTestRuns.value.map(run => ({
-    id:`test:${run.id}`,
-    kind:"test" as const,
-    title:run.menuName,
-    detail:`${run.totalCount || run.selectedScenarios.length} 个场景 · ${run.project || "测试项目"}`,
-    status:run.status === "queued" ? "等待执行" : "正在测试",
-    href:"/testing",
-  })),
+  ...activeTestRuns.value.map(run => {
+    const progress=estimateTestRunProgress(run,allTestRuns.value,railNow.value);
+    return {
+      id:`test:${run.id}`,
+      kind:"test" as const,
+      title:run.menuName,
+      detail:`${run.totalCount || run.selectedScenarios.length} 个场景 · ${run.project || "测试项目"}`,
+      status:run.status === "queued" ? "等待执行" : "正在测试",
+      href:"/testing",
+      progressPercent:progress.percent,
+      etaText:progress.etaText,
+    };
+  }),
   ...activeTapdJobs.value.map(job => ({
     id:`tapd:${job.id}`,
     kind:"tapd" as const,
@@ -102,6 +108,8 @@ const activeOperations = computed(() => [
     detail:`${job.triggerSource === "auto" ? "自动处理" : "手动处理"} · ${job.workspaceId}`,
     status:job.status === "queued" ? "等待处理" : "正在处理",
     href:"/tapd",
+    progressPercent:undefined,
+    etaText:"",
   })),
 ]);
 const railIssues = computed(() => {
@@ -368,6 +376,7 @@ function isTopbarInteractiveTarget(target:HTMLElement) {
 }
 async function loadActiveOperations() {
   if (!isTauriRuntime()) return;
+  railNow.value=Date.now();
   const [testResult,tapdResult,projectsResult] = await Promise.allSettled([listTestRuns(),listTapdCodexJobs(),listRunningRepositoryProjects()]);
   if (testResult.status === "fulfilled") { allTestRuns.value=testResult.value; activeTestRuns.value=testResult.value.filter(item => item.status === "queued" || item.status === "running"); }
   else console.error("读取正在执行的测试失败",testResult.reason);
@@ -677,7 +686,8 @@ onBeforeUnmount(() => {
           <span class="rail-running-item-head"><i :class="item.kind">{{ item.kind === 'test' ? '测试' : 'TAPD' }}</i><em>{{ item.status }}</em></span>
           <b :title="item.title">{{ item.title }}</b>
           <small :title="item.detail">{{ item.detail }}</small>
-          <span class="rail-running-progress"><i></i></span>
+          <span class="rail-running-progress" :class="{ determinate:item.kind === 'test' }" :role="item.kind === 'test' ? 'progressbar' : undefined" :aria-valuenow="item.kind === 'test' ? item.progressPercent : undefined" aria-valuemin="0" aria-valuemax="100"><i :style="item.kind === 'test' ? { width:`${item.progressPercent}%` } : undefined"></i></span>
+          <span v-if="item.kind === 'test'" class="rail-running-estimate"><b>{{ item.progressPercent }}%</b><em>{{ item.etaText }}</em></span>
         </RouterLink>
         <p>任务完成后会自动从这里移出。</p>
       </section>

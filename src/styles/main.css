@@ -260,3 +260,4 @@ button:disabled{cursor:not-allowed}
 .rail-recent-list small{color:var(--muted);font-size:8px}
 .rail-recent-list>p{margin:8px 0 0;text-align:center}
 @media(max-width:1280px){.workbench-page-loader{right:0}}
+.rail-running-progress{height:5px;border-radius:3px}.rail-running-progress>i{border-radius:3px}.rail-running-progress.determinate>i{transform:none;animation:none;transition:width .35s ease}.rail-running-estimate{display:flex;align-items:center;justify-content:space-between;gap:8px}.rail-running-estimate>b{font-size:9px;color:var(--primary)}.rail-running-estimate>em{font-style:normal;font-size:9px;color:var(--muted);text-align:right}

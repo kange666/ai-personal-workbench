@@ -195,6 +195,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(git::ProjectProcessState::default())
         .manage(testing::TestProcessState::default())
+        .manage(testing::TestCaseGenerationState::default())
         .setup(|app| {
             app.handle().plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -533,6 +534,9 @@ pub fn run() {
             testing::list_test_menus,
             testing::list_test_projects,
             testing::list_test_scenarios,
+            testing::list_test_suites,
+            testing::start_test_case_generation,
+            testing::get_test_case_generation,
             testing::recommend_tests_from_git,
             testing::list_test_runs,
             testing::read_test_report,

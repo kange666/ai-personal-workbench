@@ -711,6 +711,29 @@ export interface TestScenario {
   defaultSelected: boolean;
 }
 
+export interface TestSuite {
+  id: "common-real" | "dedicated-real";
+  name: string;
+  description: string;
+  kind: "common" | "dedicated";
+  readOnly: boolean;
+  specPath?: string;
+}
+
+export interface TestCaseGenerationJob {
+  id: string;
+  projectPath: string;
+  menuId: string;
+  menuName: string;
+  status: "queued" | "running" | "completed" | "failed";
+  progressPercent: number;
+  progressMessage: string;
+  errorMessage: string;
+  generatedSpecPath?: string;
+  createdAt: string;
+  finishedAt?: string;
+}
+
 export interface TestArtifact {
   name: string;
   path: string;
@@ -788,6 +811,7 @@ export interface StartTestOptions {
   menuId: string;
   mode: TestMode;
   selectedScenarios: string[];
+  testSuiteId?: TestSuite["id"];
   createCaseFile?: boolean;
   confirmedRealWrite?: boolean;
   account?: string;
@@ -1579,8 +1603,20 @@ export async function cancelTestRun(runId: string): Promise<TestRun> {
   return invoke<TestRun>("cancel_test_run", { runId });
 }
 
-export async function listTestScenarios(projectPath: string, menuId: string, mode: TestMode): Promise<TestScenario[]> {
-  return invoke<TestScenario[]>("list_test_scenarios", { projectPath, menuId, mode });
+export async function listTestScenarios(projectPath: string, menuId: string, mode: TestMode, testSuiteId?: TestSuite["id"]): Promise<TestScenario[]> {
+  return invoke<TestScenario[]>("list_test_scenarios", { projectPath, menuId, mode, testSuiteId: testSuiteId || null });
+}
+
+export async function listTestSuites(projectPath: string, menuId: string): Promise<TestSuite[]> {
+  return invoke<TestSuite[]>("list_test_suites", { projectPath, menuId });
+}
+
+export async function startTestCaseGeneration(projectPath: string, menuId: string): Promise<TestCaseGenerationJob> {
+  return invoke<TestCaseGenerationJob>("start_test_case_generation", { projectPath, menuId });
+}
+
+export async function getTestCaseGeneration(jobId: string): Promise<TestCaseGenerationJob> {
+  return invoke<TestCaseGenerationJob>("get_test_case_generation", { jobId });
 }
 
 export async function preflightTest(options: StartTestOptions): Promise<TestPreflight> {

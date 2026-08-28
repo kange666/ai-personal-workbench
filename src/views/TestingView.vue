@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { cancelTestRun, ensureWeeklyAudit, getTestRun, isTauriRuntime, listFeatureParity, listTestMenus, listTestProjects, listTestRuns, listTestScenarios, listToolchains, listWeeklyAudits, preflightTest, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestMenu, type TestPreflight, type TestProject, type TestRecommendation, type TestRun, type TestScenario, type TestMode, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
+import { cancelTestRun, ensureWeeklyAudit, getTestCaseGeneration, getTestRun, isTauriRuntime, listFeatureParity, listTestMenus, listTestProjects, listTestRuns, listTestScenarios, listTestSuites, listToolchains, listWeeklyAudits, preflightTest, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestCaseGeneration, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestCaseGenerationJob, type TestMenu, type TestPreflight, type TestProject, type TestRecommendation, type TestRun, type TestScenario, type TestSuite, type TestMode, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
 import TestReportDialog from "../components/TestReportDialog.vue";
 
@@ -53,6 +53,9 @@ const mode = ref<TestMode>("mock");
 const createCaseFile = ref(false);
 const scenarios = ref<TestScenario[]>([]);
 const selectedScenarios = ref<string[]>([]);
+const testSuites = ref<TestSuite[]>([]);
+const selectedTestSuiteId = ref<TestSuite["id"]>("common-real");
+const caseGeneration = ref<TestCaseGenerationJob | null>(null);
 const preflight = ref<TestPreflight | null>(null);
 const scenarioLoading = ref(false);
 const selectedRecommendations = ref<string[]>([]);
@@ -91,6 +94,9 @@ const stats = computed(() => ({
   blocked: menus.value.filter((menu) => ["blocked", "error", "cancelled"].includes(menu.latestStatus || "")).length,
 }));
 const selectedProject = computed(() => projects.value.find((item) => item.path === selectedProjectPath.value));
+const selectedTestSuite = computed(() => testSuites.value.find((item) => item.id === selectedTestSuiteId.value));
+const dedicatedTestSuite = computed(() => testSuites.value.find((item) => item.kind === "dedicated"));
+const generatingDedicatedCase = computed(() => ["queued", "running"].includes(caseGeneration.value?.status || ""));
 const parityDomains = computed(() => ["全部领域", ...new Set(parities.value.map(item=>item.domain).filter(Boolean))]);
 const parityStats = computed(() => ({
   total: parities.value.length,
@@ -157,7 +163,7 @@ function availableModes(menu: TestMenu): TestMode[] {
   const values: TestMode[] = [];
   const capabilities = menu.hasCaseFile || !createCaseFile.value ? menu.capabilities : selectedProject.value?.capabilities || menu.capabilities;
   if (capabilities.mock) values.push("mock");
-  if (capabilities.realApi) values.push("real");
+  if (capabilities.realApi || selectedProject.value?.capabilities.realApi) values.push("real");
   if (capabilities.sourceStyle) values.push("source-style");
   if (capabilities.browserStyle) values.push("browser-style");
   return values;
@@ -166,7 +172,15 @@ async function loadScenarios() {
   if (!configuring.value || !selectedProjectPath.value) return;
   scenarioLoading.value = true; preflight.value = null;
   try {
-    scenarios.value = isTauriRuntime() ? await listTestScenarios(selectedProjectPath.value, configuring.value.id, mode.value) : [{id:"scenario-1",title:"页面基础区域正常显示",description:"确认页面核心区域可以正常显示。",mode:mode.value,defaultSelected:true}];
+    if (mode.value === "real") {
+      testSuites.value = isTauriRuntime()
+        ? await listTestSuites(selectedProjectPath.value, configuring.value.id)
+        : [{id:"common-real",name:"公共通用用例",description:"所有真实接口页面都可以使用的只读检查。",kind:"common",readOnly:true}];
+      if (!testSuites.value.some(item => item.id === selectedTestSuiteId.value)) selectedTestSuiteId.value = "common-real";
+    } else {
+      testSuites.value = [];
+    }
+    scenarios.value = isTauriRuntime() ? await listTestScenarios(selectedProjectPath.value, configuring.value.id, mode.value, mode.value === "real" ? selectedTestSuiteId.value : undefined) : [{id:"scenario-1",title:"页面基础区域正常显示",description:"确认页面核心区域可以正常显示。",mode:mode.value,defaultSelected:true}];
     selectedScenarios.value = scenarios.value.filter(item => item.defaultSelected).map(item => item.title);
   } catch (cause) { scenarios.value = []; selectedScenarios.value = []; error.value = String(cause); }
   finally { scenarioLoading.value = false; }
@@ -174,10 +188,38 @@ async function loadScenarios() {
 async function openConfig(menu: TestMenu) {
   configuring.value = menu;
   createCaseFile.value = false;
+  selectedTestSuiteId.value = "common-real";
+  testSuites.value = [];
+  caseGeneration.value = null;
   const values = availableModes(menu);
   mode.value = menu.hasCaseFile && values.includes("mock") ? "mock" : "source-style";
   account.value = ""; token.value = ""; useEnvironmentToken.value = true; confirmedRealWrite.value = false; error.value = ""; message.value = "";
   await loadScenarios();
+}
+
+async function generateDedicatedCase() {
+  if (!configuring.value || generatingDedicatedCase.value || loading.value || !isTauriRuntime()) return;
+  error.value = ""; message.value = "";
+  const originalMenuId = configuring.value.id;
+  const originalRoute = configuring.value.route;
+  try {
+    caseGeneration.value = await startTestCaseGeneration(selectedProjectPath.value, originalMenuId);
+    while (caseGeneration.value && ["queued", "running"].includes(caseGeneration.value.status)) {
+      await wait(650);
+      caseGeneration.value = await getTestCaseGeneration(caseGeneration.value.id);
+    }
+    if (!caseGeneration.value || caseGeneration.value.status !== "completed") {
+      throw new Error(caseGeneration.value?.errorMessage || "专属用例生成失败，请查看 Codex CLI 状态。");
+    }
+    await refreshSelectedProject();
+    const refreshed = menus.value.find(item => item.id === originalMenuId || item.route === originalRoute);
+    if (refreshed) configuring.value = refreshed;
+    selectedTestSuiteId.value = "dedicated-real";
+    await loadScenarios();
+    message.value = `${caseGeneration.value.menuName} 专属用例已生成并通过校验，已自动切换到专属场景。`;
+  } catch (cause) {
+    error.value = String(cause);
+  }
 }
 async function openRecommendation(item:TestRecommendation) {
   const menu=menus.value.find(value=>value.id===item.menuId);
@@ -238,7 +280,7 @@ async function saveParity(feature: FeatureParity) {
 async function runTest() {
   if (!configuring.value || loading.value || testRunning.value) return;
   testRunning.value = true; cancellingTest.value = false; error.value = ""; message.value = "";
-  const options: StartTestOptions = { projectPath: selectedProjectPath.value, menuId: configuring.value.id, mode: mode.value, selectedScenarios: [...selectedScenarios.value], createCaseFile: createCaseFile.value, confirmedRealWrite: confirmedRealWrite.value, account: account.value.trim() || undefined, token: token.value || undefined, useEnvironmentToken: useEnvironmentToken.value };
+  const options: StartTestOptions = { projectPath: selectedProjectPath.value, menuId: configuring.value.id, mode: mode.value, selectedScenarios: [...selectedScenarios.value], testSuiteId: mode.value === "real" ? selectedTestSuiteId.value : undefined, createCaseFile: mode.value === "real" ? false : createCaseFile.value, confirmedRealWrite: selectedTestSuite.value?.readOnly ? false : confirmedRealWrite.value, account: account.value.trim() || undefined, token: token.value || undefined, useEnvironmentToken: useEnvironmentToken.value };
   token.value = "";
   try {
     if (!isTauriRuntime()) throw new Error("浏览器预览只能查看界面，请在桌面开发版中运行测试。");
@@ -307,8 +349,9 @@ async function runRecommendedBatch() {
       const recommendation = recommendations.value.find(item => item.menuId === menuId);
       const menu = menus.value.find(item => item.id === menuId);
       if (!recommendation || !menu || !menu.hasCaseFile) { failed += 1; continue; }
-      const available = await listTestScenarios(selectedProjectPath.value, menuId, recommendation.recommendedMode);
-      const queued = await startTestRun({ projectPath:selectedProjectPath.value, menuId, mode:recommendation.recommendedMode, selectedScenarios:available.map(item=>item.title), useEnvironmentToken:true });
+      const suiteId = recommendation.recommendedMode === "real" ? "common-real" : undefined;
+      const available = await listTestScenarios(selectedProjectPath.value, menuId, recommendation.recommendedMode, suiteId);
+      const queued = await startTestRun({ projectPath:selectedProjectPath.value, menuId, mode:recommendation.recommendedMode, selectedScenarios:available.map(item=>item.title), testSuiteId:suiteId, useEnvironmentToken:true });
       const run = await waitForTestCompletion(queued);
       completed += 1; if (run.status !== "passed") failed += 1;
       activeReportRun.value = run; reportTitle.value = `${run.menuName} · ${modeLabel(run.mode)}`; reportContent.value = run.reportMarkdown;
@@ -388,23 +431,30 @@ onMounted(async () => {
       <footer class="parity-review"><label>核对结论<select v-model="selectedParity.parityStatus"><option value="static-aligned">已匹配，待实际测试</option><option value="confirmed">人工确认一致</option><option value="different">存在差异</option><option value="pc-only">仅 PC 存在</option><option value="app-only">仅 APP 存在</option><option value="pending">待核对</option></select></label><label class="check-row"><input v-model="selectedParity.intentionalDifference" type="checkbox">差异属于有意设计</label><button class="button primary" :disabled="loading" @click="saveParity(selectedParity)">保存人工核对</button></footer>
     </section></div>
 
-    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && !testRunning && (configuring = null)">
+    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && !testRunning && !generatingDedicatedCase && (configuring = null)">
       <section class="panel test-config-dialog test-config-v2">
-        <header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading || testRunning" @click="configuring = null">×</button></header>
-        <div class="test-config-body" :class="{locked:testRunning}">
-          <label v-if="!configuring.hasCaseFile" class="case-create-option"><span><input v-model="createCaseFile" type="checkbox"><b>添加测试文件</b></span><small>将在 {{ configuring.projectPath }}\e2e\menu-cases 中新增 JSON 配置；如果同名文件已经存在会停止，不覆盖原文件。</small></label>
-          <label>测试类型<select v-model="mode"><option v-for="value in availableModes(configuring)" :key="value" :value="value">{{ modeLabel(value) }}</option></select><small v-if="!configuring.hasCaseFile && !createCaseFile">当前没有功能用例，只能执行页面源码与样式检查；勾选添加测试文件后会显示项目运行器实际支持的类型。</small></label>
-          <section class="scenario-selector"><header><div><b>测试场景</b><small>默认全选，可以只运行本次需要核对的场景。</small></div><label><input type="checkbox" :checked="selectedScenarios.length === scenarios.length && scenarios.length > 0" @change="onToggleAllScenarios">全选</label></header><div v-if="scenarioLoading" class="scenario-empty">正在读取项目测试场景…</div><label v-for="item in scenarios" v-else :key="item.id"><input v-model="selectedScenarios" type="checkbox" :value="item.title"><span><b>{{ item.title }}</b><small>{{ item.description }}</small></span></label><div v-if="!scenarioLoading && !scenarios.length" class="scenario-empty">当前测试类型没有可识别的场景，请检查项目运行器。</div></section>
-          <div v-if="mode === 'real'" class="real-test-warning"><b>真实接口写入提醒</b><p>真实用例可能创建、修改或删除 E2E 前缀测试数据，并在结束时尝试清理。只有确认测试环境允许写入时才执行。</p></div>
-          <label v-if="mode === 'real'" class="check-row real-confirm"><input v-model="confirmedRealWrite" type="checkbox">我确认当前是允许写入和清理测试数据的环境</label>
+        <header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading || testRunning || generatingDedicatedCase" @click="configuring = null">×</button></header>
+        <div class="test-config-body" :class="{locked:testRunning || generatingDedicatedCase}">
+          <label v-if="!configuring.hasCaseFile && mode !== 'real'" class="case-create-option"><span><input v-model="createCaseFile" type="checkbox"><b>添加测试配置</b></span><small>根据当前页面源码生成 JSON 配置；这不是 Playwright 专属脚本。真实接口专属脚本请使用下方 Codex CLI 按钮生成。</small></label>
+          <label>测试类型<select v-model="mode"><option v-for="value in availableModes(configuring)" :key="value" :value="value">{{ modeLabel(value) }}</option></select><small v-if="!configuring.hasCaseFile && !createCaseFile && mode !== 'real'">当前没有功能用例，可执行页面源码检查，或添加测试配置后使用项目已有运行器。</small></label>
+          <section v-if="mode === 'real'" class="test-suite-selector">
+            <header><div><b>真实接口测试用例</b><small>公共用例始终可用；专属用例只在 Codex 生成并校验成功后显示。</small></div></header>
+            <label v-for="suite in testSuites" :key="suite.id" :class="{active:selectedTestSuiteId===suite.id}"><input v-model="selectedTestSuiteId" type="radio" :value="suite.id" @change="loadScenarios"><span><b>{{ suite.name }}<em>{{ suite.kind === 'common' ? '通用只读' : '业务专属' }}</em></b><small>{{ suite.description }}</small></span></label>
+            <div v-if="!dedicatedTestSuite && !generatingDedicatedCase" class="dedicated-case-empty"><div><b>还没有 {{ configuring.name }} 专属用例</b><small>点击后由 Codex CLI 阅读当前页面源码和接口，只生成该业务的 Playwright 脚本；通过校验后才会加入列表。</small></div><button class="button secondary" type="button" @click="generateDedicatedCase">用 Codex CLI 生成专属用例</button></div>
+          </section>
+          <section v-if="caseGeneration && generatingDedicatedCase" class="case-generation-progress"><header><b><i></i>正在生成 {{ caseGeneration.menuName }} 专属用例</b><span>{{ caseGeneration.progressPercent }}%</span></header><div class="generation-progress-track"><i :style="{width:`${caseGeneration.progressPercent}%`}"></i></div><p>{{ caseGeneration.progressMessage }}</p><small>正在后台调用已登录的 Codex CLI；生成后还会执行 Playwright 场景收集校验。</small></section>
+          <section v-else-if="caseGeneration?.status === 'completed'" class="case-generation-progress completed"><header><b>✓ 专属用例已生成并通过校验</b><span>100%</span></header><p>{{ caseGeneration.generatedSpecPath }}</p></section>
+          <section class="scenario-selector"><header><div><b>测试场景</b><small>已按当前功能的测试配置和业务能力筛选，默认全选。</small></div><label><input type="checkbox" :checked="selectedScenarios.length === scenarios.length && scenarios.length > 0" @change="onToggleAllScenarios">全选</label></header><div v-if="scenarioLoading" class="scenario-empty">正在读取项目测试场景…</div><label v-for="item in scenarios" v-else :key="item.id"><input v-model="selectedScenarios" type="checkbox" :value="item.title"><span><b>{{ item.title }}</b><small>{{ item.description }}</small></span></label><div v-if="!scenarioLoading && !scenarios.length" class="scenario-empty">当前测试类型没有可识别的场景，请检查项目运行器。</div></section>
+          <div v-if="mode === 'real'" class="real-test-warning"><b>{{ selectedTestSuite?.readOnly ? '公共用例为只读测试' : '专属真实接口写入提醒' }}</b><p>{{ selectedTestSuite?.readOnly ? '只检查登录态、真实接口响应、查询、重置和页面稳定性，不提交新增、修改或删除请求。' : '专属用例可能创建、修改或删除 E2E 前缀测试数据，并在结束时尝试清理。只有确认测试环境允许写入时才执行。' }}</p></div>
+          <label v-if="mode === 'real' && !selectedTestSuite?.readOnly" class="check-row real-confirm"><input v-model="confirmedRealWrite" type="checkbox">我确认当前是允许写入和清理测试数据的环境</label>
           <label v-if="mode === 'real'" class="check-row"><input v-model="useEnvironmentToken" type="checkbox">读取 Windows 用户环境变量 HLZT_TOKEN</label>
           <label v-if="mode === 'real' && !useEnvironmentToken">临时 Token<input v-model="token" type="password" autocomplete="off" placeholder="只传给本次测试子进程，不保存"></label>
           <label v-if="mode === 'real'">测试账号（可选）<input v-model="account" autocomplete="off" placeholder="仅传给支持 E2E_TEST_ACCOUNT 的已有用例"><small>账号和 Token 都不会写入数据库或报告。</small></label>
           <div v-if="preflight" class="preflight-list" :class="{ready:preflight.ready}"><b>{{ preflight.ready ? '执行前检查通过' : '执行前检查未通过' }}</b><ul><li v-for="item in preflight.checks" :key="item.name" :class="{passed:item.passed}"><i>{{ item.passed?'✓':'×' }}</i><span>{{ item.name }}<small>{{ item.detail }}</small></span></li></ul></div>
           <section v-if="testRunning" class="test-run-progress"><header><b>{{ cancellingTest ? '正在取消测试' : '测试正在后台执行' }}</b><span>运行编号 {{ activeRunningRun?.id.slice(0,8) }}</span></header><div><i class="done">✓</i><span><b>执行前检查</b><small>项目、运行器、场景和凭据检查已完成</small></span></div><div><i class="active">2</i><span><b>{{ cancellingTest ? '停止测试进程' : '执行所选场景' }}</b><small>{{ cancellingTest ? '正在终止浏览器及其子进程' : `正在运行 ${activeRunningRun?.totalCount || selectedScenarios.length} 个场景` }}</small></span></div><div><i>3</i><span><b>整理测试报告</b><small>执行结束后自动汇总问题、截图和修复入口</small></span></div></section>
-          <div class="reuse-source"><b>测试来源</b><code v-if="configuring.caseFilePath">{{ configuring.caseFilePath }}</code><code v-else>{{ configuring.sourcePath }}（尚未添加测试配置）</code></div>
+          <div class="reuse-source"><b>测试来源</b><code v-if="mode === 'real' && selectedTestSuite?.specPath">{{ selectedTestSuite.specPath }}</code><code v-else-if="configuring.caseFilePath">{{ configuring.caseFilePath }}</code><code v-else>{{ configuring.sourcePath }}（尚未添加测试配置）</code></div>
         </div>
-        <footer><span>{{ testRunning ? '运行期间可离开页面，但请不要关闭桌面程序。' : '测试结果保存在工作台本地数据库；真实凭据不会保存。' }}</span><button v-if="testRunning" class="button secondary" :disabled="cancellingTest" @click="cancelCurrentTest">{{ cancellingTest ? '正在取消…' : '停止本次测试' }}</button><button v-else class="button secondary" :disabled="loading" @click="configuring = null">取消</button><button v-if="!testRunning" class="button primary" :disabled="loading || scenarioLoading || !selectedScenarios.length || (mode==='real' && !confirmedRealWrite)" @click="runTest">开始测试 {{ selectedScenarios.length }} 个场景</button></footer>
+        <footer><span>{{ generatingDedicatedCase ? 'Codex 生成和校验完成后会自动选择专属用例。' : testRunning ? '运行期间可离开页面，但请不要关闭桌面程序。' : '测试结果保存在工作台本地数据库；真实凭据不会保存。' }}</span><button v-if="testRunning" class="button secondary" :disabled="cancellingTest" @click="cancelCurrentTest">{{ cancellingTest ? '正在取消…' : '停止本次测试' }}</button><button v-else class="button secondary" :disabled="loading || generatingDedicatedCase" @click="configuring = null">取消</button><button v-if="!testRunning" class="button primary" :disabled="loading || generatingDedicatedCase || scenarioLoading || !selectedScenarios.length || (mode==='real' && !selectedTestSuite?.readOnly && !confirmedRealWrite)" @click="runTest">开始测试 {{ selectedScenarios.length }} 个场景</button></footer>
       </section>
     </div>
 
@@ -418,7 +468,8 @@ onMounted(async () => {
 .testing-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}.testing-tabs button.active{background:var(--primary);color:#fff}
 .test-recommendations{margin-bottom:14px;padding:16px}.test-recommendations>header{display:flex;justify-content:space-between;gap:12px}.test-recommendations header p{margin:5px 0 0;color:var(--muted)}.recommendation-actions{display:flex;align-items:center;gap:10px}.recommendation-actions>span{color:var(--primary);font-weight:800}.test-recommendations>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}.test-recommendations article{min-width:0;padding:10px;border:1px solid var(--line);border-radius:9px;display:grid;grid-template-columns:auto auto minmax(0,1fr) auto;align-items:center;gap:9px;background:var(--surface-2)}.test-recommendations article>div{min-width:0;display:flex;flex-direction:column;gap:5px}.test-recommendations article small{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .test-config-v2{width:min(760px,calc(100vw - 50px));max-height:calc(100vh - 60px)}.case-create-option{padding:12px;border:1px solid color-mix(in srgb,var(--primary) 35%,var(--line));border-radius:9px;background:color-mix(in srgb,var(--primary) 6%,transparent)}.case-create-option>span{display:flex;align-items:center;gap:8px;color:var(--text)}.scenario-selector{border:1px solid var(--line);border-radius:10px;overflow:hidden}.scenario-selector>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;background:var(--surface-2)}.scenario-selector>header>div{display:flex;flex-direction:column;gap:4px}.scenario-selector>header small{color:var(--muted)}.scenario-selector>header label{display:flex;align-items:center;gap:6px;white-space:nowrap}.scenario-selector>label{display:grid;grid-template-columns:auto minmax(0,1fr);gap:9px;padding:10px 12px;border-top:1px solid var(--line);cursor:pointer}.scenario-selector>label>span{display:flex;flex-direction:column;gap:4px}.scenario-selector>label small{color:var(--muted);line-height:1.45}.scenario-empty{padding:15px;text-align:center;color:var(--muted)}.real-confirm{font-weight:700;color:var(--danger)!important}.preflight-list{padding:12px;border:1px solid color-mix(in srgb,var(--danger) 35%,var(--line));border-radius:9px;background:color-mix(in srgb,var(--danger) 5%,transparent)}.preflight-list.ready{border-color:color-mix(in srgb,var(--success) 35%,var(--line));background:color-mix(in srgb,var(--success) 5%,transparent)}.preflight-list ul{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:10px 0 0;padding:0;list-style:none}.preflight-list li{display:flex;gap:7px;color:var(--danger)}.preflight-list li.passed{color:var(--success)}.preflight-list li span{display:flex;flex-direction:column}.preflight-list li small{color:var(--muted);line-height:1.4}
-.test-config-body.locked>label,.test-config-body.locked>.scenario-selector,.test-config-body.locked>.real-test-warning{pointer-events:none;opacity:.58}.test-run-progress{display:grid;gap:10px;padding:13px;border:1px solid color-mix(in srgb,var(--primary) 38%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--primary) 6%,transparent)}.test-run-progress>header{display:flex;justify-content:space-between;align-items:center}.test-run-progress>header span{font:11px ui-monospace,monospace;color:var(--muted)}.test-run-progress>div{display:grid;grid-template-columns:26px minmax(0,1fr);align-items:center;gap:9px}.test-run-progress i{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--surface-2);color:var(--muted);font-style:normal;font-size:11px}.test-run-progress i.done{background:color-mix(in srgb,var(--success) 15%,transparent);color:var(--success)}.test-run-progress i.active{background:var(--primary);color:#fff;animation:test-pulse 1.5s ease-in-out infinite}.test-run-progress span{display:flex;flex-direction:column;gap:3px}.test-run-progress small{color:var(--muted)}@keyframes test-pulse{50%{box-shadow:0 0 0 6px color-mix(in srgb,var(--primary) 12%,transparent)}}
+.test-suite-selector{display:grid;border:1px solid var(--line);border-radius:10px;overflow:hidden}.test-suite-selector>header{padding:11px 12px;background:var(--surface-2)}.test-suite-selector>header>div{display:flex;flex-direction:column;gap:4px}.test-suite-selector small{color:var(--muted);line-height:1.45}.test-suite-selector>label{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:9px;padding:11px 12px;border-top:1px solid var(--line);cursor:pointer}.test-suite-selector>label.active{background:color-mix(in srgb,var(--primary) 8%,transparent)}.test-suite-selector>label>span{display:flex;flex-direction:column;gap:4px}.test-suite-selector>label b{display:flex;align-items:center;gap:8px}.test-suite-selector em{padding:2px 6px;border-radius:99px;background:color-mix(in srgb,var(--primary) 12%,transparent);color:var(--primary);font-size:10px;font-style:normal}.dedicated-case-empty{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px;border-top:1px solid var(--line);background:color-mix(in srgb,var(--warning) 5%,transparent)}.dedicated-case-empty>div{display:flex;min-width:0;flex-direction:column;gap:4px}.dedicated-case-empty button{flex:0 0 auto}.case-generation-progress{display:grid;gap:9px;padding:13px;border:1px solid color-mix(in srgb,var(--primary) 38%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--primary) 6%,transparent)}.case-generation-progress>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.case-generation-progress>header b{display:flex;align-items:center;gap:8px}.case-generation-progress>header b>i{width:14px;height:14px;border:2px solid color-mix(in srgb,var(--primary) 25%,transparent);border-top-color:var(--primary);border-radius:50%;animation:case-spin .8s linear infinite}.case-generation-progress p,.case-generation-progress small{margin:0;color:var(--muted);overflow-wrap:anywhere}.case-generation-progress.completed{border-color:color-mix(in srgb,var(--success) 40%,var(--line));background:color-mix(in srgb,var(--success) 7%,transparent)}.generation-progress-track{height:7px;border-radius:99px;background:var(--surface-2);overflow:hidden}.generation-progress-track>i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--primary),#8f84ff);transition:width .35s ease}@keyframes case-spin{to{transform:rotate(360deg)}}
+.test-config-body.locked>label,.test-config-body.locked>.test-suite-selector,.test-config-body.locked>.scenario-selector,.test-config-body.locked>.real-test-warning{pointer-events:none;opacity:.58}.test-config-body.locked>.case-generation-progress{pointer-events:auto;opacity:1}.test-run-progress{display:grid;gap:10px;padding:13px;border:1px solid color-mix(in srgb,var(--primary) 38%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--primary) 6%,transparent)}.test-run-progress>header{display:flex;justify-content:space-between;align-items:center}.test-run-progress>header span{font:11px ui-monospace,monospace;color:var(--muted)}.test-run-progress>div{display:grid;grid-template-columns:26px minmax(0,1fr);align-items:center;gap:9px}.test-run-progress i{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--surface-2);color:var(--muted);font-style:normal;font-size:11px}.test-run-progress i.done{background:color-mix(in srgb,var(--success) 15%,transparent);color:var(--success)}.test-run-progress i.active{background:var(--primary);color:#fff;animation:test-pulse 1.5s ease-in-out infinite}.test-run-progress span{display:flex;flex-direction:column;gap:3px}.test-run-progress small{color:var(--muted)}@keyframes test-pulse{50%{box-shadow:0 0 0 6px color-mix(in srgb,var(--primary) 12%,transparent)}}
 .test-history-panel{padding:18px}.test-history-panel>header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px}.test-history-panel>header small{color:var(--primary);letter-spacing:2px}.test-history-panel h2{margin:5px 0}.test-history-panel header p{margin:0;color:var(--muted)}.test-history-panel>header>span{color:var(--muted)}.history-table-wrap{max-height:650px;overflow:auto;border:1px solid var(--line);border-radius:10px}.history-table-wrap table{width:100%;border-collapse:collapse}.history-table-wrap th{position:sticky;top:0;padding:11px;background:var(--surface-2);text-align:left;color:var(--muted)}.history-table-wrap td{padding:11px;border-top:1px solid var(--line)}.history-table-wrap td:nth-child(2){display:flex;flex-direction:column;gap:4px}.history-table-wrap td:nth-child(2) small{color:var(--muted)}
 .parity-panel{padding:18px}.parity-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0}.parity-overview button{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border:1px solid var(--line);border-radius:11px;background:var(--surface);color:var(--muted);cursor:pointer}.parity-overview button:hover,.parity-overview button.active{border-color:var(--primary);background:color-mix(in srgb,var(--primary) 8%,var(--surface))}.parity-overview b{font-size:22px;color:var(--text)}
 .parity-toolbar{display:grid;grid-template-columns:minmax(280px,1fr) 180px 170px auto;gap:10px;align-items:center;margin-bottom:12px}.parity-toolbar label{display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}.parity-toolbar input{width:100%;padding:10px 0;border:0;background:transparent;color:var(--text);outline:0}.parity-toolbar select{padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text)}.parity-toolbar>span{color:var(--muted);font-size:12px;text-align:right}

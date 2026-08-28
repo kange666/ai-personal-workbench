@@ -5,7 +5,8 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -17,10 +18,19 @@ use walkdir::WalkDir;
 const CLIENT_ROOT: &str = r"F:\TB-project\client";
 const APP_ROOT: &str = r"F:\TB-project\APP";
 const TEST_RUN_COLUMNS: &str = "id,menu_id,project,project_path,menu_name,mode,status,started_at,finished_at,report_markdown,source_report_path,output_excerpt,error_message,selected_scenarios,scenario_results,artifacts,total_count,passed_count,failed_count,skipped_count,duration_ms,exit_code,environment_summary,cleanup_status";
+const COMMON_REAL_SUITE_ID: &str = "common-real";
+const DEDICATED_REAL_SUITE_ID: &str = "dedicated-real";
+const COMMON_REAL_SPEC_FILE: &str = "workbench-real-common.spec.js";
+const COMMON_REAL_SPEC: &str = include_str!("../assets/testing/workbench-real-common.template.js");
 
 #[derive(Default, Clone)]
 pub struct TestProcessState {
     processes: Arc<Mutex<HashMap<String, TestProcessControl>>>,
+}
+
+#[derive(Default, Clone)]
+pub struct TestCaseGenerationState {
+    jobs: Arc<Mutex<HashMap<String, TestCaseGenerationJob>>>,
 }
 
 #[derive(Default)]
@@ -66,6 +76,62 @@ impl TestProcessState {
     fn finish(&self, run_id: &str) {
         if let Ok(mut processes) = self.processes.lock() {
             processes.remove(run_id);
+        }
+    }
+}
+
+impl TestCaseGenerationState {
+    fn insert(&self, job: TestCaseGenerationJob) -> Result<(), String> {
+        self.jobs
+            .lock()
+            .map_err(|_| "无法保存专属用例生成状态。".to_string())?
+            .insert(job.id.clone(), job);
+        Ok(())
+    }
+
+    fn get(&self, job_id: &str) -> Result<TestCaseGenerationJob, String> {
+        self.jobs
+            .lock()
+            .map_err(|_| "无法读取专属用例生成状态。".to_string())?
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| "没有找到专属用例生成任务。".to_string())
+    }
+
+    fn progress(&self, job_id: &str, percent: u8, message: impl Into<String>) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get_mut(job_id) {
+                job.status = "running".into();
+                let percent = percent.min(99);
+                if percent >= job.progress_percent {
+                    job.progress_percent = percent;
+                    job.progress_message = message.into();
+                }
+            }
+        }
+    }
+
+    fn complete(&self, job_id: &str, spec_path: &Path) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get_mut(job_id) {
+                job.status = "completed".into();
+                job.progress_percent = 100;
+                job.progress_message = "专属用例已生成并通过 Playwright 校验".into();
+                job.generated_spec_path = Some(display_path(spec_path));
+                job.finished_at = Some(Utc::now().to_rfc3339());
+            }
+        }
+    }
+
+    fn fail(&self, job_id: &str, error: impl Into<String>) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get_mut(job_id) {
+                let error = error.into();
+                job.status = "failed".into();
+                job.progress_message = "专属用例生成失败".into();
+                job.error_message = error;
+                job.finished_at = Some(Utc::now().to_rfc3339());
+            }
         }
     }
 }
@@ -177,6 +243,33 @@ pub struct TestScenario {
     pub default_selected: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestSuite {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub kind: String,
+    pub read_only: bool,
+    pub spec_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCaseGenerationJob {
+    pub id: String,
+    pub project_path: String,
+    pub menu_id: String,
+    pub menu_name: String,
+    pub status: String,
+    pub progress_percent: u8,
+    pub progress_message: String,
+    pub error_message: String,
+    pub generated_spec_path: Option<String>,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestArtifact {
@@ -237,6 +330,7 @@ pub struct StartTestOptions {
     pub mode: String,
     #[serde(default)]
     pub selected_scenarios: Vec<String>,
+    pub test_suite_id: Option<String>,
     pub create_case_file: Option<bool>,
     pub confirmed_real_write: Option<bool>,
     pub account: Option<String>,
@@ -440,7 +534,7 @@ fn legacy_report_scenarios(markdown: &str) -> Vec<TestScenarioResult> {
                         title: title.clone(),
                         status: "failed".into(),
                         duration_ms: 0,
-                        purpose: scenario_description("", &title),
+                        purpose: scenario_description("", &title, "当前功能"),
                         steps: Vec::new(),
                         checks: Vec::new(),
                         error_message: String::new(),
@@ -802,6 +896,15 @@ fn has_script(scripts: &Value, name: &str) -> bool {
 
 fn project_capabilities(root: &Path) -> TestCapabilities {
     let scripts = package_scripts(root);
+    let playwright_cli = root
+        .join("node_modules")
+        .join("@playwright")
+        .join("test")
+        .join("cli.js")
+        .is_file();
+    let playwright_config = root.join("playwright.config.js").is_file()
+        || root.join("playwright.config.cjs").is_file()
+        || root.join("playwright.config.ts").is_file();
     TestCapabilities {
         mock: has_script(&scripts, "test:menu")
             && root
@@ -809,12 +912,9 @@ fn project_capabilities(root: &Path) -> TestCapabilities {
                 .join("specs")
                 .join("menu-module.spec.js")
                 .is_file(),
-        real_api: has_script(&scripts, "test:menu:real")
-            && root
-                .join("e2e")
-                .join("specs")
-                .join("real-menu-module.spec.js")
-                .is_file(),
+        real_api: playwright_cli
+            && playwright_config
+            && (has_script(&scripts, "test:menu:real") || root.join("e2e").join("specs").is_dir()),
         source_style: has_script(&scripts, "test:page-style")
             || root.join("src").is_dir()
             || root.join("pages.json").is_file(),
@@ -956,7 +1056,8 @@ fn catalog_menu(
         can_create_case_file: !has_case,
         capabilities: TestCapabilities {
             mock: has_case && available.mock,
-            real_api: has_case && available.real_api,
+            // 公共通用真实接口用例不依赖菜单专属 JSON，因此无专属用例的页面也可运行。
+            real_api: available.real_api,
             source_style: available.source_style,
             browser_style: has_case && available.browser_style,
         },
@@ -1438,29 +1539,33 @@ fn append_remediation(mut report: String, menu_name: &str, project: &str, passed
     report
 }
 
-fn scenario_description(mode: &str, title: &str) -> String {
+fn scenario_description(mode: &str, title: &str, menu_name: &str) -> String {
     if title.contains("登录") || title.contains("进入页面") || title.contains("基础区域")
     {
-        "确认页面入口、登录态和核心区域可以正常使用。".into()
+        format!("确认“{menu_name}”的页面入口、登录态和核心区域可以正常使用。")
     } else if title.contains("查询") || title.contains("列表") {
-        "确认查询条件、列表请求和页面结果保持一致。".into()
+        format!("确认“{menu_name}”的查询条件、列表请求和页面结果保持一致。")
     } else if title.contains("新增") || title.contains("修改") || title.contains("删除") {
-        "确认表单与关键业务操作符合页面预期。".into()
+        format!("确认“{menu_name}”的表单与关键业务操作符合页面预期。")
     } else if title.contains("窄屏")
         || title.contains("桌面")
         || title.contains("样式")
         || title.contains("溢出")
     {
-        "确认页面在目标视口下没有明显显示问题。".into()
+        format!("确认“{menu_name}”在目标视口下没有明显显示问题。")
     } else if mode == "source-style" {
-        "检查页面源码结构、路由注册和基础样式。".into()
+        format!("检查“{menu_name}”的页面源码结构、路由注册和基础样式。")
     } else {
-        "执行项目已有自动化场景并记录真实结果。".into()
+        format!("执行“{menu_name}”已有的自动化场景并记录真实结果。")
     }
 }
 
 fn extract_test_titles(path: &Path) -> Vec<String> {
     let content = fs::read_to_string(path).unwrap_or_default();
+    extract_test_titles_from_source(&content)
+}
+
+fn extract_test_titles_from_source(content: &str) -> Vec<String> {
     let mut titles = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim_start();
@@ -1488,25 +1593,514 @@ fn extract_test_titles(path: &Path) -> Vec<String> {
     titles
 }
 
-fn spec_for_mode(root: &Path, menu: &TestMenu, mode: &str) -> Option<PathBuf> {
+#[derive(Default)]
+struct PageBusinessContext {
+    query_fields: Vec<String>,
+    list_fields: Vec<String>,
+    form_fields: Vec<String>,
+    actions: Vec<String>,
+}
+
+struct SourceBusinessScenario {
+    title: String,
+    description: String,
+    passed: bool,
+    checks: Vec<String>,
+}
+
+fn find_open_tag(source: &str, tag: &str, from: usize) -> Option<usize> {
+    let marker = format!("<{tag}");
+    let mut cursor = from;
+    while let Some(relative) = source.get(cursor..)?.find(&marker) {
+        let start = cursor + relative;
+        let boundary = source.get(start + marker.len()..)?.chars().next();
+        if boundary.is_some_and(|value| value.is_whitespace() || matches!(value, '>' | '/')) {
+            return Some(start);
+        }
+        cursor = start + marker.len();
+    }
+    None
+}
+
+fn opening_tags<'a>(source: &'a str, tag: &str) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(start) = find_open_tag(source, tag, cursor) {
+        let Some(relative_end) = source[start..].find('>') else {
+            break;
+        };
+        let end = start + relative_end + 1;
+        values.push(&source[start..end]);
+        cursor = end;
+    }
+    values
+}
+
+fn static_tag_attribute(opening_tag: &str, attribute: &str) -> Option<String> {
+    let marker = format!("{attribute}=");
+    let mut cursor = 0usize;
+    while let Some(relative) = opening_tag.get(cursor..)?.find(&marker) {
+        let start = cursor + relative;
+        let previous = opening_tag.get(..start)?.chars().next_back();
+        if previous.is_some_and(|value| value == ':' || (!value.is_whitespace() && value != '<')) {
+            cursor = start + marker.len();
+            continue;
+        }
+        let body = opening_tag.get(start + marker.len()..)?;
+        let quote = body
+            .chars()
+            .next()
+            .filter(|value| matches!(value, '\'' | '"'))?;
+        let value = body.get(quote.len_utf8()..)?;
+        let end = value.find(quote)?;
+        let value = value[..end].trim();
+        return (!value.is_empty()).then(|| value.to_string());
+    }
+    None
+}
+
+fn unique_tag_attributes(source: &str, tag: &str, attribute: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for value in opening_tags(source, tag)
+        .into_iter()
+        .filter_map(|item| static_tag_attribute(item, attribute))
+    {
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    values
+}
+
+fn first_element_block<'a>(source: &'a str, tag: &str) -> Option<(usize, &'a str)> {
+    let start = find_open_tag(source, tag, 0)?;
+    let close = format!("</{tag}>");
+    let relative_end = source.get(start..)?.find(&close)?;
+    let end = start + relative_end + close.len();
+    Some((start, source.get(start..end)?))
+}
+
+fn plain_markup_text(value: &str) -> String {
+    let mut output = String::new();
+    let mut in_tag = false;
+    for character in value.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => output.push(character),
+            _ => {}
+        }
+    }
+    output.split_whitespace().collect::<Vec<_>>().join("")
+}
+
+fn element_texts(source: &str, tag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut cursor = 0usize;
+    let close = format!("</{tag}>");
+    while let Some(start) = find_open_tag(source, tag, cursor) {
+        let Some(relative_open_end) = source[start..].find('>') else {
+            break;
+        };
+        let content_start = start + relative_open_end + 1;
+        let Some(relative_close) = source[content_start..].find(&close) else {
+            break;
+        };
+        let end = content_start + relative_close;
+        let value = plain_markup_text(&source[content_start..end]);
+        if !value.is_empty() && !value.contains("{{") && !values.contains(&value) {
+            values.push(value);
+        }
+        cursor = end + close.len();
+    }
+    values
+}
+
+fn source_business_context(root: &Path, menu: &TestMenu) -> PageBusinessContext {
+    let source = fs::read_to_string(root.join(&menu.source_path)).unwrap_or_default();
+    let query_block = first_element_block(&source, "el-form")
+        .map(|(_, block)| block)
+        .unwrap_or_default();
+    let query_actions = element_texts(query_block, "el-button");
+    let query_fields = if query_actions
+        .iter()
+        .any(|value| value.contains("查询") || value.contains("搜索") || value.contains("重置"))
+    {
+        unique_tag_attributes(query_block, "el-form-item", "label")
+    } else {
+        Vec::new()
+    };
+    let list_block = first_element_block(&source, "el-table")
+        .map(|(_, block)| block)
+        .unwrap_or_default();
+    let list_fields = unique_tag_attributes(list_block, "el-table-column", "label")
+        .into_iter()
+        .filter(|value| value != "操作")
+        .collect();
+    let editor_block = ["el-dialog", "el-drawer"]
+        .into_iter()
+        .filter_map(|tag| first_element_block(&source, tag))
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, block)| block)
+        .unwrap_or_default();
+    PageBusinessContext {
+        query_fields,
+        list_fields,
+        form_fields: unique_tag_attributes(editor_block, "el-form-item", "label"),
+        actions: element_texts(&source, "el-button"),
+    }
+}
+
+fn summarized_business_items(items: &[String], limit: usize) -> String {
+    let mut value = items
+        .iter()
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("、");
+    if items.len() > limit {
+        value.push_str(&format!("等{}项", items.len()));
+    }
+    value
+}
+
+fn source_business_scenarios(root: &Path, menu: &TestMenu) -> Vec<SourceBusinessScenario> {
+    let path = root.join(&menu.source_path);
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    let context = source_business_context(root, menu);
+    let mut scenarios = vec![SourceBusinessScenario {
+        title: format!("{}页面入口、路由与基础结构", menu.name),
+        description: format!("确认“{}”页面文件、路由和 Vue 基础结构完整。", menu.name),
+        passed: path.is_file() && !menu.route.trim().is_empty() && content.contains("<template"),
+        checks: vec![
+            "页面文件存在。".into(),
+            "页面路由不为空。".into(),
+            "页面包含可渲染的 template。".into(),
+        ],
+    }];
+    if !context.query_fields.is_empty() {
+        let fields = summarized_business_items(&context.query_fields, 6);
+        scenarios.push(SourceBusinessScenario {
+            title: format!("{}查询条件：{fields}", menu.name),
+            description: format!(
+                "确认“{}”源码包含与业务对应的查询条件：{fields}。",
+                menu.name
+            ),
+            passed: true,
+            checks: vec![
+                format!("已识别查询字段：{fields}。"),
+                "查询区包含搜索、查询或重置操作。".into(),
+            ],
+        });
+    }
+    if !context.list_fields.is_empty() {
+        let fields = summarized_business_items(&context.list_fields, 6);
+        scenarios.push(SourceBusinessScenario {
+            title: format!("{}列表字段：{fields}", menu.name),
+            description: format!("确认“{}”首个业务列表包含字段：{fields}。", menu.name),
+            passed: true,
+            checks: vec![format!("已识别列表字段：{fields}。")],
+        });
+    }
+    if !context.actions.is_empty() {
+        let actions = summarized_business_items(&context.actions, 8);
+        scenarios.push(SourceBusinessScenario {
+            title: format!("{}业务操作：{actions}", menu.name),
+            description: format!("确认“{}”源码提供业务操作入口：{actions}。", menu.name),
+            passed: true,
+            checks: vec![format!("已识别操作按钮：{actions}。")],
+        });
+    }
+    if !context.form_fields.is_empty() {
+        let fields = summarized_business_items(&context.form_fields, 6);
+        scenarios.push(SourceBusinessScenario {
+            title: format!("{}表单字段：{fields}", menu.name),
+            description: format!("确认“{}”编辑表单包含业务字段：{fields}。", menu.name),
+            passed: true,
+            checks: vec![format!("已识别编辑表单字段：{fields}。")],
+        });
+    }
+    scenarios.push(SourceBusinessScenario {
+        title: format!("{}页面样式与响应式布局", menu.name),
+        description: format!(
+            "确认“{}”页面包含样式入口，可继续进行桌面和窄屏检查。",
+            menu.name
+        ),
+        passed: content.contains("<style") || content.contains("style="),
+        checks: vec!["页面包含样式入口或行内样式。".into()],
+    });
+    scenarios
+}
+
+fn menu_case_value(menu: &TestMenu) -> Option<Value> {
+    let source = fs::read_to_string(menu.case_file_path.as_deref()?).ok()?;
+    serde_json::from_str(&strip_json_comments(&source)).ok()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuScenarioProfile {
+    General,
+    Post,
+    SafeResponsibility,
+}
+
+fn menu_scenario_profile(menu: &TestMenu, case: Option<&Value>) -> MenuScenarioProfile {
+    let case_id = case
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .or(menu.case_id.as_deref())
+        .unwrap_or_default()
+        .to_lowercase();
+    let component = case
+        .and_then(|value| value.get("component"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace('\\', "/")
+        .to_lowercase();
+    let permissions = case
+        .and_then(|value| value.get("permissions"))
+        .and_then(Value::as_array);
+    let mock_rows = case
+        .and_then(|value| value.get("mockRows"))
+        .and_then(Value::as_array);
+    let safety_permissions = permissions.is_some_and(|items| {
+        items.iter().filter_map(Value::as_str).any(|permission| {
+            permission.ends_with(":publish")
+                || permission.ends_with(":issue")
+                || permission.ends_with(":sign")
+        })
+    });
+    let safety_fields = mock_rows.is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row.get("reportId").is_some()
+                && (row.get("dutyStatus").is_some() || row.get("signStaus").is_some())
+        })
+    });
+    if case_id == "safe-responsibility"
+        || component.contains("saferesponsibility")
+        || safety_permissions
+        || safety_fields
+    {
+        return MenuScenarioProfile::SafeResponsibility;
+    }
+    let post_fields = mock_rows.is_some_and(|rows| {
+        rows.iter()
+            .any(|row| row.get("postCode").is_some() && row.get("postName").is_some())
+    });
+    if case_id == "post" || component == "system/post/index" || post_fields {
+        MenuScenarioProfile::Post
+    } else {
+        MenuScenarioProfile::General
+    }
+}
+
+fn case_supports_action(case: Option<&Value>, action: &str) -> bool {
+    case.and_then(|value| value.get("permissions"))
+        .and_then(Value::as_array)
+        .is_some_and(|permissions| {
+            permissions
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|permission| {
+                    permission == "*:*:*" || permission.ends_with(&format!(":{action}"))
+                })
+        })
+}
+
+fn shared_mock_title_allowed(
+    title: &str,
+    profile: MenuScenarioProfile,
+    case_id: &str,
+    can_add: bool,
+) -> bool {
+    match title {
+        "页面基础区域正常显示" | "查询会触发列表接口" => true,
+        "新增空表单会触发必填校验且不会提交接口" => can_add,
+        "新增合法数据可以提交" | "编辑入口可以打开并回显数据" => {
+            matches!(case_id, "dict" | "system-url" | "post")
+        }
+        "列表展示字段完整，分页和操作列可见"
+        | "查询条件组合：编码、名称、状态可同时查询，重置后清空"
+        | "新增表单逐项校验：岗位编码为空"
+        | "新增表单逐项校验：岗位名称为空"
+        | "新增表单逐项校验：备注为空"
+        | "编辑岗位后可以提交更新接口"
+        | "选择用户抽屉可以打开并加载用户列表"
+        | "窄屏视口页面关键区域仍可访问且无横向溢出" => {
+            profile == MenuScenarioProfile::Post
+        }
+        "台账列表展示责任书核心字段和操作列"
+        | "台账查询条件可以触发列表接口"
+        | "新增空表单会触发模板和责任书名称必填校验"
+        | "责任书下发标签页可以切换并加载下发列表"
+        | "责任书统计标签页可以切换并展示统计表格"
+        | "窄屏视口页面关键区域仍可访问" => {
+            profile == MenuScenarioProfile::SafeResponsibility
+        }
+        "桌面视口页面无明显横向溢出，操作按钮不换行错位" => {
+            matches!(
+                profile,
+                MenuScenarioProfile::Post | MenuScenarioProfile::SafeResponsibility
+            )
+        }
+        _ => false,
+    }
+}
+
+fn shared_real_title_allowed(title: &str, profile: MenuScenarioProfile, can_add: bool) -> bool {
+    if profile == MenuScenarioProfile::SafeResponsibility {
+        return true;
+    }
+    match title {
+        "真实登录态可以进入页面并加载后端列表"
+        | "点击查询会真实调用后端列表接口"
+        | "点击重置后页面仍可继续查询"
+        | "桌面视口下页面主体不应横向溢出"
+        | "窄屏视口下页面主体不应横向溢出" => true,
+        "新增空表单只做前端校验，不写入真实后端" => can_add,
+        _ => false,
+    }
+}
+
+fn filter_test_titles(
+    menu: &TestMenu,
+    mode: &str,
+    spec: &Path,
+    titles: Vec<String>,
+) -> Vec<String> {
+    let file_name = spec
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let case = menu_case_value(menu);
+    let case_id = case
+        .as_ref()
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .or(menu.case_id.as_deref())
+        .unwrap_or_default();
+    let profile = menu_scenario_profile(menu, case.as_ref());
+    let can_add = case_supports_action(case.as_ref(), "add");
+    titles
+        .into_iter()
+        .filter(|title| match (mode, file_name) {
+            ("mock", "menu-module.spec.js") => {
+                shared_mock_title_allowed(title, profile, case_id, can_add)
+            }
+            ("real", "real-menu-module.spec.js") => {
+                shared_real_title_allowed(title, profile, can_add)
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+fn safe_spec_file_name(value: &str) -> Option<String> {
+    let path = Path::new(value);
+    let file_name = path.file_name()?.to_str()?;
+    if file_name == value && file_name.ends_with(".js") {
+        Some(file_name.to_string())
+    } else {
+        None
+    }
+}
+
+fn dedicated_real_spec_file(menu: &TestMenu) -> Option<String> {
+    menu_case_value(menu)
+        .and_then(|value| {
+            value
+                .get("realSpec")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .and_then(|value| safe_spec_file_name(&value))
+}
+
+fn selected_real_suite_id(value: Option<&str>) -> &str {
+    match value {
+        Some(DEDICATED_REAL_SUITE_ID) => DEDICATED_REAL_SUITE_ID,
+        _ => COMMON_REAL_SUITE_ID,
+    }
+}
+
+fn spec_for_mode_and_suite(
+    root: &Path,
+    menu: &TestMenu,
+    mode: &str,
+    suite_id: Option<&str>,
+) -> Option<PathBuf> {
     let file = match mode {
         "mock" => "menu-module.spec.js".to_string(),
-        "real" => menu
-            .case_file_path
-            .as_deref()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-            .and_then(|value| {
-                value
-                    .get("realSpec")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| "real-menu-module.spec.js".into()),
+        "real" if selected_real_suite_id(suite_id) == DEDICATED_REAL_SUITE_ID => {
+            dedicated_real_spec_file(menu)?
+        }
+        "real" => COMMON_REAL_SPEC_FILE.to_string(),
         "browser-style" => "page-style.spec.js".to_string(),
         _ => return None,
     };
     Some(root.join("e2e").join("specs").join(file))
+}
+
+fn scenario_titles_for_menu_and_suite(
+    root: &Path,
+    menu: &TestMenu,
+    mode: &str,
+    suite_id: Option<&str>,
+) -> Vec<String> {
+    if mode == "source-style" {
+        return source_business_scenarios(root, menu)
+            .into_iter()
+            .map(|scenario| scenario.title)
+            .collect();
+    }
+    if mode == "real" && selected_real_suite_id(suite_id) == COMMON_REAL_SUITE_ID {
+        return extract_test_titles_from_source(COMMON_REAL_SPEC);
+    }
+    let Some(spec) =
+        spec_for_mode_and_suite(root, menu, mode, suite_id).filter(|path| path.is_file())
+    else {
+        return Vec::new();
+    };
+    let titles = extract_test_titles(&spec);
+    filter_test_titles(menu, mode, &spec, titles)
+}
+
+#[tauri::command]
+pub fn list_test_suites(
+    state: tauri::State<'_, DatabaseState>,
+    project_path: String,
+    menu_id: String,
+) -> Result<Vec<TestSuite>, String> {
+    let (root, name) = canonical_project_asset(&state, &project_path)?;
+    let menu = project_menus(&state, &root, &name)?
+        .into_iter()
+        .find(|menu| menu.id == menu_id)
+        .ok_or_else(|| "没有找到对应功能或页面。".to_string())?;
+    let common_spec = ensure_common_real_spec(&root)?;
+    let mut suites = vec![TestSuite {
+        id: COMMON_REAL_SUITE_ID.into(),
+        name: "公共通用用例".into(),
+        description: "适用于所有真实接口页面，只读取登录态、首屏接口、查询、重置、运行时错误和页面溢出，不执行增删改。".into(),
+        kind: "common".into(),
+        read_only: true,
+        spec_path: Some(display_path(&common_spec)),
+    }];
+    if let Some(file_name) = dedicated_real_spec_file(&menu) {
+        let path = root.join("e2e").join("specs").join(file_name);
+        if path.is_file() && !extract_test_titles(&path).is_empty() {
+            suites.push(TestSuite {
+                id: DEDICATED_REAL_SUITE_ID.into(),
+                name: format!("{} 专属用例", menu.name),
+                description:
+                    "由 Codex CLI 按当前页面源码和接口生成，并已通过 Playwright 场景收集校验。"
+                        .into(),
+                kind: "dedicated".into(),
+                read_only: false,
+                spec_path: Some(display_path(&path)),
+            });
+        }
+    }
+    Ok(suites)
 }
 
 #[tauri::command]
@@ -1515,30 +2109,33 @@ pub fn list_test_scenarios(
     project_path: String,
     menu_id: String,
     mode: String,
+    test_suite_id: Option<String>,
 ) -> Result<Vec<TestScenario>, String> {
     let (root, name) = canonical_project_asset(&state, &project_path)?;
     let menu = project_menus(&state, &root, &name)?
         .into_iter()
         .find(|menu| menu.id == menu_id)
         .ok_or_else(|| "没有找到对应功能或页面。".to_string())?;
-    let titles = if mode == "source-style" {
-        vec![
-            "页面文件与路由注册".into(),
-            "Vue 基础结构".into(),
-            "页面样式结构".into(),
-        ]
-    } else {
-        spec_for_mode(&root, &menu, &mode)
-            .filter(|path| path.is_file())
-            .map(|path| extract_test_titles(&path))
-            .unwrap_or_default()
-    };
+    if mode == "source-style" {
+        return Ok(source_business_scenarios(&root, &menu)
+            .into_iter()
+            .enumerate()
+            .map(|(index, scenario)| TestScenario {
+                id: format!("scenario-{}", index + 1),
+                title: scenario.title,
+                description: scenario.description,
+                mode: mode.clone(),
+                default_selected: true,
+            })
+            .collect());
+    }
+    let titles = scenario_titles_for_menu_and_suite(&root, &menu, &mode, test_suite_id.as_deref());
     Ok(titles
         .into_iter()
         .enumerate()
         .map(|(index, title)| TestScenario {
             id: format!("scenario-{}", index + 1),
-            description: scenario_description(&mode, &title),
+            description: scenario_description(&mode, &title, &menu.name),
             title,
             mode: mode.clone(),
             default_selected: true,
@@ -1561,20 +2158,19 @@ fn safe_case_id(menu: &TestMenu) -> String {
     }
 }
 
-fn create_case_file(root: &Path, menu: &TestMenu, scenarios: &[String]) -> Result<PathBuf, String> {
-    let case_dir = root.join("e2e").join("menu-cases");
-    fs::create_dir_all(&case_dir).map_err(|error| format!("无法创建测试配置目录：{error}"))?;
+fn generated_case_value(root: &Path, menu: &TestMenu, scenarios: &[String]) -> Value {
     let case_id = safe_case_id(menu);
-    let path = case_dir.join(format!("{case_id}.json"));
-    if path.exists() {
-        return Err("目标测试配置已经存在，为避免覆盖现有用例已停止。".into());
-    }
     let component = menu
         .source_path
         .trim_end_matches(".vue")
         .trim_start_matches("src/views/")
         .replace('\\', "/");
-    let value = json!({
+    let business_context = source_business_context(root, menu);
+    let generated_scenarios = source_business_scenarios(root, menu)
+        .into_iter()
+        .map(|scenario| scenario.title)
+        .collect::<Vec<_>>();
+    json!({
         "id": case_id,
         "menuName": menu.name,
         "aliases": [],
@@ -1583,17 +2179,391 @@ fn create_case_file(root: &Path, menu: &TestMenu, scenarios: &[String]) -> Resul
         "layoutFlag": "systemLayout",
         "permissions": ["*:*:*"],
         "mockRows": [],
-        "scenarios": scenarios,
+        "scenarios": generated_scenarios,
+        "selectedScenariosAtCreation": scenarios,
+        "businessContext": {
+            "queryFields": business_context.query_fields,
+            "listFields": business_context.list_fields,
+            "formFields": business_context.form_fields,
+            "actions": business_context.actions
+        },
+        "scenarioGeneration": {
+            "strategy": "page-business-source",
+            "description": "根据页面查询项、列表字段、表单字段和操作按钮自动生成"
+        },
         "generatedBy": "AI个人工作台",
         "workbenchMenuId": menu.id,
         "generatedAt": Utc::now().to_rfc3339()
-    });
+    })
+}
+
+fn create_case_file(root: &Path, menu: &TestMenu, scenarios: &[String]) -> Result<PathBuf, String> {
+    let case_dir = root.join("e2e").join("menu-cases");
+    fs::create_dir_all(&case_dir).map_err(|error| format!("无法创建测试配置目录：{error}"))?;
+    let case_id = safe_case_id(menu);
+    let path = case_dir.join(format!("{case_id}.json"));
+    if path.exists() {
+        return Err("目标测试配置已经存在，为避免覆盖现有用例已停止。".into());
+    }
+    let value = generated_case_value(root, menu, scenarios);
     fs::write(
         &path,
         serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("无法写入测试配置：{error}"))?;
     Ok(path)
+}
+
+fn generation_case_id(menu: &TestMenu) -> String {
+    let raw = menu.case_id.clone().unwrap_or_else(|| safe_case_id(menu));
+    let value = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if value.is_empty() {
+        "generated-page".into()
+    } else {
+        value
+    }
+}
+
+fn dedicated_generation_prompt(root: &Path, menu: &TestMenu, candidate_relative: &Path) -> String {
+    let context = source_business_context(root, menu);
+    format!(
+        "请为当前业务页面生成一个专属的 Playwright 真实接口测试脚本。\n\n页面名称：{}\n页面路由：{}\n页面源码：{}\n组件标识：{}\n查询字段：{}\n列表字段：{}\n表单字段：{}\n页面操作：{}\n\n必须遵守：\n1. 先阅读页面源码、它直接引用的接口文件，以及项目 e2e/specs、e2e/support 中已有的真实接口测试约定。\n2. 只允许新建这一个文件：{}。不要修改任何其他文件，不要执行 git add、commit、push、reset 或清理命令。\n3. 使用项目已有的 @playwright/test；使用 E2E_AUTH_TOKEN 或 HLZT_TOKEN；优先复用 e2e/support/menuCase 和 realMenuRoute。\n4. 至少生成 3 个只属于“{}”业务的 test(...) 场景，场景名称和断言必须来自当前页面真实字段、按钮和接口，禁止套用安全责任、岗位管理、案例分享等其他业务场景。\n5. 优先生成只读测试。只有页面的关键流程必须写入才能验证时才可生成写入场景；写入数据必须带 E2E 前缀，并使用 try/finally 清理。\n6. 不要启动开发服务器，不要运行真实测试；工作台会在生成后用 Playwright --list 做语法和场景收集校验。\n7. 完成后只用中文简短说明生成的文件和场景，不要再改其他内容。",
+        menu.name,
+        menu.route,
+        menu.source_path,
+        menu_component(menu),
+        context.query_fields.join("、"),
+        context.list_fields.join("、"),
+        context.form_fields.join("、"),
+        context.actions.join("、"),
+        candidate_relative.to_string_lossy().replace('\\', "/"),
+        menu.name,
+    )
+}
+
+fn attach_dedicated_spec_to_case(
+    root: &Path,
+    menu: &TestMenu,
+    spec_file: &str,
+    scenarios: &[String],
+) -> Result<PathBuf, String> {
+    let case_dir = root.join("e2e").join("menu-cases");
+    fs::create_dir_all(&case_dir).map_err(|error| format!("无法创建测试配置目录：{error}"))?;
+    let path = menu
+        .case_file_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| case_dir.join(format!("{}.json", generation_case_id(menu))));
+    let mut value = if path.is_file() {
+        serde_json::from_str::<Value>(
+            &fs::read_to_string(&path).map_err(|error| format!("无法读取现有测试配置：{error}"))?,
+        )
+        .map_err(|error| format!("现有测试配置不是有效 JSON：{error}"))?
+    } else {
+        generated_case_value(root, menu, scenarios)
+    };
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "测试配置必须是 JSON 对象。".to_string())?;
+    object.insert("realSpec".into(), Value::String(spec_file.into()));
+    object.insert(
+        "codexGeneration".into(),
+        json!({
+            "validated": true,
+            "validator": "playwright-list",
+            "generatedAt": Utc::now().to_rfc3339()
+        }),
+    );
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("无法保存专属测试配置：{error}"))?;
+    Ok(path)
+}
+
+fn validate_dedicated_candidate(
+    root: &Path,
+    menu: &TestMenu,
+    candidate: &Path,
+    job_id: &str,
+) -> Result<Vec<String>, String> {
+    if !candidate.is_file() {
+        return Err("Codex CLI 已结束，但没有生成约定的专属 Playwright 文件。".into());
+    }
+    let source = fs::read_to_string(candidate)
+        .map_err(|error| format!("无法读取生成的 Playwright 文件：{error}"))?;
+    let titles = extract_test_titles_from_source(&source);
+    if titles.len() < 3 {
+        return Err(format!(
+            "专属用例只识别到 {} 个场景，至少需要 3 个。",
+            titles.len()
+        ));
+    }
+    if !source.contains("@playwright/test") {
+        return Err("专属用例没有使用项目的 @playwright/test。".into());
+    }
+    let business = source_business_context(root, menu);
+    let evidence = business
+        .query_fields
+        .iter()
+        .chain(&business.list_fields)
+        .chain(&business.form_fields)
+        .chain(&business.actions)
+        .filter(|value| value.chars().count() >= 2)
+        .any(|value| source.contains(value));
+    if !evidence && !source.contains(&menu.name) {
+        return Err("专属用例没有包含当前页面名称、字段或操作，无法确认它属于当前业务。".into());
+    }
+
+    let case_id = generation_case_id(menu);
+    let case_dir = root.join("e2e").join("menu-cases");
+    fs::create_dir_all(&case_dir).map_err(|error| error.to_string())?;
+    let temporary_case = (!menu.has_case_file)
+        .then(|| case_dir.join(format!("workbench-candidate-{case_id}-{job_id}.json")));
+    if let Some(path) = temporary_case.as_ref() {
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&generated_case_value(root, menu, &titles))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("无法准备 Playwright 校验配置：{error}"))?;
+    }
+
+    let cli = root
+        .join("node_modules")
+        .join("@playwright")
+        .join("test")
+        .join("cli.js");
+    if !cli.is_file() {
+        if let Some(path) = temporary_case.as_ref() {
+            let _ = fs::remove_file(path);
+        }
+        return Err("项目尚未安装 @playwright/test，无法校验专属用例。".into());
+    }
+    let candidate_name = candidate
+        .file_name()
+        .ok_or_else(|| "专属用例文件名无效。".to_string())?;
+    let output = codex_video::hidden_command(Path::new("node"))
+        .current_dir(root)
+        .arg(
+            Path::new("node_modules")
+                .join("@playwright")
+                .join("test")
+                .join("cli.js"),
+        )
+        .args(["test"])
+        .arg(candidate_name)
+        .args(["--list", "--project=chromium"])
+        .env("E2E_MENU_NAME", &menu.name)
+        .env("E2E_MENU_CASE_ID", &case_id)
+        .env("E2E_MENU_ROUTE", &menu.route)
+        .env("E2E_MENU_COMPONENT", menu_component(menu))
+        .output()
+        .map_err(|error| format!("无法启动 Playwright 场景收集校验：{error}"));
+    if let Some(path) = temporary_case.as_ref() {
+        let _ = fs::remove_file(path);
+    }
+    let output = output?;
+    if !output.status.success() {
+        let detail = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Err(format!(
+            "Playwright 无法收集生成的专属场景：{}",
+            detail.trim()
+        ));
+    }
+    Ok(titles)
+}
+
+fn run_test_case_generation(
+    database: DatabaseState,
+    generation_state: TestCaseGenerationState,
+    job_id: String,
+    root: PathBuf,
+    menu: TestMenu,
+) -> Result<PathBuf, String> {
+    let (cli_path, _) = codex_video::resolve_codex_cli()?;
+    generation_state.progress(&job_id, 8, "正在读取页面源码和现有测试约定");
+    let case_id = generation_case_id(&menu);
+    let final_file = format!("real-{case_id}.spec.js");
+    let final_path = root.join("e2e").join("specs").join(&final_file);
+    if final_path.exists() {
+        return Err("目标专属 Playwright 文件已经存在，为避免覆盖已停止生成。".into());
+    }
+    let candidate_file = format!("workbench-candidate-{case_id}-{job_id}.spec.js");
+    let candidate_relative = Path::new("e2e").join("specs").join(&candidate_file);
+    let candidate_path = root.join(&candidate_relative);
+    fs::create_dir_all(candidate_path.parent().unwrap_or(&root))
+        .map_err(|error| format!("无法创建专属用例目录：{error}"))?;
+
+    let job_dir = database
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("testing-codex-jobs")
+        .join(&job_id);
+    fs::create_dir_all(&job_dir).map_err(|error| error.to_string())?;
+    let jsonl_path = job_dir.join("codex-run.jsonl");
+    let stderr_path = job_dir.join("codex-stderr.log");
+    let stderr_file = File::create(&stderr_path).map_err(|error| error.to_string())?;
+    let prompt = dedicated_generation_prompt(&root, &menu, &candidate_relative);
+
+    generation_state.progress(&job_id, 15, "Codex CLI 已启动，正在分析当前业务");
+    let mut command = codex_video::hidden_command(&cli_path);
+    command
+        .args(["--sandbox", "workspace-write", "--cd"])
+        .arg(&root)
+        .args([
+            "exec",
+            "--ephemeral",
+            "--json",
+            "--skip-git-repo-check",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr_file));
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动 Codex CLI 失败：{error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|error| format!("发送专属用例任务给 Codex 失败：{error}"))?;
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取 Codex CLI 生成进度。".to_string())?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&jsonl_path)
+        .map_err(|error| error.to_string())?;
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        writeln!(log, "{line}").map_err(|error| error.to_string())?;
+        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            match value.get("type").and_then(Value::as_str) {
+                Some("thread.started") => {
+                    generation_state.progress(&job_id, 22, "Codex 已建立生成任务")
+                }
+                Some("item.started") => {
+                    generation_state.progress(&job_id, 38, "正在检查页面源码和接口定义")
+                }
+                Some("item.completed")
+                    if value.pointer("/item/type").and_then(Value::as_str)
+                        == Some("file_change") =>
+                {
+                    generation_state.progress(&job_id, 72, "专属 Playwright 脚本已写入，正在整理")
+                }
+                Some("item.completed") => {
+                    generation_state.progress(&job_id, 58, "正在生成当前业务测试场景")
+                }
+                Some("turn.completed") => {
+                    generation_state.progress(&job_id, 82, "Codex 生成完成，准备校验")
+                }
+                _ => {}
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("等待 Codex CLI 结束时出错：{error}"))?;
+    if !status.success() {
+        let detail = fs::read_to_string(&stderr_path).unwrap_or_default();
+        let _ = fs::remove_file(&candidate_path);
+        return Err(format!("Codex CLI 生成失败：{}", detail.trim()));
+    }
+
+    generation_state.progress(&job_id, 88, "正在校验业务归属和 Playwright 语法");
+    let titles = validate_dedicated_candidate(&root, &menu, &candidate_path, &job_id)?;
+    if final_path.exists() {
+        let _ = fs::remove_file(&candidate_path);
+        return Err("校验期间目标专属用例已存在，为避免覆盖已停止。".into());
+    }
+    fs::rename(&candidate_path, &final_path)
+        .map_err(|error| format!("无法保存已校验的专属用例：{error}"))?;
+    if let Err(error) = attach_dedicated_spec_to_case(&root, &menu, &final_file, &titles) {
+        let _ = fs::remove_file(&final_path);
+        return Err(error);
+    }
+    generation_state.progress(&job_id, 96, "校验通过，正在更新测试中心用例列表");
+    Ok(final_path)
+}
+
+#[tauri::command]
+pub fn start_test_case_generation(
+    state: tauri::State<'_, DatabaseState>,
+    generation_state: tauri::State<'_, TestCaseGenerationState>,
+    project_path: String,
+    menu_id: String,
+) -> Result<TestCaseGenerationJob, String> {
+    let (root, project_name) = canonical_project_asset(&state, &project_path)?;
+    let menu = project_menus(&state, &root, &project_name)?
+        .into_iter()
+        .find(|menu| menu.id == menu_id)
+        .ok_or_else(|| "没有找到对应功能或页面。".to_string())?;
+    if dedicated_real_spec_file(&menu)
+        .map(|file| root.join("e2e").join("specs").join(file).is_file())
+        .unwrap_or(false)
+    {
+        return Err("当前业务已经有专属真实接口用例，无需重复生成。".into());
+    }
+    let (cli_path, _) = codex_video::resolve_codex_cli()?;
+    let login = codex_video::hidden_command(&cli_path)
+        .args(["login", "status"])
+        .output();
+    if !login.as_ref().is_ok_and(|output| output.status.success()) {
+        return Err("Codex CLI 尚未登录，请先在终端运行 codex login。".into());
+    }
+    let id = Uuid::new_v4().to_string();
+    let job = TestCaseGenerationJob {
+        id: id.clone(),
+        project_path: display_path(&root),
+        menu_id: menu.id.clone(),
+        menu_name: menu.name.clone(),
+        status: "queued".into(),
+        progress_percent: 3,
+        progress_message: "正在准备 Codex CLI 生成任务".into(),
+        error_message: String::new(),
+        generated_spec_path: None,
+        created_at: Utc::now().to_rfc3339(),
+        finished_at: None,
+    };
+    generation_state.insert(job.clone())?;
+    let database = state.inner().clone();
+    let jobs = generation_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match run_test_case_generation(database, jobs.clone(), id.clone(), root, menu) {
+            Ok(path) => jobs.complete(&id, &path),
+            Err(error) => jobs.fail(&id, error),
+        }
+    });
+    Ok(job)
+}
+
+#[tauri::command]
+pub fn get_test_case_generation(
+    generation_state: tauri::State<'_, TestCaseGenerationState>,
+    job_id: String,
+) -> Result<TestCaseGenerationJob, String> {
+    generation_state.get(&job_id)
 }
 
 fn preflight_for(
@@ -1618,8 +2588,10 @@ fn preflight_for(
         passed: source.is_file(),
         detail: source.display().to_string(),
     });
+    let real_suite_id = selected_real_suite_id(options.test_suite_id.as_deref());
+    let uses_common_real = options.mode == "real" && real_suite_id == COMMON_REAL_SUITE_ID;
     let has_case_or_create = menu.has_case_file || options.create_case_file == Some(true);
-    if options.mode != "source-style" {
+    if options.mode != "source-style" && !uses_common_real {
         checks.push(PreflightCheck {
             name: "测试配置".into(),
             passed: has_case_or_create,
@@ -1649,11 +2621,31 @@ fn preflight_for(
         },
     });
     if options.mode == "real" {
-        checks.push(PreflightCheck {
-            name: "真实写入确认".into(),
-            passed: options.confirmed_real_write == Some(true),
-            detail: "真实用例可能创建、修改并清理 E2E 前缀数据".into(),
-        });
+        if uses_common_real {
+            checks.push(PreflightCheck {
+                name: "测试用例".into(),
+                passed: true,
+                detail: "公共通用用例仅执行只读检查，不提交增删改请求".into(),
+            });
+        } else {
+            let dedicated_ready = dedicated_real_spec_file(&menu)
+                .map(|file| root.join("e2e").join("specs").join(file).is_file())
+                .unwrap_or(false);
+            checks.push(PreflightCheck {
+                name: "专属测试用例".into(),
+                passed: dedicated_ready,
+                detail: if dedicated_ready {
+                    "专属 Playwright 脚本已生成并通过场景收集校验".into()
+                } else {
+                    "尚未生成可用的专属 Playwright 脚本".into()
+                },
+            });
+            checks.push(PreflightCheck {
+                name: "真实写入确认".into(),
+                passed: options.confirmed_real_write == Some(true),
+                detail: "专属真实用例可能创建、修改并清理 E2E 前缀数据".into(),
+            });
+        }
         let token_ready = options
             .token
             .as_deref()
@@ -1671,10 +2663,28 @@ fn preflight_for(
             },
         });
     }
+    let allowed_scenarios = scenario_titles_for_menu_and_suite(
+        &root,
+        &menu,
+        &options.mode,
+        options.test_suite_id.as_deref(),
+    );
+    let invalid_scenarios = options
+        .selected_scenarios
+        .iter()
+        .filter(|title| !allowed_scenarios.contains(title))
+        .count();
     checks.push(PreflightCheck {
         name: "测试场景".into(),
-        passed: !options.selected_scenarios.is_empty(),
-        detail: format!("已选择 {} 个场景", options.selected_scenarios.len()),
+        passed: !options.selected_scenarios.is_empty() && invalid_scenarios == 0,
+        detail: if invalid_scenarios == 0 {
+            format!(
+                "已按当前业务配置选择 {} 个场景",
+                options.selected_scenarios.len()
+            )
+        } else {
+            format!("有 {invalid_scenarios} 个场景不属于当前业务，请重新选择")
+        },
     });
     let ready = checks.iter().all(|check| check.passed);
     Ok((
@@ -1729,6 +2739,36 @@ fn regex_escape(value: &str) -> String {
         result.push(ch);
     }
     result
+}
+
+fn ensure_common_real_spec(root: &Path) -> Result<PathBuf, String> {
+    let directory = root.join("e2e").join("specs");
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建公共测试用例目录：{error}"))?;
+    let path = directory.join(COMMON_REAL_SPEC_FILE);
+    let current = fs::read_to_string(&path).unwrap_or_default();
+    if current != COMMON_REAL_SPEC {
+        fs::write(&path, COMMON_REAL_SPEC)
+            .map_err(|error| format!("无法写入公共通用测试用例：{error}"))?;
+    }
+    Ok(path)
+}
+
+fn menu_component(menu: &TestMenu) -> String {
+    menu.source_path
+        .trim_end_matches(".vue")
+        .trim_start_matches("src/views/")
+        .replace('\\', "/")
+}
+
+fn menu_layout_flag(menu: &TestMenu) -> String {
+    menu_case_value(menu)
+        .and_then(|value| {
+            value
+                .get("layoutFlag")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "businessLayout".into())
 }
 
 fn artifact_kind(name: &str, content_type: &str) -> String {
@@ -1822,7 +2862,7 @@ fn collect_playwright_specs(value: &Value, root: &Path, output: &mut Vec<TestSce
                     .collect::<Vec<_>>();
                 output.push(TestScenarioResult {
                     id: format!("scenario-result-{}", output.len() + 1),
-                    purpose: scenario_description("", &title),
+                    purpose: scenario_description("", &title, "当前功能"),
                     steps: vec![
                         "进入目标功能或页面。".into(),
                         "执行该场景对应的页面操作。".into(),
@@ -1875,48 +2915,29 @@ fn persist_screenshot_artifacts(root: &Path, run_id: &str, scenarios: &mut [Test
 }
 
 fn static_scenarios(root: &Path, menu: &TestMenu, selected: &[String]) -> Vec<TestScenarioResult> {
-    let path = root.join(&menu.source_path);
-    let content = fs::read_to_string(&path).unwrap_or_default();
-    let cases = [
-        (
-            "页面文件与路由注册",
-            path.is_file() && !menu.route.trim().is_empty(),
-            vec!["页面文件存在。", "页面路由不为空。"],
-        ),
-        (
-            "Vue 基础结构",
-            content.contains("<template"),
-            vec!["页面包含可渲染的 template。"],
-        ),
-        (
-            "页面样式结构",
-            content.contains("<style") || content.contains("style="),
-            vec!["页面包含样式入口或行内样式。"],
-        ),
-    ];
-    cases
+    source_business_scenarios(root, menu)
         .into_iter()
-        .filter(|(title, _, _)| selected.iter().any(|item| item == title))
+        .filter(|scenario| selected.iter().any(|item| item == &scenario.title))
         .enumerate()
-        .map(|(index, (title, passed, checks))| TestScenarioResult {
+        .map(|(index, scenario)| TestScenarioResult {
             id: format!("static-{}", index + 1),
-            title: title.into(),
-            status: if passed {
+            title: scenario.title.clone(),
+            status: if scenario.passed {
                 "passed".into()
             } else {
                 "failed".into()
             },
             duration_ms: 0,
-            purpose: scenario_description("source-style", title),
+            purpose: scenario.description,
             steps: vec![
                 format!("读取 {}。", menu.source_path),
-                "检查源码和页面注册信息。".into(),
+                "按页面业务内容检查源码结构。".into(),
             ],
-            checks: checks.into_iter().map(str::to_string).collect(),
-            error_message: if passed {
+            checks: scenario.checks,
+            error_message: if scenario.passed {
                 String::new()
             } else {
-                format!("{} 未达到静态检查要求。", title)
+                format!("{} 未达到静态检查要求。", scenario.title)
             },
             artifacts: Vec::new(),
         })
@@ -1966,7 +2987,12 @@ fn execute_project(
             cleanup_status: "not-applicable".into(),
         });
     }
-    let spec = spec_for_mode(root, menu, &options.mode)
+    if options.mode == "real"
+        && selected_real_suite_id(options.test_suite_id.as_deref()) == COMMON_REAL_SUITE_ID
+    {
+        ensure_common_real_spec(root)?;
+    }
+    let spec = spec_for_mode_and_suite(root, menu, &options.mode, options.test_suite_id.as_deref())
         .ok_or_else(|| "没有找到对应测试规格文件。".to_string())?;
     if !spec.is_file() {
         return Err(format!("测试规格文件不存在：{}", spec.display()));
@@ -2007,6 +3033,9 @@ fn execute_project(
         .arg(grep);
     command
         .env("E2E_MENU_NAME", &menu.name)
+        .env("E2E_MENU_ROUTE", &menu.route)
+        .env("E2E_MENU_COMPONENT", menu_component(menu))
+        .env("E2E_MENU_LAYOUT_FLAG", menu_layout_flag(menu))
         .env(
             "E2E_MENU_CASE_ID",
             menu.case_id.clone().unwrap_or_else(|| safe_case_id(menu)),
@@ -2861,10 +3890,11 @@ mod tests {
     use super::{
         app_menus, app_static_report, append_remediation, canonical_exported_pdf, client_menus,
         client_report_status, create_case_file, display_path, existing_exported_pdf,
-        legacy_report_scenarios, pdf_html, persist_screenshot_artifacts,
-        recover_incomplete_test_runs, run_by_id, save_run,
-        static_scenarios, strip_json_comments, write_exported_markdown, TestArtifact,
-        TestCapabilities, TestMenu, TestProcessState, TestRun, TestScenarioResult,
+        filter_test_titles, legacy_report_scenarios, pdf_html, persist_screenshot_artifacts,
+        recover_incomplete_test_runs, run_by_id, save_run, scenario_titles_for_menu_and_suite,
+        source_business_scenarios, static_scenarios, strip_json_comments, write_exported_markdown,
+        TestArtifact, TestCapabilities, TestMenu, TestProcessState, TestRun, TestScenarioResult,
+        COMMON_REAL_SUITE_ID,
     };
     use crate::database::DatabaseState;
     use std::path::Path;
@@ -2894,6 +3924,26 @@ mod tests {
             latest_time: None,
             latest_report_path: None,
         }
+    }
+
+    fn business_page_source() -> &'static str {
+        r#"<template>
+  <el-form>
+    <el-form-item label="岗位编码"><el-input /></el-form-item>
+    <el-form-item label="岗位名称"><el-input /></el-form-item>
+    <el-form-item label="状态"><el-select /></el-form-item>
+    <el-form-item><el-button>搜索</el-button><el-button>重置</el-button></el-form-item>
+  </el-form>
+  <el-button>新增</el-button><el-button>修改</el-button><el-button>删除</el-button>
+  <el-table>
+    <el-table-column label="岗位编码" />
+    <el-table-column label="岗位名称" />
+    <el-table-column label="状态" />
+    <el-table-column label="操作" />
+  </el-table>
+  <el-dialog><el-form><el-form-item label="岗位编码" /><el-form-item label="岗位名称" /></el-form></el-dialog>
+</template>
+<style scoped></style>"#
     }
     #[test]
     fn comments_are_removed_without_touching_urls() {
@@ -3020,6 +4070,44 @@ mod tests {
         let app = app_menus(&state).unwrap();
         assert!(!client.is_empty());
         assert!(!app.is_empty());
+        let post = client
+            .iter()
+            .find(|menu| menu.case_id.as_deref() == Some("post"))
+            .expect("client 项目应包含岗位管理测试配置");
+        let real_scenarios = scenario_titles_for_menu_and_suite(
+            Path::new(&post.project_path),
+            post,
+            "real",
+            Some(COMMON_REAL_SUITE_ID),
+        );
+        assert!(real_scenarios.len() >= 6);
+        assert!(real_scenarios
+            .iter()
+            .all(|title| !title.contains("台账") && !title.contains("下发")));
+        assert!(!real_scenarios
+            .iter()
+            .any(|title| title.contains("三个业务 Tab") || title.contains("签发弹窗")));
+        let mock_scenarios =
+            scenario_titles_for_menu_and_suite(Path::new(&post.project_path), post, "mock", None);
+        assert!(mock_scenarios
+            .iter()
+            .any(|title| title.contains("岗位编码")));
+        assert!(mock_scenarios.iter().all(|title| !title.contains("责任书")));
+        let generated_scenarios = scenario_titles_for_menu_and_suite(
+            Path::new(&post.project_path),
+            post,
+            "source-style",
+            None,
+        );
+        assert!(generated_scenarios
+            .iter()
+            .any(|title| title.contains("岗位管理查询条件：岗位编码、岗位名称、状态")));
+        assert!(generated_scenarios
+            .iter()
+            .any(|title| title.contains("岗位管理业务操作：搜索、重置、新增、修改、删除、导出")));
+        assert!(generated_scenarios
+            .iter()
+            .all(|title| !title.contains("责任书")));
         assert!(app.iter().all(|menu| menu.source_path.ends_with(".vue")));
         let (passed, report) = app_static_report(&app[0]);
         assert!(passed, "{report}");
@@ -3029,17 +4117,142 @@ mod tests {
     }
 
     #[test]
+    fn common_real_template_supports_all_dev_proxies_and_native_fetch_status() {
+        assert!(super::COMMON_REAL_SPEC.contains("pathname.startsWith('/dev-')"));
+        assert!(super::COMMON_REAL_SPEC.contains("expect(response.status,"));
+        assert!(!super::COMMON_REAL_SPEC.contains("expect(response.status(),"));
+    }
+
+    #[test]
     fn generated_case_file_keeps_selected_scenarios_and_never_overwrites() {
         let root = std::env::temp_dir().join(format!("workbench-case-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("src/views/example")).unwrap();
+        let source = root.join("src/views/example/index.vue");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, business_page_source()).unwrap();
         let menu = sample_menu(&root);
         let selected = vec!["场景一".to_string(), "场景二".to_string()];
         let path = create_case_file(&root, &menu, &selected).unwrap();
         let original = std::fs::read_to_string(&path).unwrap();
         assert!(original.contains("场景一"));
         assert!(original.contains("workbenchMenuId"));
+        let value: serde_json::Value = serde_json::from_str(&original).unwrap();
+        assert!(value["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|title| title.contains("示例页面查询条件：岗位编码、岗位名称、状态")));
+        assert_eq!(
+            value["businessContext"]["queryFields"],
+            serde_json::json!(["岗位编码", "岗位名称", "状态"])
+        );
+        assert!(value["businessContext"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action == "新增"));
+        assert_eq!(
+            value["selectedScenariosAtCreation"],
+            serde_json::json!(["场景一", "场景二"])
+        );
         assert!(create_case_file(&root, &menu, &selected).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn post_scenarios_do_not_reuse_safe_responsibility_business_steps() {
+        let root = std::env::temp_dir().join(format!("workbench-post-case-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let case_path = root.join("post.json");
+        std::fs::write(
+            &case_path,
+            serde_json::to_string(&serde_json::json!({
+                "id": "post",
+                "component": "system/post/index",
+                "permissions": ["system:post:list", "system:post:add", "system:post:edit"],
+                "mockRows": [{ "postCode": "E2E", "postName": "测试岗位" }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut menu = sample_menu(&root);
+        menu.case_id = Some("post".into());
+        menu.case_file_path = Some(case_path.display().to_string());
+
+        let real_titles = vec![
+            "真实登录态可以进入页面并加载后端列表".into(),
+            "新增空表单只做前端校验，不写入真实后端".into(),
+            "三个业务 Tab 切换后对应列表接口和页面结构正常".into(),
+            "台账表格行内预览、修改、提交、签发弹窗、撤销、删除操作正常".into(),
+            "桌面视口下页面主体不应横向溢出".into(),
+            "真实新增、修改、删除流程可以完整执行".into(),
+        ];
+        let filtered_real = filter_test_titles(
+            &menu,
+            "real",
+            Path::new("real-menu-module.spec.js"),
+            real_titles,
+        );
+        assert_eq!(
+            filtered_real,
+            vec![
+                "真实登录态可以进入页面并加载后端列表",
+                "新增空表单只做前端校验，不写入真实后端",
+                "桌面视口下页面主体不应横向溢出"
+            ]
+        );
+
+        let mock_titles = vec![
+            "页面基础区域正常显示".into(),
+            "列表展示字段完整，分页和操作列可见".into(),
+            "台账列表展示责任书核心字段和操作列".into(),
+            "责任书统计标签页可以切换并展示统计表格".into(),
+        ];
+        let filtered_mock =
+            filter_test_titles(&menu, "mock", Path::new("menu-module.spec.js"), mock_titles);
+        assert_eq!(
+            filtered_mock,
+            vec!["页面基础区域正常显示", "列表展示字段完整，分页和操作列可见"]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn safe_responsibility_keeps_its_business_specific_scenarios() {
+        let root = std::env::temp_dir().join(format!("workbench-safe-case-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let case_path = root.join("safe-responsibility.json");
+        std::fs::write(
+            &case_path,
+            serde_json::to_string(&serde_json::json!({
+                "id": "safe-responsibility",
+                "component": "safe/safetyManagement/safeResponsibility/index",
+                "permissions": ["safe:safeResponsibility:list", "safe:safeResponsibility:issue"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut menu = sample_menu(&root);
+        menu.case_id = Some("safe-responsibility".into());
+        menu.case_file_path = Some(case_path.display().to_string());
+
+        let mock_titles = vec![
+            "页面基础区域正常显示".into(),
+            "列表展示字段完整，分页和操作列可见".into(),
+            "台账列表展示责任书核心字段和操作列".into(),
+            "责任书统计标签页可以切换并展示统计表格".into(),
+        ];
+        let filtered =
+            filter_test_titles(&menu, "mock", Path::new("menu-module.spec.js"), mock_titles);
+        assert_eq!(
+            filtered,
+            vec![
+                "页面基础区域正常显示",
+                "台账列表展示责任书核心字段和操作列",
+                "责任书统计标签页可以切换并展示统计表格"
+            ]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3054,13 +4267,12 @@ mod tests {
         )
         .unwrap();
         let menu = sample_menu(&root);
-        let selected = vec![
-            "页面文件与路由注册".into(),
-            "Vue 基础结构".into(),
-            "页面样式结构".into(),
-        ];
+        let selected = source_business_scenarios(&root, &menu)
+            .into_iter()
+            .map(|scenario| scenario.title)
+            .collect::<Vec<_>>();
         let scenarios = static_scenarios(&root, &menu, &selected);
-        assert_eq!(scenarios.len(), 3);
+        assert_eq!(scenarios.len(), 2);
         assert!(scenarios.iter().all(|item| item.status == "passed"));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3133,7 +4345,10 @@ mod tests {
         let reports = root.join("reports");
         let markdown = write_exported_markdown(&reports, &run).unwrap();
         let markdown_content = std::fs::read_to_string(&markdown).unwrap();
-        assert_eq!(markdown.extension().and_then(|value| value.to_str()), Some("md"));
+        assert_eq!(
+            markdown.extension().and_then(|value| value.to_str()),
+            Some("md")
+        );
         assert!(markdown_content.contains("测试执行报告"));
         assert!(markdown_content.contains("按钮没有响应"));
         assert!(markdown_content.contains("failure.png"));
