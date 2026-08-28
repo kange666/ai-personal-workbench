@@ -126,6 +126,11 @@ fn quota_from_event(value: &Value) -> Option<CodexQuotaSnapshot> {
         return None;
     }
     let limits = value.pointer("/payload/rate_limits")?;
+    // Codex 会同时记录通用额度和特定模型额度。工作台只展示通用使用限额，
+    // 避免把 GPT-5.3-Codex-Spark 等独立额度误认为账户剩余额度。
+    if limits.get("limit_id").and_then(Value::as_str) != Some("codex") {
+        return None;
+    }
     let primary = limits.get("primary").and_then(quota_window);
     let secondary = limits.get("secondary").and_then(quota_window);
     if primary.is_none() && secondary.is_none() {
@@ -259,7 +264,8 @@ fn decorate_quota_snapshot(
         "stale"
     }
     .into();
-    snapshot.selection_reason = "已排除过期额度周期，并按额度事件时间选择最新快照".into();
+    snapshot.selection_reason =
+        "已排除专属模型与过期额度周期，并按通用额度事件时间选择最新快照".into();
     snapshot
 }
 
@@ -621,6 +627,8 @@ mod quota_tests {
             "payload":{
                 "type":"token_count",
                 "rate_limits":{
+                    "limit_id":"codex",
+                    "limit_name":null,
                     "primary":{"used_percent":47.0,"window_minutes":10080,"resets_at":1786233736},
                     "secondary":null,
                     "plan_type":"prolite"
@@ -671,6 +679,8 @@ mod quota_tests {
             "payload": {
                 "type": "token_count",
                 "rate_limits": {
+                    "limit_id": "codex",
+                    "limit_name": null,
                     "primary": {
                         "used_percent": used_percent,
                         "window_minutes": 10_080,
@@ -682,6 +692,75 @@ mod quota_tests {
             }
         })
         .to_string()
+    }
+
+    fn spark_quota_event(timestamp: &str, used_percent: f64, resets_at: i64) -> String {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "limit_id": "codex_bengalfox",
+                    "limit_name": "GPT-5.3-Codex-Spark",
+                    "primary": {
+                        "used_percent": used_percent,
+                        "window_minutes": 300,
+                        "resets_at": resets_at
+                    },
+                    "secondary": {
+                        "used_percent": used_percent,
+                        "window_minutes": 10_080,
+                        "resets_at": resets_at
+                    },
+                    "plan_type": "prolite"
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn ignores_spark_specific_quota_events() {
+        let event: Value = serde_json::from_str(&spark_quota_event(
+            "2026-08-27T09:17:24Z",
+            0.0,
+            1_788_427_038,
+        ))
+        .unwrap();
+        assert!(quota_from_event(&event).is_none());
+    }
+
+    #[test]
+    fn quota_selection_prefers_general_limit_over_newer_spark_limit() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-general-quota-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let general_file = directory.join("general.jsonl");
+        let spark_file = directory.join("spark.jsonl");
+        std::fs::write(
+            &general_file,
+            quota_event("2026-08-27T09:16:00Z", 19.0, 1_788_272_042),
+        )
+        .unwrap();
+        std::fs::write(
+            &spark_file,
+            spark_quota_event("2026-08-27T09:17:24Z", 0.0, 1_788_427_038),
+        )
+        .unwrap();
+
+        let snapshot = latest_quota_snapshot_from_files(
+            vec![
+                (UNIX_EPOCH, general_file),
+                (std::time::SystemTime::now(), spark_file),
+            ],
+            1_787_800_000,
+        );
+        let primary = snapshot.primary.expect("应当选择通用额度");
+        assert_eq!(primary.remaining_percent, 81.0);
+        assert_eq!(primary.window_minutes, 10_080);
+        assert_eq!(snapshot.source_file.as_deref(), Some("general.jsonl"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
