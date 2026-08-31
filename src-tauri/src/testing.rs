@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -3726,6 +3726,45 @@ fn edge_path() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+fn complete_pdf_size(path: &Path) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size < 12 {
+        return None;
+    }
+    let mut header = [0_u8; 5];
+    file.read_exact(&mut header).ok()?;
+    if &header != b"%PDF-" {
+        return None;
+    }
+    let tail_size = size.min(2048) as usize;
+    file.seek(SeekFrom::End(-(tail_size as i64))).ok()?;
+    let mut tail = vec![0_u8; tail_size];
+    file.read_exact(&mut tail).ok()?;
+    tail.windows(5)
+        .any(|window| window == b"%%EOF")
+        .then_some(size)
+}
+
+fn wait_for_complete_pdf(path: &Path, timeout: std::time::Duration) -> Result<u64, String> {
+    let started = std::time::Instant::now();
+    let mut previous_size = None;
+    loop {
+        if let Some(size) = complete_pdf_size(path) {
+            if previous_size == Some(size) {
+                return Ok(size);
+            }
+            previous_size = Some(size);
+        } else {
+            previous_size = None;
+        }
+        if started.elapsed() >= timeout {
+            return Err("浏览器已结束，但 PDF 文件没有完整落盘。".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+}
+
 #[tauri::command]
 pub async fn export_test_report_pdf(
     app: tauri::AppHandle,
@@ -3743,15 +3782,25 @@ pub async fn export_test_report_pdf(
             .join("测试报告");
         fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
         let output_path = exported_pdf_path(&output_dir, &run);
-        let html_path = std::env::temp_dir().join(format!("workbench-test-report-{}.html", run.id));
-        let profile_path =
-            std::env::temp_dir().join(format!("workbench-test-pdf-profile-{}", run.id));
+        let attempt_id = Uuid::new_v4();
+        let staging_path = output_dir.join(format!(
+            ".{}-{attempt_id}.part.pdf",
+            exported_report_stem(&run)
+        ));
+        let html_path = std::env::temp_dir().join(format!(
+            "workbench-test-report-{}-{attempt_id}.html",
+            run.id
+        ));
+        let profile_path = std::env::temp_dir().join(format!(
+            "workbench-test-pdf-profile-{}-{attempt_id}",
+            run.id
+        ));
         fs::write(&html_path, pdf_html(&run)).map_err(|error| error.to_string())?;
         let browser = edge_path().ok_or_else(|| {
             "没有找到 Microsoft Edge 或 Google Chrome，无法导出 PDF。".to_string()
         })?;
         let mut command = codex_video::hidden_command(&browser);
-        let output_arg = format!("--print-to-pdf={}", output_path.display());
+        let output_arg = format!("--print-to-pdf={}", staging_path.display());
         let profile_arg = format!("--user-data-dir={}", profile_path.display());
         let result = command
             .args([
@@ -3765,20 +3814,22 @@ pub async fn export_test_report_pdf(
             .arg(&html_path)
             .output()
             .map_err(|error| format!("无法启动浏览器导出 PDF：{error}"))?;
+        let pdf_result = wait_for_complete_pdf(&staging_path, std::time::Duration::from_secs(15));
         let _ = fs::remove_file(&html_path);
         let _ = fs::remove_dir_all(&profile_path);
-        if !result.status.success()
-            || !output_path.is_file()
-            || fs::metadata(&output_path)
-                .map(|item| item.len())
-                .unwrap_or(0)
-                == 0
-        {
+        if let Err(error) = pdf_result {
+            let _ = fs::remove_file(&staging_path);
             return Err(format!(
-                "PDF 导出失败：{}",
+                "PDF 导出失败：{error} {}",
                 String::from_utf8_lossy(&result.stderr)
             ));
         }
+        if output_path.is_file() {
+            fs::remove_file(&output_path)
+                .map_err(|error| format!("无法替换旧 PDF 报告：{error}"))?;
+        }
+        fs::rename(&staging_path, &output_path)
+            .map_err(|error| format!("无法保存 PDF 报告：{error}"))?;
         Ok(output_path.display().to_string())
     })
     .await
@@ -3834,7 +3885,7 @@ pub fn export_test_report_markdown(
 
 fn existing_exported_pdf(output_dir: &Path, run: &TestRun) -> Option<PathBuf> {
     let path = exported_pdf_path(output_dir, run);
-    (path.is_file() && fs::metadata(&path).map(|item| item.len()).unwrap_or(0) > 0).then_some(path)
+    complete_pdf_size(&path).map(|_| path)
 }
 
 #[tauri::command]
@@ -3862,7 +3913,7 @@ fn canonical_exported_pdf(output_dir: &Path, requested: &str) -> Result<PathBuf,
         .map_err(|error| format!("PDF 文件不存在或无法读取：{error}"))?;
     if !path.starts_with(&allowed)
         || path.extension().and_then(|value| value.to_str()) != Some("pdf")
-        || !path.is_file()
+        || complete_pdf_size(&path).is_none()
     {
         return Err("只能打开测试中心刚导出的 PDF 报告。".into());
     }
@@ -3878,8 +3929,13 @@ pub fn open_test_report_pdf(app: tauri::AppHandle, path: String) -> Result<(), S
         .join("AI个人工作台")
         .join("测试报告");
     let path = canonical_exported_pdf(&output_dir, &path)?;
-    codex_video::hidden_command(Path::new("explorer.exe"))
-        .arg(path)
+    let browser = edge_path()
+        .ok_or_else(|| "没有找到 Microsoft Edge 或 Google Chrome，无法打开 PDF。".to_string())?;
+    let file_url = tauri::Url::from_file_path(&path)
+        .map_err(|_| "无法把 PDF 路径转换为本地文件地址。".to_string())?;
+    codex_video::hidden_command(&browser)
+        .arg("--new-window")
+        .arg(file_url.as_str())
         .spawn()
         .map_err(|error| format!("无法打开 PDF：{error}"))?;
     Ok(())
@@ -3889,12 +3945,12 @@ pub fn open_test_report_pdf(app: tauri::AppHandle, path: String) -> Result<(), S
 mod tests {
     use super::{
         app_menus, app_static_report, append_remediation, canonical_exported_pdf, client_menus,
-        client_report_status, create_case_file, display_path, existing_exported_pdf,
-        filter_test_titles, legacy_report_scenarios, pdf_html, persist_screenshot_artifacts,
-        recover_incomplete_test_runs, run_by_id, save_run, scenario_titles_for_menu_and_suite,
-        source_business_scenarios, static_scenarios, strip_json_comments, write_exported_markdown,
-        TestArtifact, TestCapabilities, TestMenu, TestProcessState, TestRun, TestScenarioResult,
-        COMMON_REAL_SUITE_ID,
+        client_report_status, complete_pdf_size, create_case_file, display_path,
+        existing_exported_pdf, filter_test_titles, legacy_report_scenarios, pdf_html,
+        persist_screenshot_artifacts, recover_incomplete_test_runs, run_by_id, save_run,
+        scenario_titles_for_menu_and_suite, source_business_scenarios, static_scenarios,
+        strip_json_comments, write_exported_markdown, TestArtifact, TestCapabilities, TestMenu,
+        TestProcessState, TestRun, TestScenarioResult, COMMON_REAL_SUITE_ID,
     };
     use crate::database::DatabaseState;
     use std::path::Path;
@@ -4355,7 +4411,11 @@ mod tests {
         assert!(existing_exported_pdf(&reports, &run).is_none());
         let pdf = super::exported_pdf_path(&reports, &run);
         std::fs::create_dir_all(&reports).unwrap();
-        std::fs::write(&pdf, b"%PDF-existing-report").unwrap();
+        std::fs::write(&pdf, b"%PDF-incomplete-report").unwrap();
+        assert!(complete_pdf_size(&pdf).is_none());
+        assert!(existing_exported_pdf(&reports, &run).is_none());
+        std::fs::write(&pdf, b"%PDF-1.4\n%%EOF\n").unwrap();
+        assert_eq!(complete_pdf_size(&pdf), Some(15));
         assert_eq!(existing_exported_pdf(&reports, &run), Some(pdf));
         if let Some(output) = std::env::var_os("WORKBENCH_PDF_QA_HTML") {
             let output = std::path::PathBuf::from(output);
@@ -4375,9 +4435,9 @@ mod tests {
         let pdf = reports.join("report.pdf");
         let text = reports.join("report.txt");
         let outside = root.join("outside.pdf");
-        std::fs::write(&pdf, b"pdf").unwrap();
+        std::fs::write(&pdf, b"%PDF-1.4\n%%EOF\n").unwrap();
         std::fs::write(&text, b"text").unwrap();
-        std::fs::write(&outside, b"pdf").unwrap();
+        std::fs::write(&outside, b"%PDF-1.4\n%%EOF\n").unwrap();
         assert_eq!(
             canonical_exported_pdf(&reports, pdf.to_str().unwrap()).unwrap(),
             pdf.canonicalize().unwrap()

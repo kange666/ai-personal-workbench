@@ -113,6 +113,19 @@ describe("TestReportDialog", () => {
     expect(exportTestReportPdf).not.toHaveBeenCalled();
   });
 
+  it("PDF 文件被移动后打开失败会恢复为重新导出", async () => {
+    getExistingTestReportPdf.mockResolvedValueOnce("C:/reports/moved.pdf").mockResolvedValueOnce(null);
+    openTestReportPdf.mockRejectedValueOnce(new Error("PDF 文件不存在"));
+    const wrapper = mountDialog();
+    await flushPromises();
+    const pdfButton = wrapper.find('[data-testid="pdf-action"]');
+    expect(pdfButton.text()).toBe("打开 PDF");
+    await pdfButton.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("PDF 已导出，但打开失败");
+    expect(pdfButton.text()).toBe("导出 PDF");
+  });
+
   it("把没有结构化字段的旧 Markdown 报告排成可读章节和表格", () => {
     const legacyRun = { ...run, scenarioResults: [], artifacts: [], totalCount: 0, passedCount: 0, failedCount: 0, reportMarkdown: "" };
     const wrapper = mountDialog({ run: legacyRun, fallbackMarkdown: "# 旧测试报告\n\n- 测试结论：不通过\n\n## 汇总\n\n| 用例总数 | 通过 | 失败 |\n| ---: | ---: | ---: |\n| 3 | 2 | 1 |\n\n## 失败详情\n\n### 搜索场景\n\n1. 点击搜索\n2. 核对列表" });

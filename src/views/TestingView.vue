@@ -431,9 +431,9 @@ onMounted(async () => {
       <footer class="parity-review"><label>核对结论<select v-model="selectedParity.parityStatus"><option value="static-aligned">已匹配，待实际测试</option><option value="confirmed">人工确认一致</option><option value="different">存在差异</option><option value="pc-only">仅 PC 存在</option><option value="app-only">仅 APP 存在</option><option value="pending">待核对</option></select></label><label class="check-row"><input v-model="selectedParity.intentionalDifference" type="checkbox">差异属于有意设计</label><button class="button primary" :disabled="loading" @click="saveParity(selectedParity)">保存人工核对</button></footer>
     </section></div>
 
-    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && !testRunning && !generatingDedicatedCase && (configuring = null)">
+    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && !generatingDedicatedCase && (configuring = null)">
       <section class="panel test-config-dialog test-config-v2">
-        <header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading || testRunning || generatingDedicatedCase" @click="configuring = null">×</button></header>
+        <header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading || generatingDedicatedCase" title="关闭弹框，测试继续在后台执行" @click="configuring = null">×</button></header>
         <div class="test-config-body" :class="{locked:testRunning || generatingDedicatedCase}">
           <label v-if="!configuring.hasCaseFile && mode !== 'real'" class="case-create-option"><span><input v-model="createCaseFile" type="checkbox"><b>添加测试配置</b></span><small>根据当前页面源码生成 JSON 配置；这不是 Playwright 专属脚本。真实接口专属脚本请使用下方 Codex CLI 按钮生成。</small></label>
           <label>测试类型<select v-model="mode"><option v-for="value in availableModes(configuring)" :key="value" :value="value">{{ modeLabel(value) }}</option></select><small v-if="!configuring.hasCaseFile && !createCaseFile && mode !== 'real'">当前没有功能用例，可执行页面源码检查，或添加测试配置后使用项目已有运行器。</small></label>

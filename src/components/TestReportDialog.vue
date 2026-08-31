@@ -150,7 +150,10 @@ async function openPdf() {
   if (!exportedPdfPath.value || openingPdf.value) return;
   openingPdf.value = true; exportError.value = "";
   try { await openTestReportPdf(exportedPdfPath.value); }
-  catch (cause) { exportError.value = `PDF 已导出，但打开失败：${String(cause)}`; }
+  catch (cause) {
+    exportError.value = `PDF 已导出，但打开失败：${String(cause)}`;
+    await loadExistingPdf();
+  }
   finally { openingPdf.value = false; }
 }
 
