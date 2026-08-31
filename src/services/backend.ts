@@ -378,14 +378,34 @@ export interface GitRepositoryStatus {
   userName: string;
   userEmail: string;
   hasUncommittedChanges: boolean;
+  mergeInProgress: boolean;
+  hasWorkbenchStash: boolean;
   changedFiles: GitChangedFile[];
   credential: GitCredentialStatus;
+}
+
+export interface GitFileDiff {
+  path: string;
+  stagedDiff: string;
+  unstagedDiff: string;
+  truncated: boolean;
 }
 
 export interface GitOperationResult {
   message: string;
   output: string;
   commitHash: string;
+}
+
+export interface GitPullConflict {
+  files: string[];
+  aiBlockedFiles: string[];
+  localHead: string;
+  remoteHead: string;
+}
+
+export interface GitPullResult extends GitOperationResult {
+  conflict: GitPullConflict | null;
 }
 
 export interface TapdWorkItem {
@@ -1335,12 +1355,36 @@ export async function fetchGitRepository(path: string): Promise<GitOperationResu
   return invoke<GitOperationResult>("git_fetch_repository", { path });
 }
 
-export async function pullGitRepository(path: string): Promise<GitOperationResult> {
-  return invoke<GitOperationResult>("git_pull_repository", { path });
+export async function pullGitRepository(path: string): Promise<GitPullResult> {
+  return invoke<GitPullResult>("git_pull_repository", { path });
 }
 
-export async function stageGitRepositoryChanges(path: string): Promise<GitOperationResult> {
-  return invoke<GitOperationResult>("git_stage_repository_changes", { path });
+export async function resolveGitPullConflicts(path: string, strategy: "local" | "remote" | "ai", localHead: string, remoteHead: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_resolve_pull_conflicts", { path, strategy, localHead, remoteHead });
+}
+
+export async function stageGitRepositoryChanges(path: string, files: string[]): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_stage_repository_changes", { path, files });
+}
+
+export async function getGitRepositoryFileDiff(path: string, file: string): Promise<GitFileDiff> {
+  return invoke<GitFileDiff>("git_repository_file_diff", { path, file });
+}
+
+export async function unstageGitRepositoryChanges(path: string, files: string[]): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_unstage_repository_changes", { path, files });
+}
+
+export async function abortGitRepositoryMerge(path: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_abort_repository_merge", { path });
+}
+
+export async function stashGitRepositoryChanges(path: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_stash_repository_changes", { path });
+}
+
+export async function restoreGitRepositoryStash(path: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_restore_repository_stash", { path });
 }
 
 export async function pushGitRepository(path: string): Promise<GitOperationResult> {
