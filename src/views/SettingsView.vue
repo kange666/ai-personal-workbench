@@ -5,7 +5,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useRoute } from "vue-router";
 import ThemeSwitch from "../components/ThemeSwitch.vue";
 import NavIcon from "../components/NavIcon.vue";
-import { loadNavigationOrder, orderedNavigationItems, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
+import { loadHiddenNavigationPaths, loadNavigationOrder, orderedNavigationItems, saveHiddenNavigationPaths, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
 import {
   clearDeepSeekKey,
   clearApifoxToken,
@@ -73,10 +73,12 @@ const updateDownloaded = ref(0);
 const updateTotal = ref(0);
 const updateHint = ref("");
 const menuOrder = ref(loadNavigationOrder());
+const hiddenMenuPaths = ref(loadHiddenNavigationPaths());
 let updateSlowTimer: number | undefined;
 const updateProgress = computed(() => updateTotal.value > 0 ? Math.min(100, Math.round(updateDownloaded.value / updateTotal.value * 100)) : 0);
 const updateBusy = computed(() => ["checking", "backing-up", "downloading", "installing"].includes(updatePhase.value));
 const orderedMenuItems = computed(() => orderedNavigationItems(menuOrder.value));
+const hiddenMenuPathSet = computed(() => new Set(hiddenMenuPaths.value));
 
 function emailStateText() {
   return ({ unconfigured:"未配置", unverified:"待测试", disabled:"已配置 · 已关闭", ready:"已配置 · 已开启", error:"连接异常" } as Record<string,string>)[emailStatus.value.state] || "未配置";
@@ -257,7 +259,14 @@ function moveMenu(path:string,direction:-1|1) {
 }
 function resetMenuOrder() {
   menuOrder.value=saveNavigationOrder(workbenchNavigationItems.map((item)=>item.path));
-  message.value="菜单顺序已恢复默认。";
+  hiddenMenuPaths.value=saveHiddenNavigationPaths([]);
+  message.value="菜单顺序和显示状态已恢复默认。";
+}
+function toggleMenuVisibility(path:string) {
+  const hidden=new Set(hiddenMenuPaths.value);
+  if (hidden.has(path)) hidden.delete(path); else hidden.add(path);
+  hiddenMenuPaths.value=saveHiddenNavigationPaths([...hidden]);
+  message.value=hidden.has(path) ? "菜单已隐藏，可随时在这里恢复显示。" : "菜单已恢复显示。";
 }
 
 onMounted(() => { if (route.query.vip === "required") message.value="内容工坊和视频中心属于 VIP 功能，请先输入 VIP 码启用。"; void refresh(); });
@@ -298,20 +307,21 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
           </div>
           <div class="settings-actions"><button class="button secondary" :disabled="loading || updateBusy" @click="refreshUpdateStatus">重新检查</button><button v-if="updateStatus.updateAvailable" class="button primary" :disabled="updateBusy" @click="installAvailableUpdate">{{ updatePhase==='checking' ? '验证中…' : updatePhase==='backing-up' ? '备份中…' : updatePhase==='downloading' ? (updateTotal ? `下载 ${updateProgress}%` : '正在下载…') : updatePhase==='installing' ? '正在启动安装器…' : '一键更新并重启' }}</button><button v-if="updateStatus.updateAvailable && updateStatus.installerUrl && (updatePhase==='downloading' || updatePhase==='error')" class="button secondary" @click="openUpdateUrl(updateStatus.installerUrl)">手工下载</button></div>
         </article>
-        <article class="panel settings-card data-safety-settings settings-card-wide">
-          <div><h2>本地数据保护</h2><p>每天首次启动自动备份，保留最近 14 份；恢复前会再做一次保护备份。</p></div>
-          <span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span>
-          <div class="settings-actions"><button class="button primary" :disabled="loading" @click="createBackup">立即备份</button><button class="button secondary" :disabled="loading" @click="exportBackup">导出到文档</button></div>
-          <div v-if="backupStatus.backups.length" class="backup-list"><article v-for="item in backupStatus.backups.slice(0,5)" :key="item.path"><span><b>{{ backupKind(item.kind) }}</b><small>{{ backupTime(item.createdAt) }} · {{ backupSize(item.sizeBytes) }}</small></span><button class="text-button" @click="locateBackup(item.path)">定位</button><button class="text-button danger-text" @click="restoreBackup(item.path)">恢复</button></article></div>
-          <small v-else>尚无备份；点击“立即备份”即可创建第一份。</small>
-        </article>
+        <details class="panel settings-card-wide data-safety-collapsible">
+          <summary><div><h2>本地数据保护</h2><p>每天首次启动自动备份，内部备份自动清理并只保留最新 10 条；恢复前会再做一次保护备份。</p></div><span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span><span class="settings-collapse-label"></span></summary>
+          <div class="data-safety-body">
+            <div class="settings-actions"><button class="button primary" :disabled="loading" @click="createBackup">立即备份</button><button class="button secondary" :disabled="loading" @click="exportBackup">导出到文档</button></div>
+            <div v-if="backupStatus.backups.length" class="backup-list"><article v-for="item in backupStatus.backups" :key="item.path"><span><b>{{ backupKind(item.kind) }}</b><small>{{ backupTime(item.createdAt) }} · {{ backupSize(item.sizeBytes) }}</small></span><button class="text-button" @click="locateBackup(item.path)">定位</button><button class="text-button danger-text" @click="restoreBackup(item.path)">恢复</button></article></div>
+            <small v-else>尚无备份；点击“立即备份”即可创建第一份。</small>
+          </div>
+        </details>
       </div>
     </section>
     <details class="settings-section settings-collapsible">
-      <summary class="settings-section-title"><div><h2>菜单顺序</h2><p>调整左侧主菜单的显示顺序；设置入口固定在底部。</p></div><span class="settings-collapse-label"></span></summary>
+      <summary class="settings-section-title"><div><h2>菜单顺序与显示</h2><p>调整左侧主菜单的顺序和显示状态；设置入口固定在底部。</p></div><span class="settings-collapse-label"></span></summary>
       <article class="panel menu-order-settings">
-        <header><div><h2>左侧菜单</h2><p>VIP 菜单关闭时暂时隐藏，重新启用后仍保留这里设置的顺序。</p></div><button class="button secondary" @click="resetMenuOrder">恢复默认</button></header>
-        <div class="menu-order-list"><article v-for="(item,index) in orderedMenuItems" :key="item.path"><b>{{ index+1 }}</b><NavIcon :name="item.icon" /><span><strong>{{ item.label }}</strong><small>{{ item.vip ? 'VIP 功能' : '常用功能' }}</small></span><div><button class="icon-button" title="上移" :disabled="index===0" @click="moveMenu(item.path,-1)">↑</button><button class="icon-button" title="下移" :disabled="index===orderedMenuItems.length-1" @click="moveMenu(item.path,1)">↓</button></div></article></div>
+        <header><div><h2>左侧菜单</h2><p>隐藏只影响左侧入口，不会删除功能和数据；VIP 菜单仍需启用 VIP 后才会显示。</p></div><button class="button secondary" @click="resetMenuOrder">恢复默认</button></header>
+        <div class="menu-order-list"><article v-for="(item,index) in orderedMenuItems" :key="item.path" :class="{ 'is-hidden':hiddenMenuPathSet.has(item.path) }"><b>{{ index+1 }}</b><NavIcon :name="item.icon" /><span><strong>{{ item.label }}</strong><small>{{ item.vip ? 'VIP 功能' : '常用功能' }} · {{ hiddenMenuPathSet.has(item.path) ? '已隐藏' : '显示中' }}</small></span><div><button class="button small secondary menu-visibility-button" @click="toggleMenuVisibility(item.path)">{{ hiddenMenuPathSet.has(item.path) ? '显示' : '隐藏' }}</button><button class="icon-button" title="上移" :disabled="index===0" @click="moveMenu(item.path,-1)">↑</button><button class="icon-button" title="下移" :disabled="index===orderedMenuItems.length-1" @click="moveMenu(item.path,1)">↓</button></div></article></div>
       </article>
     </details>
     <details class="settings-section settings-collapsible">

@@ -14,7 +14,7 @@ use std::process::Command;
 const RELEASE_MANIFEST_URL: &str =
     "https://kange666.github.io/ai-personal-workbench-download/release.json";
 const RELEASE_PAGE_URL: &str = "https://kange666.github.io/ai-personal-workbench-download/";
-const DAILY_BACKUP_RETENTION: usize = 14;
+const BACKUP_RETENTION: usize = 10;
 
 fn normalize_proxy_url(value: &str) -> Option<String> {
     let value = value.trim();
@@ -213,18 +213,27 @@ fn create_backup_for_state(state: &DatabaseState, kind: &str) -> Result<BackupEn
     backup_entry(path).ok_or_else(|| "无法读取新建备份".to_string())
 }
 
-fn prune_daily_backups(state: &DatabaseState) -> Result<(), String> {
-    let daily = list_backup_entries(state)?
+fn prune_backups(state: &DatabaseState) -> Result<(), String> {
+    let directory = std::fs::canonicalize(backup_directory(state)?)
+        .map_err(|error| format!("无法确认备份目录：{error}"))?;
+    for entry in list_backup_entries(state)?
         .into_iter()
-        .filter(|entry| entry.kind == "daily")
-        .collect::<Vec<_>>();
-    for entry in daily.into_iter().skip(DAILY_BACKUP_RETENTION) {
-        let _ = std::fs::remove_file(entry.path);
+        .skip(BACKUP_RETENTION)
+    {
+        let path = PathBuf::from(&entry.path);
+        let resolved = std::fs::canonicalize(&path)
+            .map_err(|error| format!("无法确认旧备份路径 {}：{error}", path.display()))?;
+        if !resolved.starts_with(&directory) {
+            return Err(format!("拒绝清理备份目录外的文件：{}", resolved.display()));
+        }
+        std::fs::remove_file(&resolved)
+            .map_err(|error| format!("清理旧备份失败 {}：{error}", resolved.display()))?;
     }
     Ok(())
 }
 
 pub fn ensure_daily_backup_for_state(state: &DatabaseState) -> Result<Option<BackupEntry>, String> {
+    prune_backups(state)?;
     let today_marker = format!("-daily-{}", Local::now().format("%Y%m%d"));
     if list_backup_entries(state)?
         .iter()
@@ -233,12 +242,13 @@ pub fn ensure_daily_backup_for_state(state: &DatabaseState) -> Result<Option<Bac
         return Ok(None);
     }
     let backup = create_backup_for_state(state, "daily")?;
-    prune_daily_backups(state)?;
+    prune_backups(state)?;
     Ok(Some(backup))
 }
 
 #[tauri::command]
 pub fn backup_status(state: tauri::State<'_, DatabaseState>) -> Result<BackupStatus, String> {
+    prune_backups(&state)?;
     let directory = backup_directory(&state)?;
     Ok(BackupStatus {
         database_path: state.path.to_string_lossy().to_string(),
@@ -251,7 +261,9 @@ pub fn backup_status(state: tauri::State<'_, DatabaseState>) -> Result<BackupSta
 pub fn create_database_backup(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<BackupEntry, String> {
-    create_backup_for_state(&state, "manual")
+    let backup = create_backup_for_state(&state, "manual")?;
+    prune_backups(&state)?;
+    Ok(backup)
 }
 
 #[tauri::command]
@@ -267,7 +279,9 @@ pub fn export_database_backup(
     let target = export_directory.join(&source.file_name);
     std::fs::copy(&source.path, &target).map_err(|error| format!("导出备份失败：{error}"))?;
     verify_database(&target)?;
-    backup_entry(target).ok_or_else(|| "无法读取导出备份".to_string())
+    let exported = backup_entry(target).ok_or_else(|| "无法读取导出备份".to_string())?;
+    prune_backups(&state)?;
+    Ok(exported)
 }
 
 #[tauri::command]
@@ -393,6 +407,33 @@ mod tests {
         let backup = create_backup_for_state(&state, "manual").unwrap();
         assert!(Path::new(&backup.path).exists());
         verify_database(Path::new(&backup.path)).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn keeps_only_ten_newest_internal_backups_across_all_kinds() {
+        let directory = std::env::temp_dir().join(format!(
+            "workbench-backup-retention-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+
+        for index in 0..12 {
+            let kind = match index % 3 {
+                0 => "daily",
+                1 => "manual",
+                _ => "pre-restore",
+            };
+            create_backup_for_state(&state, kind).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        prune_backups(&state).unwrap();
+        let backups = list_backup_entries(&state).unwrap();
+        assert_eq!(backups.len(), BACKUP_RETENTION);
+        assert!(backups.iter().all(|entry| Path::new(&entry.path).exists()));
+
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

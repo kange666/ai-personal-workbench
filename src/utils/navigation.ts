@@ -24,6 +24,7 @@ export const workbenchNavigationItems: WorkbenchNavigationItem[] = [
 
 export const navigationOrderChangedEvent = "workbench-navigation-order-changed";
 const navigationOrderStorageKey = "workbench-navigation-order-v1";
+const hiddenNavigationStorageKey = "workbench-navigation-hidden-v1";
 
 function normalizeNavigationOrder(value: unknown): string[] {
   const validPaths = new Set(workbenchNavigationItems.map((item) => item.path));
@@ -49,6 +50,28 @@ export function saveNavigationOrder(order: string[]): string[] {
   const normalized = normalizeNavigationOrder(order);
   localStorage.setItem(navigationOrderStorageKey, JSON.stringify(normalized));
   window.dispatchEvent(new CustomEvent(navigationOrderChangedEvent, { detail: normalized }));
+  return normalized;
+}
+
+function normalizeHiddenNavigationPaths(value: unknown): string[] {
+  const validPaths = new Set(workbenchNavigationItems.map((item) => item.path));
+  return Array.isArray(value)
+    ? [...new Set(value.filter((path): path is string => typeof path === "string" && validPaths.has(path)))]
+    : [];
+}
+
+export function loadHiddenNavigationPaths(): string[] {
+  try {
+    return normalizeHiddenNavigationPaths(JSON.parse(localStorage.getItem(hiddenNavigationStorageKey) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+export function saveHiddenNavigationPaths(paths: string[]): string[] {
+  const normalized = normalizeHiddenNavigationPaths(paths);
+  localStorage.setItem(hiddenNavigationStorageKey, JSON.stringify(normalized));
+  window.dispatchEvent(new CustomEvent(navigationOrderChangedEvent));
   return normalized;
 }
 

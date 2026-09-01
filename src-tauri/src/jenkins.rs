@@ -3,11 +3,12 @@ use chrono::Utc;
 use keyring::Entry;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::LOCATION;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
@@ -22,6 +23,7 @@ const META_BASE_URL: &str = "jenkins_base_url";
 const META_USERNAME: &str = "jenkins_username";
 const META_VERSION: &str = "jenkins_version";
 const META_VERIFIED_AT: &str = "jenkins_verified_at";
+static JENKINS_TRIGGER_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug)]
 struct JenkinsConnection {
@@ -634,6 +636,21 @@ fn is_terminal(status: &str) -> bool {
     matches!(status, "success" | "failed" | "aborted")
 }
 
+fn has_active_publish(
+    connection: &Connection,
+    base_url: &str,
+    job_full_name: &str,
+    branch: &str,
+) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM jenkins_publish_records WHERE jenkins_base_url=?1 AND job_full_name=?2 AND branch=?3 AND status IN ('queued','running'))",
+            params![base_url, job_full_name, branch],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+}
+
 fn create_completion_notification(
     state: &DatabaseState,
     record: &JenkinsPublishRecord,
@@ -953,6 +970,20 @@ pub async fn trigger_jenkins_publish(
         if !options.branches.iter().any(|item| item == &branch) {
             return Err("所选分支已不在 Jenkins Job 的可选范围内，请重新选择。".to_string());
         }
+        let _trigger_guard = JENKINS_TRIGGER_LOCK
+            .lock()
+            .map_err(|_| "Jenkins 发布锁异常，请稍后重试。".to_string())?;
+        if has_active_publish(
+            &database.connect()?,
+            &connection.base_url,
+            &job.full_name,
+            &branch,
+        )? {
+            return Err(format!(
+                "{} · {} 已有正在执行的发布，请等待完成后再试。",
+                job.full_name, branch
+            ));
+        }
         let client = http_client()?;
         let response = client
             .post(format!("{}buildWithParameters", job.url.trim_end_matches('/').to_string() + "/"))
@@ -1105,5 +1136,48 @@ mod tests {
         assert_eq!(build_result_status("SUCCESS"), "success");
         assert_eq!(build_result_status("ABORTED"), "aborted");
         assert_eq!(build_result_status("UNSTABLE"), "failed");
+    }
+
+    #[test]
+    fn active_publish_blocks_only_the_same_job_and_branch() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE jenkins_publish_records(
+                jenkins_base_url TEXT NOT NULL,
+                job_full_name TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                status TEXT NOT NULL
+            );
+            INSERT INTO jenkins_publish_records VALUES(
+                'https://jenkins.example.com','folder/web','main','queued'
+            );",
+            )
+            .unwrap();
+
+        assert!(has_active_publish(
+            &connection,
+            "https://jenkins.example.com",
+            "folder/web",
+            "main"
+        )
+        .unwrap());
+        assert!(!has_active_publish(
+            &connection,
+            "https://jenkins.example.com",
+            "folder/web",
+            "develop"
+        )
+        .unwrap());
+        connection
+            .execute("UPDATE jenkins_publish_records SET status='success'", [])
+            .unwrap();
+        assert!(!has_active_publish(
+            &connection,
+            "https://jenkins.example.com",
+            "folder/web",
+            "main"
+        )
+        .unwrap());
     }
 }

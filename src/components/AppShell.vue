@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { isRegistered as isShortcutRegistered, register as registerShortcut, unregister as unregisterShortcut } from "@tauri-apps/plugin-global-shortcut";
 import { useWorkbenchStore } from "../stores/workbench";
-import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, startRepositoryProject, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
+import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, startRepositoryProject, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
 import HeaderIcon from "./HeaderIcon.vue";
@@ -18,8 +18,11 @@ import WorkspaceSearch from "./WorkspaceSearch.vue";
 import NotificationDrawer from "./NotificationDrawer.vue";
 import QuickCapture from "./QuickCapture.vue";
 import TranslationDialog from "./TranslationDialog.vue";
-import { loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
+import CockpitScreensaver from "./CockpitScreensaver.vue";
+import { loadHiddenNavigationPaths, loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
 import { estimateTestRunProgress } from "../utils/testRunProgress";
+import { cockpitIdleState } from "../utils/cockpit";
+import { buildJenkinsActiveOperations } from "../utils/jenkinsActiveOperations";
 
 const store = useWorkbenchStore();
 const router = useRouter();
@@ -27,6 +30,8 @@ const editorOpen = ref(false);
 const searchOpen = ref(false);
 const quickCaptureOpen = ref(false);
 const translationOpen = ref(false);
+const cockpitOpen = ref(false);
+const cockpitIdleWarningSeconds = ref(0);
 const refreshing = ref(false);
 const quotaOpen = ref(false);
 const quotaLoading = ref(false);
@@ -48,6 +53,7 @@ const activeTestRuns = ref<TestRun[]>([]);
 const activeTapdJobs = ref<TapdCodexJob[]>([]);
 const allTestRuns = ref<TestRun[]>([]);
 const allTapdJobs = ref<TapdCodexJob[]>([]);
+const activeJenkinsPublishes = ref<JenkinsPublishRecord[]>([]);
 const runningProjects = ref<RunningProjectProcess[]>([]);
 const repositoryAssets = ref<RepositoryAsset[]>([]);
 const todayWorkSessions = ref<WorkSession[]>([]);
@@ -62,7 +68,11 @@ const pageLoadingSlow = ref(false);
 const backendRequestCount = ref(0);
 let topbarDragStart: { x:number; y:number } | null = null;
 const navigationOrder = ref(loadNavigationOrder());
-const visibleNavItems = computed(() => orderedNavigationItems(navigationOrder.value).filter(item => !item.vip || vipStatus.value.active));
+const hiddenNavigationPaths = ref(loadHiddenNavigationPaths());
+const visibleNavItems = computed(() => {
+  const hidden = new Set(hiddenNavigationPaths.value);
+  return orderedNavigationItems(navigationOrder.value).filter(item => !hidden.has(item.path) && (!item.vip || vipStatus.value.active));
+});
 const dateText = computed(() => new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(new Date()));
 const todayIso = new Date().toLocaleDateString("sv-SE");
 const todayDay = new Date().getDate();
@@ -113,6 +123,7 @@ const activeOperations = computed(() => [
     progressPercent:undefined,
     etaText:"",
   })),
+  ...buildJenkinsActiveOperations(activeJenkinsPublishes.value,railNow.value),
 ]);
 const railIssues = computed(() => {
   const issues:Array<{ id:string; title:string; detail:string; tone:"danger"|"warning"; to:string | { path:string; query:Record<string,string> } }> = [];
@@ -156,6 +167,8 @@ let emailTimer = 0;
 let healthTimer = 0;
 let activeOperationsTimer = 0;
 let railStatusTimer = 0;
+let cockpitIdleTimer = 0;
+let cockpitLastActivityAt = Date.now();
 let railStatusTicks = 0;
 let pageLoadingStartedAt = Date.now();
 let pageLoadingFinishTimer = 0;
@@ -234,7 +247,44 @@ function projectGitSummary(path:string) {
   return states.join(" · ");
 }
 function openSearch() { searchOpen.value = true; }
+function resetCockpitIdle() {
+  cockpitLastActivityAt=Date.now();
+  cockpitIdleWarningSeconds.value=0;
+}
+function evaluateCockpitIdle() {
+  if (cockpitOpen.value || document.visibilityState === "hidden") return;
+  const state=cockpitIdleState(cockpitLastActivityAt);
+  cockpitIdleWarningSeconds.value=state.warningSeconds;
+  if (state.open) {
+    cockpitIdleWarningSeconds.value=0;
+    healthOpen.value=false;
+    quotaOpen.value=false;
+    notificationOpen.value=false;
+    notificationToast.value=null;
+    cockpitOpen.value=true;
+  }
+}
+function handleCockpitActivity() {
+  if (!cockpitOpen.value) resetCockpitIdle();
+}
+function closeCockpit() {
+  cockpitOpen.value=false;
+  resetCockpitIdle();
+}
+async function navigateFromCockpit(route:string) {
+  closeCockpit();
+  await router.push(route);
+}
+function handleCockpitVisibilityChange() {
+  if (document.visibilityState === "visible") evaluateCockpitIdle();
+  else cockpitIdleWarningSeconds.value=0;
+}
 function handleKeydown(event: KeyboardEvent) {
+  if (cockpitOpen.value) {
+    if (event.key === "Escape") { event.preventDefault();closeCockpit(); }
+    return;
+  }
+  resetCockpitIdle();
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); openSearch(); }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === "Space") { event.preventDefault(); quickCaptureOpen.value=true; }
   if (event.key === "Escape") { healthOpen.value=false; quotaOpen.value=false; notificationOpen.value=false; quickCaptureOpen.value=false; selectedNotification.value=null; }
@@ -379,11 +429,13 @@ function isTopbarInteractiveTarget(target:HTMLElement) {
 async function loadActiveOperations() {
   if (!isTauriRuntime()) return;
   railNow.value=Date.now();
-  const [testResult,tapdResult,projectsResult] = await Promise.allSettled([listTestRuns(),listTapdCodexJobs(),listRunningRepositoryProjects()]);
+  const [testResult,tapdResult,jenkinsResult,projectsResult] = await Promise.allSettled([listTestRuns(),listTapdCodexJobs(),listJenkinsPublishRecords(),listRunningRepositoryProjects()]);
   if (testResult.status === "fulfilled") { allTestRuns.value=testResult.value; activeTestRuns.value=testResult.value.filter(item => item.status === "queued" || item.status === "running"); }
   else console.error("读取正在执行的测试失败",testResult.reason);
   if (tapdResult.status === "fulfilled") { allTapdJobs.value=tapdResult.value; activeTapdJobs.value=tapdResult.value.filter(item => item.status === "queued" || item.status === "running"); }
   else console.error("读取正在处理的 TAPD 缺陷失败",tapdResult.reason);
+  if (jenkinsResult.status === "fulfilled") activeJenkinsPublishes.value=jenkinsResult.value.filter(item => item.status === "queued" || item.status === "running");
+  else console.error("读取正在执行的 Jenkins 发布失败",jenkinsResult.reason);
   if (projectsResult.status === "fulfilled") runningProjects.value=projectsResult.value.filter(item => item.status === "starting" || item.status === "running");
   else console.error("读取正在运行的项目失败",projectsResult.reason);
 }
@@ -449,7 +501,10 @@ async function toggleMaximizeFromTopbar(event:MouseEvent) {
   event.preventDefault();
   await toggleMaximizeWindow();
 }
-function refreshNavigationOrder() { navigationOrder.value=loadNavigationOrder(); }
+function refreshNavigationSettings() {
+  navigationOrder.value=loadNavigationOrder();
+  hiddenNavigationPaths.value=loadHiddenNavigationPaths();
+}
 async function toggleEmailNotification() {
   if (emailLoading.value) return;
   if (["unconfigured","unverified"].includes(emailStatus.value.state)) {
@@ -528,6 +583,7 @@ async function refreshLocalData() {
   refreshing.value=false;
 }
 onMounted(() => {
+  resetCockpitIdle();
   void loadSystemHealth();
   void loadNotifications(true).then(syncTapdNotifications);
   void initializeQuickCaptureShortcut();
@@ -551,12 +607,17 @@ onMounted(() => {
   emailTimer = window.setInterval(() => void loadEmailStatus(), 15 * 1000);
   activeOperationsTimer = window.setInterval(() => void loadActiveOperations(), 3 * 1000);
   railStatusTimer = window.setInterval(() => { railNow.value=Date.now(); railStatusTicks+=1; if (railStatusTicks % 5 === 0) void Promise.all([loadSidebarWorktime(),loadProjectOptions()]); }, 60 * 1000);
+  cockpitIdleTimer = window.setInterval(evaluateCockpitIdle,1_000);
   window.addEventListener("keydown", handleKeydown);
+  window.addEventListener("pointerdown",handleCockpitActivity,true);
+  window.addEventListener("wheel",handleCockpitActivity,{capture:true,passive:true});
+  window.addEventListener("touchstart",handleCockpitActivity,{capture:true,passive:true});
+  document.addEventListener("visibilitychange",handleCockpitVisibilityChange);
   window.addEventListener("open-workbench-search", openSearch);
   window.addEventListener("open-workbench-notification", openNotificationFromPage);
   window.addEventListener("open-quick-capture", openQuickCaptureFromPage);
   window.addEventListener("tapd-items-synced", refreshNotificationsFromTapd);
-  window.addEventListener(navigationOrderChangedEvent, refreshNavigationOrder);
+  window.addEventListener(navigationOrderChangedEvent, refreshNavigationSettings);
   window.addEventListener("workbench-active-operations-changed", loadActiveOperations);
   window.addEventListener("mousemove", continueWindowDragging);
   window.addEventListener("mouseup", cancelWindowDragging);
@@ -570,6 +631,7 @@ onBeforeUnmount(() => {
   window.clearInterval(emailTimer);
   window.clearInterval(activeOperationsTimer);
   window.clearInterval(railStatusTimer);
+  window.clearInterval(cockpitIdleTimer);
   window.clearTimeout(notificationToastTimer);
   window.clearTimeout(pageLoadingFinishTimer);
   window.clearTimeout(pageLoadingSlowTimer);
@@ -579,11 +641,15 @@ onBeforeUnmount(() => {
   windowResizeUnlisten?.();
   if (quickShortcutRegistered) void unregisterShortcut("CommandOrControl+Shift+Space");
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("pointerdown",handleCockpitActivity,true);
+  window.removeEventListener("wheel",handleCockpitActivity,true);
+  window.removeEventListener("touchstart",handleCockpitActivity,true);
+  document.removeEventListener("visibilitychange",handleCockpitVisibilityChange);
   window.removeEventListener("open-workbench-search", openSearch);
   window.removeEventListener("open-workbench-notification", openNotificationFromPage);
   window.removeEventListener("open-quick-capture", openQuickCaptureFromPage);
   window.removeEventListener("tapd-items-synced", refreshNotificationsFromTapd);
-  window.removeEventListener(navigationOrderChangedEvent, refreshNavigationOrder);
+  window.removeEventListener(navigationOrderChangedEvent, refreshNavigationSettings);
   window.removeEventListener("workbench-active-operations-changed", loadActiveOperations);
   window.removeEventListener("workbench-backend-loading", handleBackendLoading);
   window.removeEventListener("mousemove", continueWindowDragging);
@@ -686,11 +752,11 @@ onBeforeUnmount(() => {
       <section v-if="activeOperations.length" class="rail-running">
         <header><span><i></i><b>正在执行</b></span><em>{{ activeOperations.length }}</em></header>
         <RouterLink v-for="item in activeOperations" :key="item.id" class="rail-running-item" :to="item.href">
-          <span class="rail-running-item-head"><i :class="item.kind">{{ item.kind === 'test' ? '测试' : 'TAPD' }}</i><em>{{ item.status }}</em></span>
+          <span class="rail-running-item-head"><i :class="item.kind">{{ item.kind === 'test' ? '测试' : item.kind === 'jenkins' ? '发布' : 'TAPD' }}</i><em>{{ item.status }}</em></span>
           <b :title="item.title">{{ item.title }}</b>
           <small :title="item.detail">{{ item.detail }}</small>
-          <span class="rail-running-progress" :class="{ determinate:item.kind === 'test' }" :role="item.kind === 'test' ? 'progressbar' : undefined" :aria-valuenow="item.kind === 'test' ? item.progressPercent : undefined" aria-valuemin="0" aria-valuemax="100"><i :style="item.kind === 'test' ? { width:`${item.progressPercent}%` } : undefined"></i></span>
-          <span v-if="item.kind === 'test'" class="rail-running-estimate"><b>{{ item.progressPercent }}%</b><em>{{ item.etaText }}</em></span>
+          <span class="rail-running-progress" :class="{ determinate:item.progressPercent !== undefined }" :role="item.progressPercent !== undefined ? 'progressbar' : undefined" :aria-valuenow="item.progressPercent" aria-valuemin="0" aria-valuemax="100"><i :style="item.progressPercent !== undefined ? { width:`${item.progressPercent}%` } : undefined"></i></span>
+          <span v-if="item.progressPercent !== undefined || item.etaText" class="rail-running-estimate"><b v-if="item.progressPercent !== undefined">{{ item.progressPercent }}%</b><em>{{ item.etaText }}</em></span>
         </RouterLink>
         <p>任务完成后会自动从这里移出。</p>
       </section>
@@ -709,6 +775,18 @@ onBeforeUnmount(() => {
     <NotificationDrawer :notification="selectedNotification" @close="selectedNotification=null" @reviewed="handleNotificationReviewed" />
     <QuickCapture :open="quickCaptureOpen" @close="quickCaptureOpen=false" />
     <TranslationDialog :open="translationOpen" @close="translationOpen=false" />
+    <Transition name="cockpit-overlay">
+      <CockpitScreensaver v-if="cockpitOpen" :quota="quota" :notifications="notifications" :running-projects="runningProjects" :test-runs="allTestRuns" :tapd-jobs="allTapdJobs" @close="closeCockpit" @navigate="navigateFromCockpit" />
+    </Transition>
+    <Transition name="cockpit-warning">
+      <aside v-if="cockpitIdleWarningSeconds&&!cockpitOpen" class="cockpit-idle-warning" role="status" aria-live="polite"><i></i><span><b>{{ cockpitIdleWarningSeconds }} 秒后进入数据驾驶舱</b><small>点击、输入或滚动可继续使用当前页面</small></span><button @click="resetCockpitIdle">继续使用</button></aside>
+    </Transition>
     <button v-if="notificationToast" class="notification-toast panel" @click="openNotification(notificationToast)"><i></i><span><small>{{ notificationToast.kind==='tapd_item' ? 'TAPD 缺陷消息' : notificationToast.kind==='jenkins_publish' ? 'Jenkins 发布完成' : 'Codex 任务完成' }}</small><b>{{ notificationToast.title.replace(/^Codex 任务已完成：/, '') }}</b><p>{{ notificationToast.body }}</p></span><em>查看</em></button>
   </div>
 </template>
+
+<style scoped>
+.cockpit-idle-warning{position:fixed;right:24px;bottom:24px;z-index:490;width:360px;min-height:76px;padding:13px 14px;border:1px solid color-mix(in srgb,var(--primary) 46%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--surface) 94%,transparent);box-shadow:0 18px 45px rgba(0,0,0,.34);backdrop-filter:blur(12px);display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:center;gap:10px}.cockpit-idle-warning>i{width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 0 4px var(--primary-soft);animation:cockpit-warning-pulse 1.2s ease-in-out infinite}.cockpit-idle-warning>span{min-width:0;display:flex;flex-direction:column;gap:5px}.cockpit-idle-warning small{color:var(--muted);font-size:9px}.cockpit-idle-warning button{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);padding:0 10px}.cockpit-idle-warning button:hover{border-color:var(--primary);color:var(--primary)}
+:global(.cockpit-overlay-enter-active){transition:opacity .6s ease,transform .6s cubic-bezier(.2,.7,.2,1)}:global(.cockpit-overlay-leave-active){transition:opacity .2s ease,transform .2s ease}:global(.cockpit-overlay-enter-from),:global(.cockpit-overlay-leave-to){opacity:0;transform:scale(1.008)}.cockpit-warning-enter-active,.cockpit-warning-leave-active{transition:opacity .2s ease,transform .2s ease}.cockpit-warning-enter-from,.cockpit-warning-leave-to{opacity:0;transform:translateY(8px)}
+@keyframes cockpit-warning-pulse{0%,100%{opacity:.5}50%{opacity:1}}@media(prefers-reduced-motion:reduce){.cockpit-idle-warning>i{animation:none}:global(.cockpit-overlay-enter-active),:global(.cockpit-overlay-leave-active),.cockpit-warning-enter-active,.cockpit-warning-leave-active{transition:none}}
+</style>

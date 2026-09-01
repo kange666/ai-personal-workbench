@@ -42,6 +42,10 @@ const error = ref("");
 const nowTick = ref(Date.now());
 let timer = 0;
 let eventUnlisten: UnlistenFn | undefined;
+const LAST_PROJECT_KEY = "workbench-jenkins-last-project";
+const historyResult = ref<"all"|"success"|"failed">("all");
+const historyPeriod = ref<"all"|"today"|"7d">("all");
+const historyQuery = ref("");
 
 const selectedJob = computed(() => jobs.value.find(item => item.fullName === selectedJobName.value) || null);
 const filteredJobs = computed(() => {
@@ -53,9 +57,33 @@ const filteredJobs = computed(() => {
 const favoriteJobs = computed(() => filteredJobs.value.filter(item => item.favorite));
 const normalJobs = computed(() => filteredJobs.value.filter(item => !item.favorite));
 const activeRecords = computed(() => records.value.filter(item => item.status === "queued" || item.status === "running"));
-const finishedRecords = computed(() => records.value.filter(item => item.status !== "queued" && item.status !== "running"));
-const canPublish = computed(() => connection.value.configured && selectedJob.value && selectedBranch.value && !loadingBranches.value && !publishing.value);
+const allFinishedRecords = computed(() => records.value.filter(item => item.status !== "queued" && item.status !== "running"));
+const finishedRecords = computed(() => {
+  const keyword=historyQuery.value.trim().toLocaleLowerCase();
+  const startOfPeriod=new Date(nowTick.value);
+  startOfPeriod.setHours(0,0,0,0);
+  if (historyPeriod.value === "7d") startOfPeriod.setDate(startOfPeriod.getDate()-6);
+  return allFinishedRecords.value.filter(record => {
+    if (historyResult.value !== "all" && record.status !== historyResult.value) return false;
+    if (keyword && !`${record.jobName} ${record.jobFullName}`.toLocaleLowerCase().includes(keyword)) return false;
+    if (historyPeriod.value === "all") return true;
+    const recordTime=Date.parse(record.finishedAt || record.startedAt);
+    return Number.isFinite(recordTime) && recordTime >= startOfPeriod.getTime();
+  });
+});
+const duplicateActiveRecord = computed(() => activeRecords.value.find(record => record.jobFullName === selectedJobName.value && record.branch === selectedBranch.value) || null);
+const canPublish = computed(() => connection.value.configured && selectedJob.value && selectedBranch.value && !duplicateActiveRecord.value && !loadingBranches.value && !publishing.value);
 const highlightedRun = computed(() => typeof route.query.run === "string" ? route.query.run : "");
+
+function rememberedProjectName() {
+  try {
+    const saved=JSON.parse(window.localStorage.getItem(LAST_PROJECT_KEY) || "null") as { baseUrl?:string; jobFullName?:string } | null;
+    return saved?.baseUrl === connection.value.baseUrl ? saved.jobFullName || "" : "";
+  } catch { return ""; }
+}
+function rememberProject(job:JenkinsJob) {
+  window.localStorage.setItem(LAST_PROJECT_KEY,JSON.stringify({baseUrl:connection.value.baseUrl,jobFullName:job.fullName}));
+}
 
 function formatTime(value?: string) {
   if (!value) return "—";
@@ -102,6 +130,10 @@ async function loadJobs() {
     if (selectedJobName.value && !jobs.value.some(item=>item.fullName===selectedJobName.value)) {
       selectedJobName.value=""; selectedBranch.value=""; branchOptions.value=null;
     }
+    if (!selectedJobName.value) {
+      const remembered=jobs.value.find(item=>item.fullName===rememberedProjectName());
+      if (remembered) await selectJob(remembered,{remember:false,autoSelectSingleBranch:false});
+    }
   } catch(cause) { error.value=String(cause); }
   finally { loadingJobs.value=false; }
 }
@@ -110,16 +142,18 @@ async function loadRecords() {
   try { records.value=await listJenkinsPublishRecords(); }
   catch(cause) { if (!error.value) error.value=String(cause); }
 }
-async function selectJob(job:JenkinsJob) {
+async function selectJob(job:JenkinsJob, options:{remember?:boolean;autoSelectSingleBranch?:boolean}={}) {
+  const {remember=true,autoSelectSingleBranch=true}=options;
   selectedJobName.value=job.fullName;
   projectMenuOpen.value=false;
   projectQuery.value="";
   selectedBranch.value="";
   branchOptions.value=null;
+  if (remember) rememberProject(job);
   loadingBranches.value=true; error.value="";
   try {
     branchOptions.value=await listJenkinsJobBranches(job.fullName);
-    if (branchOptions.value.branches.length === 1) selectedBranch.value=branchOptions.value.branches[0];
+    if (autoSelectSingleBranch && branchOptions.value.branches.length === 1) selectedBranch.value=branchOptions.value.branches[0];
   } catch(cause) { error.value=String(cause); }
   finally { loadingBranches.value=false; }
 }
@@ -135,6 +169,10 @@ async function toggleFavorite(job:JenkinsJob) {
 async function publish() {
   const job=selectedJob.value;
   if (!job || !selectedBranch.value || publishing.value) return;
+  if (duplicateActiveRecord.value) {
+    error.value=`${job.fullName} · ${selectedBranch.value} 已有正在执行的发布，请等待完成后再试。`;
+    return;
+  }
   const confirmed=window.confirm(`确认发布？\n\n项目：${job.fullName}\n分支：${selectedBranch.value}\n\n其他参数将使用 Jenkins 中配置的默认值。`);
   if (!confirmed) return;
   publishing.value=true; error.value=""; message.value="";
@@ -164,6 +202,7 @@ async function saveConfiguration() {
   configBusy.value=true; error.value=""; message.value="";
   try {
     connection.value=await saveJenkinsConnection(configBaseUrl.value,configUsername.value,configToken.value);
+    selectedJobName.value=""; selectedBranch.value=""; branchOptions.value=null;
     configToken.value="";
     configuring.value=false;
     message.value=`Jenkins ${connection.value.version} 已连接。`;
@@ -217,8 +256,8 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
               </div>
             </div>
           </label>
-          <label><span>分支</span><select v-model="selectedBranch" :disabled="!selectedJob || loadingBranches"><option value="">{{ loadingBranches ? "正在读取分支…" : selectedJob ? "选择已配置分支" : "请先选择项目" }}</option><option v-for="branch in branchOptions?.branches || []" :key="branch" :value="branch">{{ branch }}</option></select><small v-if="branchOptions">参数：{{ branchOptions.parameterName }} · 其他参数使用 Jenkins 默认值</small></label>
-          <button class="button primary publish-button" :disabled="!canPublish" @click="publish">{{ publishing ? "正在提交…" : "发布" }}</button>
+          <label><span>分支</span><select v-model="selectedBranch" :disabled="!selectedJob || loadingBranches"><option value="">{{ loadingBranches ? "正在读取分支…" : selectedJob ? "选择已配置分支" : "请先选择项目" }}</option><option v-for="branch in branchOptions?.branches || []" :key="branch" :value="branch">{{ branch }}</option></select><small v-if="duplicateActiveRecord" class="duplicate-publish-hint">该项目和分支正在发布，完成后可再次发布</small><small v-else-if="branchOptions">参数：{{ branchOptions.parameterName }} · 其他参数使用 Jenkins 默认值</small></label>
+          <button class="button primary publish-button" :disabled="!canPublish" @click="publish">{{ publishing ? "正在提交…" : duplicateActiveRecord ? "正在发布" : "发布" }}</button>
         </div>
       </section>
 
@@ -236,12 +275,12 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
       </section>
 
       <section class="deployment-section history-section">
-        <header><div><h2>发布记录</h2><p>最近 {{ finishedRecords.length }} 次已结束发布</p></div></header>
+        <header><div><h2>发布记录</h2><p>显示 {{ finishedRecords.length }} / {{ allFinishedRecords.length }} 次已结束发布</p></div><div class="deployment-history-filters"><select v-model="historyResult" aria-label="筛选发布结果"><option value="all">全部结果</option><option value="success">成功</option><option value="failed">失败</option></select><label><input v-model="historyQuery" aria-label="搜索发布项目" placeholder="搜索项目名称"></label><select v-model="historyPeriod" aria-label="筛选发布时间"><option value="all">全部时间</option><option value="today">今天</option><option value="7d">最近 7 天</option></select></div></header>
         <div class="panel deployment-history">
           <article v-for="record in finishedRecords" :key="record.id" :class="[record.status,{highlighted:highlightedRun===record.id}]">
             <i class="result-dot"></i><div class="history-main"><span><b>{{ record.jobName }}</b><small>{{ record.jobFullName }}</small></span><code>{{ record.branch }}</code></div><div class="history-result"><b>{{ statusLabel(record) }}</b><small>{{ record.currentStage || record.result || record.errorMessage }}</small></div><div class="history-time"><b>{{ durationText(record) }}</b><small>{{ formatTime(record.finishedAt || record.updatedAt) }}</small></div><button class="button secondary small" :disabled="!record.buildUrl && !record.jobUrl" @click="openJenkinsUrl(record.buildUrl || record.jobUrl)">打开 Jenkins</button>
           </article>
-          <div v-if="!finishedRecords.length" class="empty-state"><b>还没有发布记录</b><p>选择 Jenkins 项目和分支后点击发布，状态会显示在这里。</p></div>
+          <div v-if="!finishedRecords.length" class="empty-state"><b>{{ allFinishedRecords.length ? "没有符合条件的发布记录" : "还没有发布记录" }}</b><p>{{ allFinishedRecords.length ? "可以调整结果、项目名称或时间范围。" : "选择 Jenkins 项目和分支后点击发布，状态会显示在这里。" }}</p></div>
         </div>
       </section>
     </template>
@@ -261,9 +300,11 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
 .deployment-empty-connection{min-height:180px;padding:28px;display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:18px;align-items:center}.deployment-empty-connection>span{width:58px;height:58px;border-radius:14px;background:var(--primary);color:#fff;display:grid;place-items:center;font-size:27px;font-weight:900}.deployment-empty-connection h2{margin:0}.deployment-empty-connection p{margin:8px 0 0;color:var(--muted)}
 .deployment-launcher{padding:20px;overflow:visible;position:relative;z-index:10}.deployment-launcher>header,.deployment-section>header{display:flex;align-items:center;justify-content:space-between;gap:16px}.deployment-launcher h2,.deployment-section h2{margin:4px 0 0}.deployment-launcher header small{color:var(--primary);font:10px ui-monospace,monospace;letter-spacing:1.4px}.connection-ready{padding:6px 9px;border-radius:99px;background:color-mix(in srgb,var(--success) 12%,transparent);color:var(--success);font-size:11px}.connection-ready i{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:var(--success)}
 .deployment-fields{display:grid;grid-template-columns:minmax(300px,1.25fr) minmax(260px,1fr) 130px;gap:14px;align-items:end;margin-top:20px}.deployment-fields label{position:relative;display:grid;gap:7px;color:var(--muted)}.deployment-fields select,.project-select-trigger{width:100%;height:43px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text);padding:0 12px}.deployment-fields label>small{min-height:14px;font-size:9px}.publish-button{height:43px}.project-select-control{display:grid;grid-template-columns:minmax(0,1fr) 43px;gap:7px}.project-select-trigger{display:flex;align-items:center;justify-content:space-between;text-align:left}.project-select-trigger b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-select-trigger em{font-style:normal}.project-select-trigger.open{border-color:var(--primary)}.selected-favorite{height:43px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--muted);font-size:20px}.selected-favorite.active{color:#f2b94b}
+.duplicate-publish-hint{color:var(--warning)}
 .project-picker{position:absolute;left:0;top:76px;width:100%;max-height:430px;padding:10px;z-index:30;box-shadow:0 18px 45px rgba(0,0,0,.28)}.project-picker>input{width:100%;height:38px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);padding:0 10px}.project-picker-list{max-height:360px;margin-top:8px;overflow:auto}.project-picker-list section+section{margin-top:8px}.project-picker-list h3{margin:0;padding:7px 8px;color:var(--muted);font-size:10px}.project-picker-list button{width:100%;min-height:48px;padding:7px 8px;border:0;border-radius:7px;background:transparent;color:var(--text);display:grid;grid-template-columns:minmax(0,1fr) 34px;align-items:center;text-align:left}.project-picker-list button:hover{background:var(--primary-soft)}.project-picker-list button span{min-width:0;display:flex;flex-direction:column;gap:4px}.project-picker-list button b,.project-picker-list button small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-picker-list button small{color:var(--muted)}.project-picker-list button i{height:32px;display:grid;place-items:center;font-style:normal;font-size:18px;color:var(--muted)}.project-picker-list button i.active{color:#f2b94b}.project-picker-list>p{padding:22px;text-align:center;color:var(--muted)}
 .deployment-section{margin-top:20px}.deployment-section>header{margin-bottom:12px}.deployment-section>header p{margin:5px 0 0;color:var(--muted)}.deployment-section>header>b{padding:6px 10px;border-radius:99px;background:var(--primary-soft);color:var(--primary)}.deployment-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.deployment-card{padding:17px;border-color:color-mix(in srgb,var(--primary) 32%,var(--line))}.deployment-card.highlighted,.deployment-history article.highlighted{box-shadow:0 0 0 2px var(--primary)}.deployment-card>header,.deployment-card>footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.deployment-card h3{margin:5px 0 0}.deployment-card header small{color:var(--muted)}.deployment-card header>span{padding:5px 8px;border-radius:99px;background:var(--primary-soft);color:var(--primary);font-size:10px}.deployment-card header>span.reconnecting{background:color-mix(in srgb,var(--warning) 12%,transparent);color:var(--warning)}.deployment-card>p{margin:10px 0;color:var(--muted)}.deployment-progress{height:6px;margin-top:14px;border-radius:99px;background:var(--surface-2);overflow:hidden}.deployment-progress i{display:block;width:38%;height:100%;border-radius:inherit;background:linear-gradient(90deg,transparent,var(--primary),transparent);animation:deployment-loading 1.4s linear infinite}.stage-list{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0}.stage-list span{padding:6px 8px;border-radius:7px;background:var(--surface-2);display:flex;align-items:center;gap:5px}.stage-list span>i{width:6px;height:6px;border-radius:50%;background:var(--muted)}.stage-list span.success>i{background:var(--success)}.stage-list span.failed>i,.stage-list span.aborted>i{background:var(--danger)}.stage-list span.in_progress>i,.stage-list span.paused_pending_input>i{background:var(--primary)}.stage-list small{color:var(--muted);font-size:9px}.deployment-card>footer{padding-top:11px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.text-button{border:0;background:transparent;color:var(--primary);cursor:pointer}@keyframes deployment-loading{from{transform:translateX(-100%)}to{transform:translateX(280%)}}
 .deployment-history{overflow:hidden}.deployment-history>article{min-height:68px;padding:10px 14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:10px minmax(260px,1fr) minmax(160px,.6fr) 145px auto;gap:12px;align-items:center}.deployment-history>article:last-child{border-bottom:0}.result-dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}.deployment-history article.success .result-dot{background:var(--success)}.deployment-history article.failed .result-dot{background:var(--danger)}.deployment-history article.aborted .result-dot{background:var(--warning)}.history-main{min-width:0;display:flex;align-items:center;gap:12px}.history-main>span,.history-result,.history-time{min-width:0;display:flex;flex-direction:column;gap:4px}.history-main b,.history-main small,.history-result small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-main small,.history-result small,.history-time small{color:var(--muted);font-size:9px}.history-main code{padding:4px 7px;border-radius:5px;background:var(--surface-2);color:var(--primary);white-space:nowrap}.history-result b{color:var(--text)}.deployment-history article.success .history-result b{color:var(--success)}.deployment-history article.failed .history-result b{color:var(--danger)}
+.deployment-history-filters{display:flex;align-items:center;gap:7px}.deployment-history-filters select,.deployment-history-filters input{height:34px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--text);padding:0 9px}.deployment-history-filters input{width:190px}.deployment-history-filters select{min-width:105px}
 .jenkins-config-backdrop{z-index:220}.jenkins-config-dialog{width:560px;overflow:hidden}.jenkins-config-dialog>header{height:72px;padding:0 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.jenkins-config-dialog h2{margin:0}.jenkins-config-dialog header p{margin:5px 0 0;color:var(--muted)}.jenkins-config-dialog>div{padding:18px;display:grid;gap:14px}.jenkins-config-dialog label{display:grid;gap:7px;color:var(--muted)}.jenkins-config-dialog input{height:41px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);padding:0 11px}.jenkins-config-dialog label small{font-size:9px}.jenkins-config-dialog>footer{height:64px;padding:0 18px;border-top:1px solid var(--line);display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:center}
-@media(max-width:1050px){.deployment-fields{grid-template-columns:1fr}.deployment-grid{grid-template-columns:1fr}.deployment-history>article{grid-template-columns:10px minmax(0,1fr) auto}.history-result,.history-time{display:none}}
+@media(max-width:1050px){.deployment-fields{grid-template-columns:1fr}.deployment-grid{grid-template-columns:1fr}.history-section>header{align-items:flex-start;flex-direction:column}.deployment-history-filters{width:100%;flex-wrap:wrap}.deployment-history-filters label{flex:1}.deployment-history-filters input{width:100%}.deployment-history>article{grid-template-columns:10px minmax(0,1fr) auto}.history-result,.history-time{display:none}}
 </style>
