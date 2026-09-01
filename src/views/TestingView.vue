@@ -39,6 +39,9 @@ const parityStatusFilter = ref<"all" | "matched" | FeatureParity["parityStatus"]
 const parityDomainFilter = ref("全部领域");
 const paritySourceMessage = ref("");
 const loading = ref(false);
+const projectLoading = ref(false);
+const loadingProjectName = ref("");
+let projectLoadSequence = 0;
 const error = ref("");
 const message = ref("");
 const configuring = ref<TestMenu | null>(null);
@@ -238,23 +241,42 @@ async function refresh() {
   const paritySummary = await syncFeatureParity();
   paritySourceMessage.value = paritySummary.sourceMessage;
   await ensureWeeklyAudit();
-  [menus.value, runs.value, parities.value, toolchains.value, audits.value, recommendations.value] = await Promise.all([
-    selectedProjectPath.value ? listTestMenus(selectedProjectPath.value) : Promise.resolve([]),
+  const nextMenus = selectedProjectPath.value ? await listTestMenus(selectedProjectPath.value) : [];
+  [runs.value, parities.value, toolchains.value, audits.value, recommendations.value] = await Promise.all([
     selectedProjectPath.value ? listTestRuns(undefined, selectedProjectPath.value) : Promise.resolve([]),
     listFeatureParity(), listToolchains(), listWeeklyAudits(),
     selectedProjectPath.value ? recommendTestsFromGit(selectedProjectPath.value) : Promise.resolve([]),
   ]);
+  menus.value = nextMenus;
   if (!toolchains.value.installations.length) toolchains.value = await scanToolchains();
 }
 
 async function refreshSelectedProject() {
-  if (!isTauriRuntime() || !selectedProjectPath.value) return;
-  loading.value = true; error.value = "";
+  if (!isTauriRuntime() || !selectedProjectPath.value || projectLoading.value) return;
+  const projectPath = selectedProjectPath.value;
+  const sequence = ++projectLoadSequence;
+  loadingProjectName.value = projects.value.find(item => item.path === projectPath)?.name || "所选项目";
+  projectLoading.value = true; error.value = ""; message.value = "";
+  menus.value = []; runs.value = []; recommendations.value = [];
   try {
-    [menus.value, runs.value, recommendations.value] = await Promise.all([listTestMenus(selectedProjectPath.value), listTestRuns(undefined, selectedProjectPath.value), recommendTestsFromGit(selectedProjectPath.value)]);
+    // 先读取菜单，让后续 Git 推荐复用同一份菜单缓存，避免菜单接口不可达时重复等待。
+    const nextMenus = await listTestMenus(projectPath);
+    const [nextRuns, nextRecommendations] = await Promise.all([
+      listTestRuns(undefined, projectPath),
+      recommendTestsFromGit(projectPath),
+    ]);
+    if (sequence !== projectLoadSequence || selectedProjectPath.value !== projectPath) return;
+    menus.value = nextMenus;
+    runs.value = nextRuns;
+    recommendations.value = nextRecommendations;
     selectedRecommendations.value = [];
   } catch (cause) { error.value = String(cause); }
-  finally { loading.value = false; }
+  finally {
+    if (sequence === projectLoadSequence) {
+      projectLoading.value = false;
+      loadingProjectName.value = "";
+    }
+  }
 }
 async function runAudit() {
   if (!isTauriRuntime() || loading.value) return;
@@ -390,7 +412,14 @@ onMounted(async () => {
 
 <template>
   <div class="view testing-view">
-    <header class="page-header testing-page-header"><div><div class="testing-title-row"><h1>测试中心</h1><select v-model="selectedProjectPath" :disabled="loading" @change="refreshSelectedProject"><option v-if="!projects.length" value="">项目资产中暂无项目</option><option v-for="item in projects" :key="item.path" :value="item.path">{{ item.name }} · {{ item.projectKind }}</option></select></div><p>选择项目资产中的本地项目，分层记录静态、接口与浏览器测试证据</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">↻ 刷新项目、矩阵与报告</button></div></header>
+    <header class="page-header testing-page-header"><div><div class="testing-title-row"><h1>测试中心</h1><select v-model="selectedProjectPath" :disabled="loading || projectLoading" @change="refreshSelectedProject"><option v-if="!projects.length" value="">项目资产中暂无项目</option><option v-for="item in projects" :key="item.path" :value="item.path">{{ item.name }} · {{ item.projectKind }}</option></select></div><p>选择项目资产中的本地项目，分层记录静态、接口与浏览器测试证据</p></div><div><button class="button secondary" :disabled="loading || projectLoading" @click="refresh">↻ 刷新项目、矩阵与报告</button></div></header>
+    <div v-if="projectLoading" class="project-switch-loading" role="status" aria-live="polite">
+      <div class="project-switch-loading-card">
+        <i class="project-switch-spinner"></i>
+        <div><b>正在切换到 {{ loadingProjectName }}</b><p>正在读取系统菜单、测试报告和变更推荐，请稍候…</p></div>
+        <span class="project-switch-progress"><i></i></span>
+      </div>
+    </div>
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
     <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">功能 / 页面测试</button><button :class="{active:activeSection==='history'}" @click="activeSection='history'">测试历史</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button><button :class="{active:activeSection==='audit'}" @click="activeSection='audit'">系统周检与工具链</button></div>
     <section v-if="activeSection==='menus'" class="metric-grid testing-metrics testing-metrics-v2"><article class="clickable-card" @click="statusFilter='all'"><span>功能 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='blocked'"><span>环境 / 执行问题</span><b>{{ stats.blocked }}</b><p :class="stats.blocked ? 'warning-text' : ''">● 点击筛选</p></article></section>
@@ -464,6 +493,14 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.testing-view{position:relative;min-height:calc(100vh - 72px)}
+.project-switch-loading{position:absolute;inset:0;z-index:40;display:flex;justify-content:center;align-items:flex-start;padding:150px 24px 24px;background:color-mix(in srgb,var(--bg) 78%,transparent);backdrop-filter:blur(3px)}
+.project-switch-loading-card{display:grid;grid-template-columns:42px minmax(240px,430px);align-items:center;gap:13px 15px;width:min(520px,calc(100vw - 48px));padding:20px;border:1px solid color-mix(in srgb,var(--primary) 30%,var(--line));border-radius:14px;background:var(--surface);box-shadow:0 18px 48px rgba(0,0,0,.2)}
+.project-switch-loading-card>div{min-width:0}.project-switch-loading-card b{display:block;font-size:16px}.project-switch-loading-card p{margin:6px 0 0;color:var(--muted);font-size:12px}
+.project-switch-spinner{grid-row:1;width:34px;height:34px;border:3px solid color-mix(in srgb,var(--primary) 18%,transparent);border-top-color:var(--primary);border-radius:50%;animation:project-switch-spin .8s linear infinite}
+.project-switch-progress{grid-column:1/-1;height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}.project-switch-progress>i{display:block;width:42%;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--primary),#8f84ff);animation:project-switch-progress 1.25s ease-in-out infinite}
+@keyframes project-switch-spin{to{transform:rotate(360deg)}}
+@keyframes project-switch-progress{0%{transform:translateX(-110%)}100%{transform:translateX(345%)}}
 .testing-title-row{display:flex;align-items:center;gap:12px}.testing-title-row h1{margin:0}.testing-title-row select{max-width:430px;height:36px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text);padding:0 11px}.testing-metrics-v2{grid-template-columns:repeat(5,minmax(0,1fr))}.testing-toolbar-v2{grid-template-columns:minmax(320px,1fr) 170px 170px}.test-status.blocked,.test-status.cancelled{background:color-mix(in srgb,var(--warning) 13%,transparent);color:var(--warning)}.test-status.error{background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger)}
 .testing-tabs{display:flex;gap:6px;margin:0 0 16px;padding:5px;width:max-content;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 .testing-tabs button{padding:9px 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}.testing-tabs button.active{background:var(--primary);color:#fff}

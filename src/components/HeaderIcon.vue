@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineProps<{ name: "quota" | "notification" | "refresh" }>();
+defineProps<{ name: "quota" | "notification" | "translate" | "refresh" }>();
 </script>
 
 <template>
@@ -11,6 +11,10 @@ defineProps<{ name: "quota" | "notification" | "refresh" }>();
     <template v-else-if="name === 'notification'">
       <path d="M6.5 10.25a5.5 5.5 0 0 1 11 0c0 5.25 2.25 5.25 2.25 6.5H4.25c0-1.25 2.25-1.25 2.25-6.5Z" />
       <path d="M9.75 19a2.5 2.5 0 0 0 4.5 0" />
+    </template>
+    <template v-else-if="name === 'translate'">
+      <path d="M4 5.75h8.5M8.25 4v1.75M5.5 8.5c1.5 2.25 3.45 3.8 6 4.75M11.25 5.75c-.85 3.4-3.05 6-6.5 7.75" />
+      <path d="m13.25 19 3-7.5 3 7.5M14.4 16.25h3.7" />
     </template>
     <template v-else>
       <path d="M19 8.25V4.5l-2 2A7.5 7.5 0 1 0 19.2 15" />

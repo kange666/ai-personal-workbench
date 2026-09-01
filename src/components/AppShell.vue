@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { isRegistered as isShortcutRegistered, register as registerShortcut, unregister as unregisterShortcut } from "@tauri-apps/plugin-global-shortcut";
 import { useWorkbenchStore } from "../stores/workbench";
-import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestRuns, listVideoJobs, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, startRepositoryProject, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
+import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, startRepositoryProject, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
 import HeaderIcon from "./HeaderIcon.vue";
@@ -17,6 +17,7 @@ import TaskEditor from "./TaskEditor.vue";
 import WorkspaceSearch from "./WorkspaceSearch.vue";
 import NotificationDrawer from "./NotificationDrawer.vue";
 import QuickCapture from "./QuickCapture.vue";
+import TranslationDialog from "./TranslationDialog.vue";
 import { loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
 import { estimateTestRunProgress } from "../utils/testRunProgress";
 
@@ -25,6 +26,7 @@ const router = useRouter();
 const editorOpen = ref(false);
 const searchOpen = ref(false);
 const quickCaptureOpen = ref(false);
+const translationOpen = ref(false);
 const refreshing = ref(false);
 const quotaOpen = ref(false);
 const quotaLoading = ref(false);
@@ -263,8 +265,8 @@ function refreshNotificationsFromTapd() { void loadNotifications(false); }
 async function loadSystemHealth() {
   if (!isTauriRuntime() || healthLoading.value) return;
   healthLoading.value=true;
-  const [databaseResult,codexResult,tapdResult,repositoriesResult,emailResult,videosResult,quotaResult] = await Promise.allSettled([
-    databaseHealth(), getCodexCliStatus(), getTapdStatus(), listRepositoryAssets(), getEmailNotificationStatus(), listVideoJobs(), getCodexQuota(),
+  const [databaseResult,codexResult,tapdResult,repositoriesResult,emailResult,quotaResult] = await Promise.allSettled([
+    databaseHealth(), getCodexCliStatus(), getTapdStatus(), listRepositoryAssets(), getEmailNotificationStatus(), getCodexQuota(),
   ]);
   const items:Array<{ label:string; state:"ok"|"warning"|"idle"|"error"; detail:string }> = [];
   if (databaseResult.status === "fulfilled") items.push({ label:"本地数据库", state:"ok", detail:`结构版本 ${databaseResult.value.schemaVersion}` });
@@ -290,11 +292,6 @@ async function loadSystemHealth() {
     const value=emailResult.value;
     items.push({ label:"邮件提醒", state:value.state === "error" ? "error" : value.state === "ready" ? "ok" : "idle", detail:value.state === "ready" ? "已启用" : value.state === "error" ? (value.lastError || "发送异常") : "未启用" });
   } else items.push({ label:"邮件提醒", state:"warning", detail:"检查失败" });
-  if (videosResult.status === "fulfilled") {
-    const jobs=videosResult.value;
-    const failures=jobs.filter(item => item.status === "failed" || item.status === "needs-attention").length;
-    items.push({ label:"视频流水线", state:failures ? "warning" : "ok", detail:failures ? `${failures} 个任务需处理` : `${jobs.length} 个任务 · 无异常` });
-  } else items.push({ label:"视频流水线", state:"warning", detail:"检查失败" });
   healthItems.value=items;
   healthUpdatedAt.value=new Date().toISOString();
   healthLoading.value=false;
@@ -646,6 +643,7 @@ onBeforeUnmount(() => {
           <footer class="notification-popover-footer"><RouterLink to="/inbox" @click="notificationOpen=false">打开待处理收件箱</RouterLink><span>统一处理 Codex、TAPD、测试和项目风险</span></footer>
         </section>
       </div>
+      <button class="icon-button header-action-button" title="中英翻译" aria-label="打开中英翻译" @click="translationOpen=true"><HeaderIcon name="translate" /></button>
       <button class="top-capture-button" title="快速记录（Ctrl + Shift + Space）" @click="quickCaptureOpen=true">＋ 记录</button>
       <button class="top-email-toggle" :class="[emailStatus.state,{loading:emailLoading}]" :title="emailTooltip" :disabled="emailLoading" @click="toggleEmailNotification">✉ <span>邮件</span><b>{{ emailButtonText }}</b></button>
       <button class="icon-button header-action-button refresh-action" :class="{ loading:refreshing }" title="刷新本地任务和额度数据" :disabled="refreshing" @click="refreshLocalData"><HeaderIcon name="refresh" /></button><ThemeSwitch />
@@ -709,6 +707,7 @@ onBeforeUnmount(() => {
     <WorkspaceSearch :open="searchOpen" @close="searchOpen = false" />
     <NotificationDrawer :notification="selectedNotification" @close="selectedNotification=null" @reviewed="handleNotificationReviewed" />
     <QuickCapture :open="quickCaptureOpen" @close="quickCaptureOpen=false" />
+    <TranslationDialog :open="translationOpen" @close="translationOpen=false" />
     <button v-if="notificationToast" class="notification-toast panel" @click="openNotification(notificationToast)"><i></i><span><small>{{ notificationToast.kind==='tapd_item' ? 'TAPD 缺陷消息' : 'Codex 任务完成' }}</small><b>{{ notificationToast.title.replace(/^Codex 任务已完成：/, '') }}</b><p>{{ notificationToast.body }}</p></span><em>查看</em></button>
   </div>
 </template>

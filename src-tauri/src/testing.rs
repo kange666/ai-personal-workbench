@@ -4,13 +4,14 @@ use chrono::{DateTime, Local, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -974,7 +975,24 @@ fn case_values(root: &Path) -> Vec<(Value, PathBuf)> {
         .collect()
 }
 
-fn estimated_page_count(root: &Path, case_count: usize) -> usize {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RegisteredPage {
+    name: String,
+    route: String,
+    component: String,
+    source_path: String,
+}
+
+#[derive(Clone)]
+struct DynamicMenuCacheEntry {
+    checked_at: Instant,
+    pages: Vec<RegisteredPage>,
+}
+
+static DYNAMIC_MENU_CACHE: OnceLock<Mutex<HashMap<String, DynamicMenuCacheEntry>>> =
+    OnceLock::new();
+
+fn estimated_page_count(root: &Path, _case_count: usize) -> usize {
     if let Ok(source) = fs::read_to_string(root.join("pages.json")) {
         if let Ok(value) = serde_json::from_str::<Value>(&strip_json_comments(&source)) {
             let top = value
@@ -997,26 +1015,566 @@ fn estimated_page_count(root: &Path, case_count: usize) -> usize {
             return top + sub;
         }
     }
-    let views = root.join("src").join("views");
-    if views.is_dir() {
-        return WalkDir::new(views)
-            .max_depth(8)
-            .into_iter()
-            .flatten()
-            .filter(|entry| {
-                entry.file_type().is_file()
-                    && entry.path().extension().and_then(|value| value.to_str()) == Some("vue")
-            })
-            .take(600)
-            .count()
-            .max(case_count);
-    }
-    case_count
+    visible_local_router_pages(root).len()
 }
 
-fn route_from_component(component: &str) -> String {
-    let value = component.trim_matches('/').trim_end_matches("/index");
+fn normalized_component(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|ch| ch == '\'' || ch == '"' || ch == '`')
+        .replace('\\', "/")
+        .trim_start_matches("@/views/")
+        .trim_start_matches("src/views/")
+        .trim_start_matches('/')
+        .trim_end_matches(".vue")
+        .to_string()
+}
+
+fn source_path_for_component(root: &Path, component: &str) -> Option<(String, String)> {
+    let component = normalized_component(component);
+    if component.is_empty() {
+        return None;
+    }
+    let direct = root
+        .join("src")
+        .join("views")
+        .join(format!("{component}.vue"));
+    if direct.is_file() {
+        return Some((component.clone(), format!("src/views/{component}.vue")));
+    }
+    let index = root
+        .join("src")
+        .join("views")
+        .join(&component)
+        .join("index.vue");
+    index.is_file().then(|| {
+        (
+            format!("{component}/index"),
+            format!("src/views/{component}/index.vue"),
+        )
+    })
+}
+
+fn join_route_path(parent: &str, child: &str) -> String {
+    let child = child.trim();
+    if child.is_empty() {
+        return if parent.is_empty() {
+            "/".into()
+        } else {
+            parent.into()
+        };
+    }
+    if child.starts_with('/') {
+        return child.replace("//", "/");
+    }
+    let value = format!(
+        "{}/{}",
+        parent.trim_end_matches('/'),
+        child.trim_start_matches('/')
+    )
+    .trim_start_matches('/')
+    .to_string();
     format!("/{value}")
+}
+
+fn collect_pages_json(root: &Path) -> Vec<RegisteredPage> {
+    let Ok(source) = fs::read_to_string(root.join("pages.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&strip_json_comments(&source)) else {
+        return Vec::new();
+    };
+    let mut pages = Vec::new();
+    let mut collect = |prefix: &str, values: Option<&Vec<Value>>| {
+        for page in values.into_iter().flatten() {
+            let path = page
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim_start_matches('/');
+            if path.is_empty() {
+                continue;
+            }
+            let full = if prefix.is_empty() {
+                path.to_string()
+            } else {
+                format!("{}/{}", prefix.trim_end_matches('/'), path)
+            };
+            let name = page
+                .get("style")
+                .and_then(|item| item.get("navigationBarTitleText"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path))
+                .to_string();
+            pages.push(RegisteredPage {
+                name,
+                route: format!("/{full}"),
+                component: full.clone(),
+                source_path: format!("{full}.vue"),
+            });
+        }
+    };
+    collect("", value.get("pages").and_then(Value::as_array));
+    for package in value
+        .get("subPackages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        collect(
+            package
+                .get("root")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            package.get("pages").and_then(Value::as_array),
+        );
+    }
+    pages
+}
+
+fn strip_js_comments_preserving_offsets(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut output = bytes.to_vec();
+    let mut index = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == b'\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(ch, b'\'' | b'"' | b'`') {
+            quote = Some(ch);
+            index += 1;
+            continue;
+        }
+        if ch == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            output[index] = b' ';
+            output[index + 1] = b' ';
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                output[index] = b' ';
+                index += 1;
+            }
+            continue;
+        }
+        if ch == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            output[index] = b' ';
+            output[index + 1] = b' ';
+            index += 2;
+            while index < bytes.len() {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    output[index] = b' ';
+                    output[index + 1] = b' ';
+                    index += 2;
+                    break;
+                }
+                if bytes[index] != b'\n' {
+                    output[index] = b' ';
+                }
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    String::from_utf8(output).unwrap_or_else(|_| source.to_string())
+}
+
+fn js_object_ranges(source: &str) -> Vec<(usize, usize)> {
+    let mut stack = Vec::new();
+    let mut ranges = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in source.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+        } else if ch == '{' {
+            stack.push(index);
+        } else if ch == '}' {
+            if let Some(start) = stack.pop() {
+                ranges.push((start, index + ch.len_utf8()));
+            }
+        }
+    }
+    ranges
+}
+
+fn js_property_start(source: &str, property: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let property = property.as_bytes();
+    let mut offset = 0;
+    while offset + property.len() <= bytes.len() {
+        let relative = source[offset..].find(std::str::from_utf8(property).ok()?)?;
+        let start = offset + relative;
+        let before_ok = start == 0
+            || !((bytes[start - 1] as char).is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        let mut cursor = start + property.len();
+        let after_ok = cursor >= bytes.len()
+            || !((bytes[cursor] as char).is_ascii_alphanumeric() || bytes[cursor] == b'_');
+        while cursor < bytes.len() && (bytes[cursor] as char).is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if before_ok && after_ok && bytes.get(cursor) == Some(&b':') {
+            return Some(cursor + 1);
+        }
+        offset = start + property.len();
+    }
+    None
+}
+
+fn js_quoted_property(source: &str, property: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut cursor = js_property_start(source, property)?;
+    while cursor < bytes.len() && (bytes[cursor] as char).is_ascii_whitespace() {
+        cursor += 1;
+    }
+    let quote = *bytes.get(cursor)?;
+    if !matches!(quote, b'\'' | b'"' | b'`') {
+        return None;
+    }
+    cursor += 1;
+    let start = cursor;
+    let mut escaped = false;
+    while cursor < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[cursor] == b'\\' {
+            escaped = true;
+        } else if bytes[cursor] == quote {
+            return Some(source[start..cursor].to_string());
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn first_quoted_value(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let (mut cursor, quote) = bytes
+        .iter()
+        .enumerate()
+        .find(|(_, value)| matches!(**value, b'\'' | b'"' | b'`'))?;
+    cursor += 1;
+    let start = cursor;
+    let mut escaped = false;
+    while cursor < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[cursor] == b'\\' {
+            escaped = true;
+        } else if bytes[cursor] == *quote {
+            return Some(source[start..cursor].to_string());
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn object_direct_prefix(object: &str) -> &str {
+    object
+        .find("children")
+        .map(|index| &object[..index])
+        .unwrap_or(object)
+}
+
+fn object_is_hidden(object: &str) -> bool {
+    let Some(mut cursor) = js_property_start(object_direct_prefix(object), "hidden") else {
+        return false;
+    };
+    let bytes = object.as_bytes();
+    while cursor < bytes.len() && (bytes[cursor] as char).is_ascii_whitespace() {
+        cursor += 1;
+    }
+    object[cursor..].starts_with("true")
+}
+
+fn visible_local_router_pages(root: &Path) -> Vec<RegisteredPage> {
+    let router_root = root.join("src").join("router");
+    if !router_root.is_dir() {
+        return Vec::new();
+    }
+    let mut pages = Vec::new();
+    for entry in WalkDir::new(router_root)
+        .max_depth(5)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && matches!(
+                    entry.path().extension().and_then(|value| value.to_str()),
+                    Some("js" | "ts")
+                )
+        })
+    {
+        let Ok(source) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let source = strip_js_comments_preserving_offsets(&source);
+        let ranges = js_object_ranges(&source);
+        let mut search_from = 0;
+        while let Some(relative) = source[search_from..].find("component") {
+            let component_position = search_from + relative;
+            search_from = component_position + "component".len();
+            let Some(component_expression) = source[component_position..].find("import(") else {
+                continue;
+            };
+            if component_expression > 160
+                || source[component_position..component_position + component_expression]
+                    .contains(',')
+            {
+                continue;
+            }
+            let import_source =
+                &source[component_position + component_expression + "import".len()..];
+            let Some(component) = first_quoted_value(import_source) else {
+                continue;
+            };
+            let Some((leaf_start, leaf_end)) = ranges
+                .iter()
+                .filter(|(start, end)| *start < component_position && *end > component_position)
+                .max_by_key(|(start, _)| *start)
+                .copied()
+            else {
+                continue;
+            };
+            let leaf = &source[leaf_start..leaf_end];
+            let Some(name) =
+                js_quoted_property(leaf, "title").filter(|value| !value.trim().is_empty())
+            else {
+                continue;
+            };
+            let Some((component, source_path)) = source_path_for_component(root, &component) else {
+                continue;
+            };
+            let mut ancestors = ranges
+                .iter()
+                .filter(|(start, end)| *start <= leaf_start && *end >= leaf_end)
+                .copied()
+                .collect::<Vec<_>>();
+            ancestors.sort_by_key(|(start, _)| *start);
+            if ancestors
+                .iter()
+                .any(|(start, end)| object_is_hidden(&source[*start..*end]))
+            {
+                continue;
+            }
+            let mut route = String::new();
+            for (start, end) in ancestors {
+                if start == leaf_start && end == leaf_end {
+                    continue;
+                }
+                let object = &source[start..end];
+                if let Some(path) = js_quoted_property(object_direct_prefix(object), "path") {
+                    route = join_route_path(&route, &path);
+                }
+            }
+            if let Some(path) = js_quoted_property(object_direct_prefix(leaf), "path") {
+                route = join_route_path(&route, &path);
+            }
+            if route.is_empty() || route.contains(":pathMatch") {
+                continue;
+            }
+            pages.push(RegisteredPage {
+                name,
+                route,
+                component,
+                source_path,
+            });
+        }
+    }
+    pages.sort_by(|left, right| left.route.cmp(&right.route));
+    pages.dedup_by(|left, right| left.route == right.route || left.component == right.component);
+    pages
+}
+
+fn collect_dynamic_route_pages(
+    root: &Path,
+    routes: &[Value],
+    parent_route: &str,
+    parent_hidden: bool,
+    pages: &mut Vec<RegisteredPage>,
+) {
+    for route in routes {
+        let hidden = parent_hidden
+            || route
+                .get("hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        let full_route = join_route_path(
+            parent_route,
+            route
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        let component = route
+            .get("component")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name = route
+            .get("meta")
+            .and_then(|meta| meta.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if !hidden && !name.is_empty() {
+            if let Some((component, source_path)) = source_path_for_component(root, component) {
+                pages.push(RegisteredPage {
+                    name: name.to_string(),
+                    route: full_route.clone(),
+                    component,
+                    source_path,
+                });
+            }
+        }
+        if let Some(children) = route.get("children").and_then(Value::as_array) {
+            collect_dynamic_route_pages(root, children, &full_route, hidden, pages);
+        }
+    }
+}
+
+fn dynamic_pages_from_response(root: &Path, response: &Value) -> Vec<RegisteredPage> {
+    let code_ok = response
+        .get("code")
+        .map(|code| code.as_i64() == Some(200) || code.as_str() == Some("200"))
+        .unwrap_or(true);
+    if !code_ok {
+        return Vec::new();
+    }
+    let Some(routes) = response.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut pages = Vec::new();
+    collect_dynamic_route_pages(root, routes, "", false, &mut pages);
+    pages.sort_by(|left, right| left.route.cmp(&right.route));
+    pages.dedup_by(|left, right| left.route == right.route || left.component == right.component);
+    pages
+}
+
+fn menu_api_candidates(root: &Path) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(base_url) = std::env::var("E2E_BASE_URL") {
+        if !base_url.trim().is_empty() {
+            candidates.push(format!(
+                "{}/dev-api/menu/getRouters",
+                base_url.trim_end_matches('/')
+            ));
+        }
+    }
+    for config_name in [
+        "playwright.config.js",
+        "playwright.config.cjs",
+        "playwright.config.ts",
+    ] {
+        if let Ok(source) = fs::read_to_string(root.join(config_name)) {
+            let source = strip_js_comments_preserving_offsets(&source);
+            if let Some(base_url) = js_quoted_property(&source, "baseURL") {
+                candidates.push(format!(
+                    "{}/dev-api/menu/getRouters",
+                    base_url.trim_end_matches('/')
+                ));
+            }
+        }
+    }
+    for config_name in ["vite.config.js", "vite.config.ts", "vite.config.mjs"] {
+        let Ok(source) = fs::read_to_string(root.join(config_name)) else {
+            continue;
+        };
+        let source = strip_js_comments_preserving_offsets(&source);
+        let dev_api_start = source
+            .find("\"/dev-api\"")
+            .or_else(|| source.find("'/dev-api'"));
+        let Some(dev_api_start) = dev_api_start else {
+            continue;
+        };
+        let block = &source[dev_api_start..source.len().min(dev_api_start + 1200)];
+        if let Some(target) = js_quoted_property(block, "target") {
+            candidates.push(format!(
+                "{}/api/menu/getRouters",
+                target.trim_end_matches('/')
+            ));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn fetch_dynamic_menu_pages(root: &Path) -> Vec<RegisteredPage> {
+    let key = display_path(root).to_lowercase();
+    let cache = DYNAMIC_MENU_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock() {
+        if let Some(entry) = cache.get(&key) {
+            if entry.checked_at.elapsed() < Duration::from_secs(30) {
+                return entry.pages.clone();
+            }
+        }
+    }
+    let token = std::env::var("HLZT_TOKEN").unwrap_or_default();
+    let mut pages = Vec::new();
+    if !token.trim().is_empty() {
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(800))
+            .timeout(Duration::from_secs(3))
+            .build()
+        {
+            for url in menu_api_candidates(root) {
+                let Ok(response) = client.get(url).header("hlzt-token", &token).send() else {
+                    continue;
+                };
+                let Ok(value) = response.json::<Value>() else {
+                    continue;
+                };
+                pages = dynamic_pages_from_response(root, &value);
+                if !pages.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+    if let Ok(mut cache) = cache.lock() {
+        if pages.is_empty() {
+            if let Some(previous) = cache.get(&key).filter(|entry| !entry.pages.is_empty()) {
+                return previous.pages.clone();
+            }
+        }
+        cache.insert(
+            key,
+            DynamicMenuCacheEntry {
+                checked_at: Instant::now(),
+                pages: pages.clone(),
+            },
+        );
+    }
+    pages
+}
+
+fn registered_vue_pages(root: &Path) -> Vec<RegisteredPage> {
+    let mut pages = fetch_dynamic_menu_pages(root);
+    pages.extend(visible_local_router_pages(root));
+    pages.sort_by(|left, right| left.route.cmp(&right.route));
+    pages.dedup_by(|left, right| left.route == right.route || left.component == right.component);
+    pages
 }
 
 fn same_canonical_path(left: &Path, right: &Path) -> bool {
@@ -1078,37 +1636,47 @@ fn project_menus(
     let kind = project_kind(root);
     let cases = case_values(root);
     let mut menus = Vec::new();
-    let mut case_components = HashSet::new();
-    for (value, path) in &cases {
-        let case_id = value.get("id").and_then(Value::as_str).unwrap_or_default();
-        if case_id.is_empty() {
-            continue;
-        }
-        let component = value
-            .get("component")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .replace('\\', "/");
-        case_components.insert(component.to_lowercase());
-        let source_path = if root
-            .join("src")
-            .join("views")
-            .join(format!("{component}.vue"))
-            .is_file()
-        {
-            format!("src/views/{component}.vue")
-        } else {
-            format!("{component}.vue")
-        };
-        let stable_menu_id = value
-            .get("workbenchMenuId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
+    let pages = if root.join("pages.json").is_file() {
+        collect_pages_json(root)
+    } else {
+        registered_vue_pages(root)
+    };
+    for page in pages {
+        let case = cases.iter().find(|(value, _)| {
+            let case_component = value
+                .get("component")
+                .and_then(Value::as_str)
+                .map(normalized_component)
+                .unwrap_or_default();
+            let case_route = value
+                .get("route")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim_end_matches('/');
+            (!case_component.is_empty() && case_component.eq_ignore_ascii_case(&page.component))
+                || (!case_route.is_empty() && case_route == page.route.trim_end_matches('/'))
+        });
+        let id = case
+            .and_then(|(value, _)| {
+                value
+                    .get("workbenchMenuId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        value.get("id").and_then(Value::as_str).map(|case_id| {
+                            if same_canonical_path(root, &client_root()) {
+                                format!("client:{case_id}")
+                            } else {
+                                format!("project:{case_id}")
+                            }
+                        })
+                    })
+            })
             .unwrap_or_else(|| {
-                if same_canonical_path(root, &client_root()) {
-                    format!("client:{case_id}")
+                if same_canonical_path(root, &app_root()) {
+                    format!("app:{}", page.component)
                 } else {
-                    format!("project:{case_id}")
+                    format!("page:{}", page.component.replace('/', ":"))
                 }
             });
         menus.push(catalog_menu(
@@ -1116,139 +1684,12 @@ fn project_menus(
             root,
             project_name,
             &kind,
-            stable_menu_id,
-            value
-                .get("menuName")
-                .and_then(Value::as_str)
-                .unwrap_or(case_id)
-                .to_string(),
-            value
-                .get("route")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            source_path,
-            Some((value, path.as_path())),
+            id,
+            page.name,
+            page.route,
+            page.source_path,
+            case.map(|(value, path)| (value, path.as_path())),
         )?);
-    }
-
-    if let Ok(source) = fs::read_to_string(root.join("pages.json")) {
-        if let Ok(value) = serde_json::from_str::<Value>(&strip_json_comments(&source)) {
-            let mut pages = Vec::new();
-            let mut collect = |prefix: &str, values: Option<&Vec<Value>>| {
-                for page in values.into_iter().flatten() {
-                    let path = page
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .trim_start_matches('/');
-                    if path.is_empty() {
-                        continue;
-                    }
-                    let full = if prefix.is_empty() {
-                        path.to_string()
-                    } else {
-                        format!("{}/{}", prefix.trim_end_matches('/'), path)
-                    };
-                    let name = page
-                        .get("style")
-                        .and_then(|item| item.get("navigationBarTitleText"))
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path))
-                        .to_string();
-                    pages.push((full, name));
-                }
-            };
-            collect("", value.get("pages").and_then(Value::as_array));
-            for package in value
-                .get("subPackages")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                collect(
-                    package
-                        .get("root")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    package.get("pages").and_then(Value::as_array),
-                );
-            }
-            for (path, name) in pages {
-                if menus
-                    .iter()
-                    .any(|menu| menu.route.trim_start_matches('/') == path)
-                {
-                    continue;
-                }
-                let component = path.trim_end_matches(".vue");
-                let id = if same_canonical_path(root, &app_root()) {
-                    format!("app:{component}")
-                } else {
-                    format!("page:{component}")
-                };
-                menus.push(catalog_menu(
-                    state,
-                    root,
-                    project_name,
-                    &kind,
-                    id,
-                    name,
-                    format!("/{component}"),
-                    format!("{component}.vue"),
-                    None,
-                )?);
-            }
-        }
-    } else {
-        let views = root.join("src").join("views");
-        if views.is_dir() {
-            for entry in WalkDir::new(&views)
-                .max_depth(8)
-                .into_iter()
-                .flatten()
-                .filter(|entry| {
-                    entry.file_type().is_file()
-                        && entry.path().extension().and_then(|value| value.to_str()) == Some("vue")
-                })
-                .take(600)
-            {
-                let relative = entry
-                    .path()
-                    .strip_prefix(&views)
-                    .unwrap_or(entry.path())
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let component = relative.trim_end_matches(".vue").to_string();
-                if component.to_lowercase().contains("/components/")
-                    || case_components.contains(&component.to_lowercase())
-                {
-                    continue;
-                }
-                let name = if component.ends_with("/index") {
-                    component
-                        .trim_end_matches("/index")
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&component)
-                } else {
-                    component.rsplit('/').next().unwrap_or(&component)
-                }
-                .to_string();
-                menus.push(catalog_menu(
-                    state,
-                    root,
-                    project_name,
-                    &kind,
-                    format!("page:{}", component.replace('/', ":")),
-                    name,
-                    route_from_component(&component),
-                    format!("src/views/{relative}"),
-                    None,
-                )?);
-            }
-        }
     }
     menus.sort_by(|a, b| a.name.cmp(&b.name).then(a.route.cmp(&b.route)));
     menus.dedup_by(|a, b| a.id == b.id || (!a.route.is_empty() && a.route == b.route));
@@ -3946,11 +4387,12 @@ mod tests {
     use super::{
         app_menus, app_static_report, append_remediation, canonical_exported_pdf, client_menus,
         client_report_status, complete_pdf_size, create_case_file, display_path,
-        existing_exported_pdf, filter_test_titles, legacy_report_scenarios, pdf_html,
-        persist_screenshot_artifacts, recover_incomplete_test_runs, run_by_id, save_run,
-        scenario_titles_for_menu_and_suite, source_business_scenarios, static_scenarios,
-        strip_json_comments, write_exported_markdown, TestArtifact, TestCapabilities, TestMenu,
-        TestProcessState, TestRun, TestScenarioResult, COMMON_REAL_SUITE_ID,
+        dynamic_pages_from_response, existing_exported_pdf, filter_test_titles,
+        legacy_report_scenarios, pdf_html, persist_screenshot_artifacts, project_menus,
+        recover_incomplete_test_runs, run_by_id, save_run, scenario_titles_for_menu_and_suite,
+        source_business_scenarios, static_scenarios, strip_json_comments,
+        visible_local_router_pages, write_exported_markdown, TestArtifact, TestCapabilities,
+        TestMenu, TestProcessState, TestRun, TestScenarioResult, COMMON_REAL_SUITE_ID,
     };
     use crate::database::DatabaseState;
     use std::path::Path;
@@ -4006,6 +4448,126 @@ mod tests {
         let value = strip_json_comments("{\"url\":\"http://localhost\",// note\n\"ok\":true}");
         assert!(value.contains("http://localhost"));
         assert!(!value.contains("note"));
+    }
+
+    #[test]
+    fn vue_catalog_only_uses_visible_router_pages_with_menu_titles() {
+        let root = std::env::temp_dir().join(format!("workbench-routes-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src/router")).unwrap();
+        for component in ["system/post/index", "system/secret/index", "orphan/index"] {
+            let path = root.join("src/views").join(format!("{component}.vue"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "<template><div /></template>").unwrap();
+        }
+        std::fs::write(
+            root.join("src/router/index.js"),
+            r#"export const routes = [{
+  path: '/system',
+  component: Layout,
+  children: [{
+    path: 'post',
+    component: () => import('@/views/system/post/index'),
+    meta: { title: '岗位管理' }
+  }, {
+    path: 'secret',
+    hidden: true,
+    component: () => import('@/views/system/secret/index'),
+    meta: { title: '隐藏详情' }
+  }]
+}]"#,
+        )
+        .unwrap();
+
+        let pages = visible_local_router_pages(&root);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].name, "岗位管理");
+        assert_eq!(pages[0].route, "/system/post");
+        assert_eq!(pages[0].source_path, "src/views/system/post/index.vue");
+        assert!(pages.iter().all(|page| !page.component.contains("orphan")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dynamic_menu_catalog_excludes_hidden_and_unregistered_source_pages() {
+        let root = std::env::temp_dir().join(format!("workbench-menu-api-{}", Uuid::new_v4()));
+        for component in [
+            "system/post/index",
+            "system/dict/index",
+            "safe/safetyManagement/caseShare/index",
+        ] {
+            let source = root.join("src/views").join(format!("{component}.vue"));
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(source, "<template><div /></template>").unwrap();
+        }
+        let response = serde_json::json!({
+            "code": 200,
+            "data": [
+                {
+                    "path": "/system",
+                    "component": "Layout",
+                    "meta": { "title": "系统管理" },
+                    "children": [
+                        { "path": "post", "component": "system/post/index", "meta": { "title": "岗位管理" } },
+                        { "path": "dict", "component": "system/dict/index", "meta": { "title": "字典管理" } },
+                        { "path": "secret", "component": "system/secret/index", "hidden": true, "meta": { "title": "隐藏详情" } },
+                        { "path": "missing", "component": "system/missing/index", "meta": { "title": "缺失页面" } }
+                    ]
+                },
+                {
+                    "path": "/safetyManagement",
+                    "component": "Layout",
+                    "children": [
+                        { "path": "caseShare", "component": "safe/safetyManagement/caseShare/index", "meta": { "title": "案例分享" } }
+                    ]
+                }
+            ]
+        });
+
+        let pages = dynamic_pages_from_response(&root, &response);
+        assert_eq!(pages.len(), 3);
+        assert!(pages
+            .iter()
+            .any(|page| page.name == "岗位管理" && page.route == "/system/post"));
+        assert!(pages
+            .iter()
+            .any(|page| page.name == "字典管理" && page.route == "/system/dict"));
+        assert!(pages.iter().any(|page| {
+            page.name == "案例分享" && page.route == "/safetyManagement/caseShare"
+        }));
+        assert!(pages
+            .iter()
+            .all(|page| page.name != "隐藏详情" && page.name != "缺失页面"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn case_files_only_attach_to_registered_pages() {
+        let root = std::env::temp_dir().join(format!("workbench-page-cases-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("e2e/menu-cases")).unwrap();
+        std::fs::write(
+            root.join("pages.json"),
+            r#"{"pages":[{"path":"pages/post/index","style":{"navigationBarTitleText":"岗位管理"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("e2e/menu-cases/post.json"),
+            r#"{"id":"post","menuName":"岗位管理","route":"/pages/post/index","component":"pages/post/index"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("e2e/menu-cases/orphan.json"),
+            r#"{"id":"orphan","menuName":"孤立页面","route":"/pages/orphan/index","component":"pages/orphan/index"}"#,
+        )
+        .unwrap();
+        let database_path = root.join("testing.sqlite3");
+        let state = DatabaseState::new(database_path).unwrap();
+
+        let menus = project_menus(&state, &root, "fixture").unwrap();
+        assert_eq!(menus.len(), 1);
+        assert_eq!(menus[0].name, "岗位管理");
+        assert!(menus[0].has_case_file);
+        assert_eq!(menus[0].case_id.as_deref(), Some("post"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4124,8 +4686,19 @@ mod tests {
         let state = DatabaseState::new(path.clone()).unwrap();
         let client = client_menus(&state).unwrap();
         let app = app_menus(&state).unwrap();
+        let visible_client_routes = visible_local_router_pages(&super::client_root());
         assert!(!client.is_empty());
         assert!(!app.is_empty());
+        assert!(visible_client_routes
+            .iter()
+            .any(|page| page.name == "工作台"));
+        assert!(visible_client_routes
+            .iter()
+            .any(|page| page.name == "我的任务"));
+        assert!(visible_client_routes
+            .iter()
+            .all(|page| page.name != "ConfigExam" && !page.source_path.contains("ConfigExam")));
+        assert!(visible_client_routes.len() < 20);
         let post = client
             .iter()
             .find(|menu| menu.case_id.as_deref() == Some("post"))
