@@ -10,6 +10,7 @@ const router = useRouter();
 const reviewNote = ref("");
 const loading = ref(false);
 const isTapdItem = computed(() => props.notification?.kind === "tapd_item");
+const isJenkinsPublish = computed(() => props.notification?.kind === "jenkins_publish");
 const detailSubtitle = computed(() => isTapdItem.value ? "TAPD 工作项变更详情" : "Codex 对话任务完成详情");
 const sourceLabel = computed(() => isTapdItem.value ? "TAPD · 安全生产管理" : "Codex 对话");
 const detailTitle = computed(() => compactDetailTitle(props.notification?.title || "消息详情"));
@@ -45,13 +46,13 @@ async function review(decision:"accepted"|"follow_up") {
         <button class="icon-button" title="关闭" @click="emit('close')">×</button>
       </header>
       <section class="notification-detail-status">
-        <span class="notification-read-state">{{ isTapdItem ? "TAPD 更新" : "✓ 已完成" }}</span>
+        <span class="notification-read-state">{{ isTapdItem ? "TAPD 更新" : isJenkinsPublish ? "Jenkins 发布" : "✓ 已完成" }}</span>
         <span>{{ notification.isRead ? "已读" : "未读" }}</span>
       </section>
       <dl>
         <div><dt>{{ isTapdItem ? "变更时间" : "完成时间" }}</dt><dd>{{ completedAt }}</dd></div>
         <div><dt>来源</dt><dd>{{ sourceLabel }}</dd></div>
-        <div><dt>{{ isTapdItem ? "工作项 ID" : "会话 ID" }}</dt><dd class="notification-source-id">{{ notification.sourceId || "未关联" }}</dd></div>
+        <div><dt>{{ isTapdItem ? "工作项 ID" : isJenkinsPublish ? "发布记录 ID" : "会话 ID" }}</dt><dd class="notification-source-id">{{ notification.sourceId || "未关联" }}</dd></div>
       </dl>
       <section class="notification-detail-section">
         <h3>{{ isTapdItem ? "变更摘要" : "完成摘要" }}</h3>
@@ -61,7 +62,7 @@ async function review(decision:"accepted"|"follow_up") {
         <h3>{{ isTapdItem ? "工作项详情" : "Codex 输出" }}</h3>
         <pre>{{ notification.output || notification.body || (isTapdItem ? "TAPD 未返回工作项详情。" : "Codex 未返回文本输出。") }}</pre>
       </section>
-      <section v-if="!isTapdItem" class="notification-detail-section notification-review-section">
+      <section v-if="!isTapdItem && !isJenkinsPublish" class="notification-detail-section notification-review-section">
         <h3>结果处理</h3>
         <p>这里只记录你是否认可结果，不会自动创建每日任务，也不会自动提交代码。</p>
         <textarea v-model="reviewNote" rows="3" placeholder="可选：记录需要继续处理的地方"></textarea>

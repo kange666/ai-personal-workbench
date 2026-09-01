@@ -9,6 +9,7 @@ mod database;
 mod email;
 mod git;
 mod inbox;
+mod jenkins;
 mod knowledge;
 mod maintenance;
 mod notifications;
@@ -299,6 +300,8 @@ pub fn run() {
             testing::recover_incomplete_test_runs(&state).map_err(std::io::Error::other)?;
             app.manage(state.clone());
             app.manage(apifox::start_api_export_server(state.clone()));
+            jenkins::resume_active_publishes(app.handle().clone(), &state)
+                .map_err(std::io::Error::other)?;
             email::initialize_for_state(&state).map_err(std::io::Error::other)?;
             email::sync_tray_menu(app.handle(), &state);
             let history_state = state.clone();
@@ -498,6 +501,16 @@ pub fn run() {
             inbox::list_inbox_items,
             inbox::update_inbox_status,
             inbox::create_task_from_inbox,
+            jenkins::jenkins_connection_status,
+            jenkins::test_jenkins_connection,
+            jenkins::save_jenkins_connection,
+            jenkins::list_jenkins_jobs,
+            jenkins::list_jenkins_job_branches,
+            jenkins::set_jenkins_job_favorite,
+            jenkins::trigger_jenkins_publish,
+            jenkins::list_jenkins_publish_records,
+            jenkins::get_jenkins_publish_status,
+            jenkins::open_jenkins_url,
             email::email_notification_status,
             email::save_qq_email_config,
             email::delete_qq_email_config,

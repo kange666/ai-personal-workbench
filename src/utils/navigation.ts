@@ -9,6 +9,7 @@ export const workbenchNavigationItems: WorkbenchNavigationItem[] = [
   { path:"/", icon:"home", label:"工作台" },
   { path:"/work-records", icon:"records", label:"工作记录" },
   { path:"/projects", icon:"projects", label:"项目资产" },
+  { path:"/deployments", icon:"deployments", label:"发布中心" },
   { path:"/api-docs", icon:"api", label:"接口文档" },
   { path:"/calendar", icon:"calendar", label:"工作日历" },
   { path:"/reports", icon:"reports", label:"报告中心" },

@@ -12,6 +12,7 @@ import TestingView from "../views/TestingView.vue";
 import WorkRecordsView from "../views/WorkRecordsView.vue";
 import VideoCenterView from "../views/VideoCenterView.vue";
 import ProjectsView from "../views/ProjectsView.vue";
+import DeploymentsView from "../views/DeploymentsView.vue";
 import InboxView from "../views/InboxView.vue";
 import ProjectMappingView from "../views/ProjectMappingView.vue";
 import ApiDocsView from "../views/ApiDocsView.vue";
@@ -23,6 +24,7 @@ const router = createRouter({
     { path: "/", name: "dashboard", component: DashboardView, meta: { title: "工作台" } },
     { path: "/work-records", name: "work-records", component: WorkRecordsView, meta: { title: "工作记录" } },
     { path: "/projects", name: "projects", component: ProjectsView, meta: { title: "项目资产" } },
+    { path: "/deployments", name: "deployments", component: DeploymentsView, meta: { title: "发布中心" } },
     { path: "/project-mapping", name: "project-mapping", component: ProjectMappingView, meta: { title: "项目身份映射" } },
     { path: "/api-docs", name: "api-docs", component: ApiDocsView, meta: { title: "接口文档中心" } },
     { path: "/inbox", name: "inbox", component: InboxView, meta: { title: "待处理收件箱" } },

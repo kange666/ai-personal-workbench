@@ -88,7 +88,7 @@ const quotaFreshnessText = computed(() => ({ fresh:"刚刚更新", recent:"近�
 const healthIssueCount = computed(() => healthItems.value.filter(item => item.state === "warning" || item.state === "error").length);
 const healthSummary = computed(() => healthLoading.value ? "检查中" : healthIssueCount.value ? `${healthIssueCount.value} 项需关注` : "本地运行");
 const unreadCount = computed(() => notifications.value.filter(item => !item.isRead).length);
-const pendingReviewCount = computed(() => notifications.value.filter(item => item.kind !== "tapd_item" && item.reviewStatus === "pending").length);
+const pendingReviewCount = computed(() => notifications.value.filter(item => !["tapd_item","jenkins_publish"].includes(item.kind) && item.reviewStatus === "pending").length);
 const activeOperations = computed(() => [
   ...activeTestRuns.value.map(run => {
     const progress=estimateTestRunProgress(run,allTestRuns.value,railNow.value);
@@ -130,7 +130,7 @@ const railIssues = computed(() => {
 });
 const recentActivities = computed(() => {
   const activities:Array<{ id:string; title:string; detail:string; at:string; to:string | { path:string; query:Record<string,string> }; tone:"success"|"warning"|"primary" }> = [];
-  for (const item of notifications.value.slice(0,8)) activities.push({ id:`notice:${item.id}`, title:item.title.replace(/^Codex 任务已完成：/,""), detail:item.kind === "tapd_item" ? "TAPD 消息" : "Codex 完成", at:item.createdAt, to:item.route || "/inbox", tone:"success" });
+  for (const item of notifications.value.slice(0,8)) activities.push({ id:`notice:${item.id}`, title:item.title.replace(/^Codex 任务已完成：/,""), detail:item.kind === "tapd_item" ? "TAPD 消息" : item.kind === "jenkins_publish" ? "Jenkins 发布" : "Codex 完成", at:item.createdAt, to:item.route || "/inbox", tone:item.kind === "jenkins_publish" && item.title.includes("失败") ? "warning" : "success" });
   for (const run of [...allTestRuns.value].filter(item => !["queued","running"].includes(item.status)).sort((left,right) => (right.finishedAt || right.startedAt).localeCompare(left.finishedAt || left.startedAt)).slice(0,6)) activities.push({ id:`test:${run.id}`, title:run.menuName, detail:`测试${run.status === "passed" ? "通过" : "结束"}`, at:run.finishedAt || run.startedAt, to:`/testing?run=${run.id}`, tone:run.status === "passed" ? "success" : "warning" });
   for (const job of [...allTapdJobs.value].filter(item => ["completed","failed"].includes(item.status)).sort((left,right) => (right.completedAt || right.updatedAt).localeCompare(left.completedAt || left.updatedAt)).slice(0,6)) activities.push({ id:`tapd:${job.id}`, title:`TAPD 缺陷 ${job.itemKey}`, detail:job.status === "completed" ? "处理完成" : "处理失败", at:job.completedAt || job.updatedAt, to:"/tapd-automation", tone:job.status === "completed" ? "success" : "warning" });
   for (const project of runningProjects.value) activities.push({ id:`project:${project.projectPath}`, title:project.projectName, detail:"项目已启动", at:project.startedAt, to:{ path:"/projects", query:{ project:project.projectPath } }, tone:"primary" });
@@ -328,14 +328,15 @@ async function loadNotifications(sync = true) {
     if (sync) await syncCodexNotifications();
     const knownIds = new Set(notifications.value.map(item => item.id));
     const latest = await listNotifications();
-    const newestUnread = latest.find(item => !item.isRead && !knownIds.has(item.id));
+    const newUnread = latest.filter(item => !item.isRead && !knownIds.has(item.id));
+    const newestUnread = newUnread[0];
     notifications.value=latest;
     window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:latest.slice(0,5) }));
+    for (const item of newUnread) void sendSystemCompletionNotification(item);
     if (newestUnread) {
       notificationToast.value=newestUnread;
       window.clearTimeout(notificationToastTimer);
       notificationToastTimer=window.setTimeout(() => notificationToast.value=null, 8000);
-      void sendSystemCompletionNotification(newestUnread);
     }
   }
   catch (error) { console.error("读取工作台消息失败", error); }
@@ -708,6 +709,6 @@ onBeforeUnmount(() => {
     <NotificationDrawer :notification="selectedNotification" @close="selectedNotification=null" @reviewed="handleNotificationReviewed" />
     <QuickCapture :open="quickCaptureOpen" @close="quickCaptureOpen=false" />
     <TranslationDialog :open="translationOpen" @close="translationOpen=false" />
-    <button v-if="notificationToast" class="notification-toast panel" @click="openNotification(notificationToast)"><i></i><span><small>{{ notificationToast.kind==='tapd_item' ? 'TAPD 缺陷消息' : 'Codex 任务完成' }}</small><b>{{ notificationToast.title.replace(/^Codex 任务已完成：/, '') }}</b><p>{{ notificationToast.body }}</p></span><em>查看</em></button>
+    <button v-if="notificationToast" class="notification-toast panel" @click="openNotification(notificationToast)"><i></i><span><small>{{ notificationToast.kind==='tapd_item' ? 'TAPD 缺陷消息' : notificationToast.kind==='jenkins_publish' ? 'Jenkins 发布完成' : 'Codex 任务完成' }}</small><b>{{ notificationToast.title.replace(/^Codex 任务已完成：/, '') }}</b><p>{{ notificationToast.body }}</p></span><em>查看</em></button>
   </div>
 </template>

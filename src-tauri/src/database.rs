@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 44;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -809,6 +809,40 @@ impl DatabaseState {
                    read_at TEXT
                  );
                  CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read,created_at);
+                 CREATE TABLE IF NOT EXISTS jenkins_favorite_jobs (
+                   jenkins_base_url TEXT NOT NULL,
+                   job_full_name TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(jenkins_base_url,job_full_name)
+                 );
+                 CREATE TABLE IF NOT EXISTS jenkins_publish_records (
+                   id TEXT PRIMARY KEY,
+                   jenkins_base_url TEXT NOT NULL,
+                   job_name TEXT NOT NULL,
+                   job_full_name TEXT NOT NULL,
+                   job_url TEXT NOT NULL,
+                   branch_parameter TEXT NOT NULL,
+                   branch TEXT NOT NULL,
+                   queue_id INTEGER,
+                   queue_url TEXT NOT NULL DEFAULT '',
+                   build_number INTEGER,
+                   build_url TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT 'queued',
+                   sync_state TEXT NOT NULL DEFAULT 'synced',
+                   queue_reason TEXT NOT NULL DEFAULT '',
+                   current_stage TEXT NOT NULL DEFAULT '',
+                   progress_percent INTEGER,
+                   stages_json TEXT NOT NULL DEFAULT '[]',
+                   started_at TEXT NOT NULL,
+                   build_started_at TEXT,
+                   finished_at TEXT,
+                   updated_at TEXT NOT NULL,
+                   result TEXT NOT NULL DEFAULT '',
+                   error_message TEXT NOT NULL DEFAULT '',
+                   notification_sent INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_jenkins_publish_time ON jenkins_publish_records(started_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_jenkins_publish_active ON jenkins_publish_records(status,updated_at DESC);
                  CREATE TABLE IF NOT EXISTS project_profiles (
                    id TEXT PRIMARY KEY,
                    display_name TEXT NOT NULL,
@@ -1602,6 +1636,16 @@ mod migration_tests {
             )
             .unwrap();
         assert!(repository_runtime_runs_exists);
+        for table in ["jenkins_favorite_jobs", "jenkins_publish_records"] {
+            let exists: bool = upgraded
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "数据库升级后缺少 {table}");
+        }
         for table in ["api_sources", "api_endpoints", "api_tag_exports"] {
             let exists: bool = upgraded
                 .query_row(

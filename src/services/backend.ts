@@ -124,7 +124,7 @@ export interface CodexCliStatus {
 
 export interface WorkbenchNotification {
   id: string;
-  kind: "codex_complete" | "codex_task" | "tapd_item";
+  kind: "codex_complete" | "codex_task" | "tapd_item" | "jenkins_publish";
   title: string;
   body: string;
   output: string;
@@ -445,6 +445,59 @@ export interface RepositoryAssetDetails {
   commitPlan?: CommitPlan;
   associations: RepositoryAssociation[];
   nextAction: string;
+}
+
+export interface JenkinsConnectionStatus {
+  configured: boolean;
+  baseUrl: string;
+  username: string;
+  version: string;
+  lastVerifiedAt: string;
+}
+
+export interface JenkinsJob {
+  name: string;
+  fullName: string;
+  url: string;
+  className: string;
+  favorite: boolean;
+}
+
+export interface JenkinsBranchOptions {
+  jobFullName: string;
+  parameterName: string;
+  branches: string[];
+}
+
+export interface JenkinsPipelineStage {
+  id: string;
+  name: string;
+  status: string;
+  durationMs: number;
+}
+
+export interface JenkinsPublishRecord {
+  id: string;
+  jobName: string;
+  jobFullName: string;
+  jobUrl: string;
+  branchParameter: string;
+  branch: string;
+  queueId?: number;
+  queueUrl: string;
+  buildNumber?: number;
+  buildUrl: string;
+  status: "queued" | "running" | "success" | "failed" | "aborted";
+  syncState: "synced" | "reconnecting";
+  queueReason: string;
+  currentStage: string;
+  stages: JenkinsPipelineStage[];
+  startedAt: string;
+  buildStartedAt?: string;
+  finishedAt?: string;
+  updatedAt: string;
+  result: string;
+  errorMessage: string;
 }
 
 export interface TapdStatus {
@@ -1561,6 +1614,46 @@ export async function listRunningRepositoryProjects(): Promise<RunningProjectPro
 
 export async function openRepositoryRuntimeUrl(url: string): Promise<void> {
   await invoke("open_repository_runtime_url", { url });
+}
+
+export async function getJenkinsConnectionStatus(): Promise<JenkinsConnectionStatus> {
+  return invoke<JenkinsConnectionStatus>("jenkins_connection_status");
+}
+
+export async function testJenkinsConnection(baseUrl: string, username: string, apiToken: string): Promise<JenkinsConnectionStatus> {
+  return invoke<JenkinsConnectionStatus>("test_jenkins_connection", { baseUrl, username, apiToken });
+}
+
+export async function saveJenkinsConnection(baseUrl: string, username: string, apiToken: string): Promise<JenkinsConnectionStatus> {
+  return invoke<JenkinsConnectionStatus>("save_jenkins_connection", { baseUrl, username, apiToken });
+}
+
+export async function listJenkinsJobs(): Promise<JenkinsJob[]> {
+  return invoke<JenkinsJob[]>("list_jenkins_jobs");
+}
+
+export async function listJenkinsJobBranches(jobFullName: string): Promise<JenkinsBranchOptions> {
+  return invoke<JenkinsBranchOptions>("list_jenkins_job_branches", { jobFullName });
+}
+
+export async function setJenkinsJobFavorite(jobFullName: string, favorite: boolean): Promise<void> {
+  await invoke("set_jenkins_job_favorite", { jobFullName, favorite });
+}
+
+export async function triggerJenkinsPublish(jobFullName: string, branch: string): Promise<JenkinsPublishRecord> {
+  return invoke<JenkinsPublishRecord>("trigger_jenkins_publish", { jobFullName, branch });
+}
+
+export async function listJenkinsPublishRecords(): Promise<JenkinsPublishRecord[]> {
+  return invoke<JenkinsPublishRecord[]>("list_jenkins_publish_records");
+}
+
+export async function getJenkinsPublishStatus(id: string): Promise<JenkinsPublishRecord> {
+  return invoke<JenkinsPublishRecord>("get_jenkins_publish_status", { id });
+}
+
+export async function openJenkinsUrl(url: string): Promise<void> {
+  await invoke("open_jenkins_url", { url });
 }
 
 export async function getGitCredentialStatus(): Promise<GitCredentialStatus> {
