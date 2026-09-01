@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 38;
+pub const SCHEMA_VERSION: i64 = 42;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -232,6 +232,73 @@ fn migrate_tapd_composite_keys(connection: &Connection) -> Result<(), String> {
     if foreign_key_errors != 0 {
         return Err(format!(
             "TAPD 数据迁移后发现 {foreign_key_errors} 条关联异常。"
+        ));
+    }
+    Ok(())
+}
+
+// V39 允许多个规范项目复用同一个 Apifox 项目；规范项目自身仍然只能关联一次。
+fn migrate_api_sources_shared_external_project_id(connection: &Connection) -> Result<(), String> {
+    let table_sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='api_sources'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+    let normalized_sql = table_sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if !normalized_sql.contains("external_project_id text not null unique") {
+        return Ok(());
+    }
+
+    let migration = connection.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         BEGIN IMMEDIATE;
+         CREATE TABLE api_sources_v39 (
+           id TEXT PRIMARY KEY,
+           project_profile_id TEXT NOT NULL UNIQUE,
+           provider TEXT NOT NULL DEFAULT 'apifox',
+           external_project_id TEXT NOT NULL,
+           document_title TEXT NOT NULL DEFAULT '',
+           openapi_version TEXT NOT NULL DEFAULT '',
+           sync_status TEXT NOT NULL DEFAULT 'never',
+           endpoint_count INTEGER NOT NULL DEFAULT 0,
+           content_hash TEXT NOT NULL DEFAULT '',
+           last_synced_at TEXT,
+           last_error TEXT NOT NULL DEFAULT '',
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           FOREIGN KEY(project_profile_id) REFERENCES project_profiles(id) ON DELETE CASCADE
+         );
+         INSERT INTO api_sources_v39(
+           id,project_profile_id,provider,external_project_id,document_title,openapi_version,
+           sync_status,endpoint_count,content_hash,last_synced_at,last_error,created_at,updated_at
+         )
+         SELECT id,project_profile_id,provider,external_project_id,document_title,openapi_version,
+                sync_status,endpoint_count,content_hash,last_synced_at,last_error,created_at,updated_at
+         FROM api_sources;
+         DROP TABLE api_sources;
+         ALTER TABLE api_sources_v39 RENAME TO api_sources;
+         CREATE INDEX idx_api_sources_status ON api_sources(sync_status,updated_at DESC);
+         COMMIT;
+         PRAGMA foreign_keys=ON;",
+    );
+    if let Err(error) = migration {
+        let _ = connection.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON;");
+        return Err(format!("Apifox 项目关联迁移失败：{error}"));
+    }
+    let foreign_key_errors = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if foreign_key_errors != 0 {
+        return Err(format!(
+            "Apifox 项目关联迁移后发现 {foreign_key_errors} 条关联异常。"
         ));
     }
     Ok(())
@@ -758,12 +825,20 @@ impl DatabaseState {
                    id TEXT PRIMARY KEY,
                    project_profile_id TEXT NOT NULL UNIQUE,
                    provider TEXT NOT NULL DEFAULT 'apifox',
-                   external_project_id TEXT NOT NULL UNIQUE,
+                   external_project_id TEXT NOT NULL,
                    document_title TEXT NOT NULL DEFAULT '',
                    openapi_version TEXT NOT NULL DEFAULT '',
                    sync_status TEXT NOT NULL DEFAULT 'never',
                    endpoint_count INTEGER NOT NULL DEFAULT 0,
                    content_hash TEXT NOT NULL DEFAULT '',
+                   openapi_document_json TEXT NOT NULL DEFAULT '{}',
+                   request_base_url TEXT NOT NULL DEFAULT '',
+                   request_token_header TEXT NOT NULL DEFAULT 'Authorization',
+                   code_client TEXT NOT NULL DEFAULT 'request',
+                   code_function_prefix TEXT NOT NULL DEFAULT '_',
+                   code_import_path TEXT NOT NULL DEFAULT '',
+                   code_include_import INTEGER NOT NULL DEFAULT 0,
+                   code_typescript INTEGER NOT NULL DEFAULT 0,
                    last_synced_at TEXT,
                    last_error TEXT NOT NULL DEFAULT '',
                    created_at TEXT NOT NULL,
@@ -784,12 +859,22 @@ impl DatabaseState {
                    document_json TEXT NOT NULL DEFAULT '{}',
                    document_hash TEXT NOT NULL DEFAULT '',
                    search_text TEXT NOT NULL DEFAULT '',
+                   is_favorite INTEGER NOT NULL DEFAULT 0,
                    updated_at TEXT NOT NULL,
                    UNIQUE(source_id,method,path),
                    FOREIGN KEY(source_id) REFERENCES api_sources(id) ON DELETE CASCADE
                  );
                  CREATE INDEX IF NOT EXISTS idx_api_endpoints_source ON api_endpoints(source_id,method,path);
                  CREATE INDEX IF NOT EXISTS idx_api_endpoints_title ON api_endpoints(title);
+                 CREATE TABLE IF NOT EXISTS api_tag_exports (
+                   source_id TEXT NOT NULL,
+                   tag_path TEXT NOT NULL,
+                   openapi_url TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY(source_id,tag_path),
+                   FOREIGN KEY(source_id) REFERENCES api_sources(id) ON DELETE CASCADE
+                 );
                  CREATE TABLE IF NOT EXISTS work_inbox_items (
                    id TEXT PRIMARY KEY,
                    source_type TEXT NOT NULL,
@@ -941,6 +1026,7 @@ impl DatabaseState {
                   CREATE INDEX IF NOT EXISTS idx_tapd_codex_jobs_item ON tapd_codex_jobs(item_key,created_at);",
             )
             .map_err(|error| error.to_string())?;
+        migrate_api_sources_shared_external_project_id(&connection)?;
         for migration in [
             "ALTER TABLE tasks ADD COLUMN start_date TEXT",
             "ALTER TABLE tasks ADD COLUMN end_date TEXT",
@@ -1006,6 +1092,15 @@ impl DatabaseState {
             "ALTER TABLE commit_plans ADD COLUMN model TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE commit_plans ADD COLUMN generation_warning TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE commit_plans ADD COLUMN excluded_files_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE api_sources ADD COLUMN request_base_url TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE api_sources ADD COLUMN request_token_header TEXT NOT NULL DEFAULT 'Authorization'",
+            "ALTER TABLE api_sources ADD COLUMN openapi_document_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE api_sources ADD COLUMN code_client TEXT NOT NULL DEFAULT 'request'",
+            "ALTER TABLE api_sources ADD COLUMN code_function_prefix TEXT NOT NULL DEFAULT '_'",
+            "ALTER TABLE api_sources ADD COLUMN code_import_path TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE api_sources ADD COLUMN code_include_import INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE api_sources ADD COLUMN code_typescript INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE api_endpoints ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = connection.execute(migration, []);
         }
@@ -1505,7 +1600,7 @@ mod migration_tests {
             )
             .unwrap();
         assert!(repository_runtime_runs_exists);
-        for table in ["api_sources", "api_endpoints"] {
+        for table in ["api_sources", "api_endpoints", "api_tag_exports"] {
             let exists: bool = upgraded
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -1514,6 +1609,28 @@ mod migration_tests {
                 )
                 .unwrap();
             assert!(exists, "数据库升级后缺少 {table}");
+        }
+        for (table, column) in [
+            ("api_sources", "request_base_url"),
+            ("api_sources", "request_token_header"),
+            ("api_sources", "openapi_document_json"),
+            ("api_sources", "code_client"),
+            ("api_sources", "code_function_prefix"),
+            ("api_sources", "code_import_path"),
+            ("api_sources", "code_include_import"),
+            ("api_sources", "code_typescript"),
+            ("api_endpoints", "is_favorite"),
+        ] {
+            let exists: bool = upgraded
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"
+                    ),
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "{table} 缺少 {column}");
         }
         for column in [
             "grouping_mode",
@@ -1711,6 +1828,83 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
+        assert_eq!(foreign_key_errors, 0);
+    }
+
+    #[test]
+    fn apifox_source_migration_allows_shared_external_project_id() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE project_profiles (
+                   id TEXT PRIMARY KEY,
+                   display_name TEXT NOT NULL,
+                   repository_path TEXT NOT NULL DEFAULT '',
+                   tapd_workspace_id TEXT NOT NULL DEFAULT '',
+                   aliases_json TEXT NOT NULL DEFAULT '[]',
+                   category TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO project_profiles VALUES('project-1','项目一','','','[]','','now','now');
+                 INSERT INTO project_profiles VALUES('project-2','项目二','','','[]','','now','now');
+                 CREATE TABLE api_sources (
+                   id TEXT PRIMARY KEY,
+                   project_profile_id TEXT NOT NULL UNIQUE,
+                   provider TEXT NOT NULL DEFAULT 'apifox',
+                   external_project_id TEXT NOT NULL UNIQUE,
+                   document_title TEXT NOT NULL DEFAULT '',
+                   openapi_version TEXT NOT NULL DEFAULT '',
+                   sync_status TEXT NOT NULL DEFAULT 'never',
+                   endpoint_count INTEGER NOT NULL DEFAULT 0,
+                   content_hash TEXT NOT NULL DEFAULT '',
+                   last_synced_at TEXT,
+                   last_error TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   FOREIGN KEY(project_profile_id) REFERENCES project_profiles(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX idx_api_sources_status ON api_sources(sync_status,updated_at DESC);
+                 INSERT INTO api_sources(id,project_profile_id,external_project_id,created_at,updated_at)
+                 VALUES('source-1','project-1','1001','now','now');
+                 CREATE TABLE api_endpoints (
+                   id TEXT PRIMARY KEY,
+                   source_id TEXT NOT NULL,
+                   method TEXT NOT NULL,
+                   path TEXT NOT NULL,
+                   FOREIGN KEY(source_id) REFERENCES api_sources(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO api_endpoints VALUES('endpoint-1','source-1','GET','/users');",
+            )
+            .unwrap();
+
+        migrate_api_sources_shared_external_project_id(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO api_sources(id,project_profile_id,external_project_id,created_at,updated_at)
+                 VALUES('source-2','project-2','1001','now','now')",
+                [],
+            )
+            .unwrap();
+
+        let source_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM api_sources WHERE external_project_id='1001'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let endpoint_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM api_endpoints", [], |row| row.get(0))
+            .unwrap();
+        let foreign_key_errors: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(source_count, 2);
+        assert_eq!(endpoint_count, 1);
         assert_eq!(foreign_key_errors, 0);
     }
 }

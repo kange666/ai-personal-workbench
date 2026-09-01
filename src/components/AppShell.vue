@@ -201,7 +201,11 @@ function revealSlowPage() {
   window.clearTimeout(pageLoadingSlowTimer);
 }
 
-watch(() => router.currentRoute.value.fullPath, beginPageLoading, { immediate: true, flush: "sync" });
+watch(() => router.currentRoute.value.fullPath, (nextPath, previousPath) => {
+  // 接口详情使用查询参数定位；切换接口时由右侧详情面板自行展示加载状态。
+  if (previousPath && router.currentRoute.value.path === "/api-docs" && nextPath.split("?")[0] === previousPath.split("?")[0]) return;
+  beginPageLoading();
+}, { immediate: true, flush: "sync" });
 watch(recentActivitiesOpen, value => window.localStorage.setItem("workbench-right-rail-recent-open", String(value)));
 window.addEventListener("workbench-backend-loading", handleBackendLoading);
 function formatRailMinutes(value:number) {

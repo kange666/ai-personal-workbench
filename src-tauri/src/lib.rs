@@ -298,6 +298,7 @@ pub fn run() {
             let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
             testing::recover_incomplete_test_runs(&state).map_err(std::io::Error::other)?;
             app.manage(state.clone());
+            app.manage(apifox::start_api_export_server(state.clone()));
             email::initialize_for_state(&state).map_err(std::io::Error::other)?;
             email::sync_tray_menu(app.handle(), &state);
             let history_state = state.clone();
@@ -470,8 +471,17 @@ pub fn run() {
             apifox::sync_all_api_sources,
             apifox::list_api_endpoints,
             apifox::get_api_endpoint,
+            apifox::set_api_endpoint_favorite,
+            apifox::get_api_tag_export,
+            apifox::get_api_test_config,
+            apifox::save_api_test_config,
+            apifox::clear_api_test_token,
+            apifox::preview_api_endpoint_test,
+            apifox::execute_api_endpoint_test,
+            apifox::get_api_code_template,
+            apifox::save_api_code_template,
             apifox::render_api_endpoint_markdown,
-            apifox::save_api_endpoint_to_knowledge,
+            apifox::render_api_endpoint_request_code,
             content::list_content_ideas,
             content::generate_daily_content,
             content::update_content_status,

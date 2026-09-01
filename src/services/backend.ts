@@ -222,6 +222,7 @@ export interface ApiEndpointSummary {
   description: string;
   tags: string[];
   deprecated: boolean;
+  favorite: boolean;
   updatedAt: string;
 }
 
@@ -245,6 +246,69 @@ export interface ApiSyncSummary {
   total: number;
   syncedAt?: string;
   error: string;
+}
+
+export interface ApiTestConfig {
+  sourceId: string;
+  baseUrl: string;
+  tokenHeader: string;
+  tokenConfigured: boolean;
+}
+
+export interface ApiTestConfigUpdate {
+  sourceId: string;
+  baseUrl: string;
+  tokenHeader: string;
+  token: string;
+}
+
+export interface ApiTestResult {
+  url: string;
+  method: string;
+  status: number;
+  statusText: string;
+  success: boolean;
+  elapsedMs: number;
+  contentType: string;
+  requestData: unknown;
+  responseData: unknown;
+  truncated: boolean;
+}
+
+export interface ApiTestPreview {
+  endpointId: string;
+  url: string;
+  method: string;
+  contentType: string;
+  headers: Record<string,string>;
+  requestData: unknown;
+  body: unknown | null;
+  requiresConfirmation: boolean;
+  warning: string;
+}
+
+export interface ApiTestExecutionRequest {
+  endpointId: string;
+  url: string;
+  body: unknown | null;
+  confirmed: boolean;
+}
+
+export interface ApiTagExport {
+  sourceId: string;
+  tagPath: string;
+  openapiUrl: string;
+  endpointCount: number;
+  available: boolean;
+}
+
+export interface ApiCodeTemplate {
+  sourceId: string;
+  client: "request" | "axios" | "uni-request";
+  functionPrefix: string;
+  importPath: string;
+  includeImport: boolean;
+  typescript: boolean;
 }
 
 export interface NotificationSyncSummary {
@@ -1350,12 +1414,48 @@ export async function getApiEndpoint(endpointId: string): Promise<ApiEndpointDet
   return invoke<ApiEndpointDetail>("get_api_endpoint", { endpointId });
 }
 
+export async function setApiEndpointFavorite(endpointId: string, favorite: boolean): Promise<boolean> {
+  return invoke<boolean>("set_api_endpoint_favorite", { endpointId, favorite });
+}
+
+export async function getApiTagExport(sourceId: string, tagPath: string): Promise<ApiTagExport> {
+  return invoke<ApiTagExport>("get_api_tag_export", { sourceId, tagPath });
+}
+
+export async function getApiTestConfig(sourceId: string): Promise<ApiTestConfig> {
+  return invoke<ApiTestConfig>("get_api_test_config", { sourceId });
+}
+
+export async function saveApiTestConfig(config: ApiTestConfigUpdate): Promise<ApiTestConfig> {
+  return invoke<ApiTestConfig>("save_api_test_config", { config });
+}
+
+export async function clearApiTestToken(sourceId: string): Promise<ApiTestConfig> {
+  return invoke<ApiTestConfig>("clear_api_test_token", { sourceId });
+}
+
+export async function previewApiEndpointTest(endpointId: string): Promise<ApiTestPreview> {
+  return invoke<ApiTestPreview>("preview_api_endpoint_test", { endpointId });
+}
+
+export async function executeApiEndpointTest(request: ApiTestExecutionRequest): Promise<ApiTestResult> {
+  return invoke<ApiTestResult>("execute_api_endpoint_test", { request });
+}
+
+export async function getApiCodeTemplate(sourceId: string): Promise<ApiCodeTemplate> {
+  return invoke<ApiCodeTemplate>("get_api_code_template", { sourceId });
+}
+
+export async function saveApiCodeTemplate(template: ApiCodeTemplate): Promise<ApiCodeTemplate> {
+  return invoke<ApiCodeTemplate>("save_api_code_template", { template });
+}
+
 export async function renderApiEndpointMarkdown(endpointId: string): Promise<string> {
   return invoke<string>("render_api_endpoint_markdown", { endpointId });
 }
 
-export async function saveApiEndpointToKnowledge(endpointId: string): Promise<KnowledgeItem> {
-  return invoke<KnowledgeItem>("save_api_endpoint_to_knowledge", { endpointId });
+export async function renderApiEndpointRequestCode(endpointId: string): Promise<string> {
+  return invoke<string>("render_api_endpoint_request_code", { endpointId });
 }
 
 export async function getEmailNotificationStatus(): Promise<EmailNotificationStatus> {
