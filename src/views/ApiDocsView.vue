@@ -18,9 +18,8 @@ import {
   renderApiEndpointRequestCode,
   renderApiEndpointMarkdown,
   saveApiCodeTemplate,
-  saveApiSource,
+  saveApiSources,
   saveApiTestConfig,
-  setApiEndpointFavorite,
   syncAllApiSources,
   syncApiSource,
   type ApiEndpointDetail,
@@ -55,13 +54,11 @@ const syncingAll = ref(false);
 const message = ref("");
 const error = ref("");
 const query = ref("");
-const method = ref("");
-const tag = ref("");
+const sourcePanelCollapsed = ref(false);
 const expandedTreeKeys = ref(new Set<string>());
 const configOpen = ref(false);
-const config = reactive({ id:"", projectProfileId:"", externalProjectId:"" });
-const testConfigOpen = ref(false);
-const testConfigLoading = ref(false);
+const settingsLoading = ref(false);
+const config = reactive({ id:"", projectProfileIds:[] as string[], externalProjectId:"", apifoxProjectName:"" });
 const testTokenConfigured = ref(false);
 const testConfig = reactive<ApiTestConfigUpdate>({ sourceId:"", baseUrl:"", tokenHeader:"Authorization", token:"" });
 const testingEndpointId = ref("");
@@ -77,8 +74,6 @@ const tagExportOpen = ref(false);
 const tagExportLoading = ref(false);
 const tagExportVersion = ref<"3.0"|"3.1">("3.0");
 const tagExport = reactive<ApiTagExport>({ sourceId:"", tagPath:"", openapiUrl:"", endpointCount:0, available:false });
-const codeTemplateOpen = ref(false);
-const codeTemplateLoading = ref(false);
 const codeTemplate = reactive<ApiCodeTemplate>({ sourceId:"", client:"request", functionPrefix:"_", importPath:"", includeImport:false, typescript:false });
 
 function asObject(value:unknown):JsonObject { return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {}; }
@@ -90,17 +85,9 @@ function normalizePath(value:string) { return value.trim().replaceAll("\\","/").
 
 const activeSource = computed(() => sources.value.find(item=>item.id===selectedSourceId.value) || null);
 const tagExportUrl = computed(() => tagExport.openapiUrl.replace(/([?&]version=)[^&]+/,`$1${tagExportVersion.value}`));
-const usedProfileIds = computed(() => new Set(sources.value.filter(item=>item.id!==config.id).map(item=>item.projectProfileId)));
-const configurableProfiles = computed(() => profiles.value.filter(item=>!usedProfileIds.value.has(item.id)));
-const methods = computed(() => [...new Set(endpoints.value.map(item=>item.method))].sort());
-const tags = computed(() => [...new Set(endpoints.value.flatMap(item=>item.tags))].sort((a,b)=>a.localeCompare(b,"zh-CN")));
 const filtered = computed(() => {
   const needle=query.value.trim().toLowerCase();
-  return endpoints.value.filter(item => {
-    if (method.value && item.method!==method.value) return false;
-    if (tag.value && !item.tags.includes(tag.value)) return false;
-    return !needle || `${item.title} ${item.path} ${item.description} ${item.operationId} ${item.tags.join(" ")}`.toLowerCase().includes(needle);
-  });
+  return endpoints.value.filter(item => !needle || `${item.title} ${item.path} ${item.description} ${item.operationId} ${item.tags.join(" ")}`.toLowerCase().includes(needle));
 });
 
 function endpointFolders(item:ApiEndpointSummary):string[] {
@@ -143,7 +130,7 @@ function buildEndpointTree(items:ApiEndpointSummary[]):ApiTreeNode[] {
   return roots;
 }
 const endpointTree = computed(() => buildEndpointTree(filtered.value));
-const forceExpandTree = computed(() => Boolean(query.value.trim() || method.value || tag.value));
+const forceExpandTree = computed(() => Boolean(query.value.trim()));
 const treeRows = computed<ApiTreeRow[]>(() => {
   const rows:ApiTreeRow[]=[];
   const append=(nodes:ApiTreeNode[],depth:number) => {
@@ -237,7 +224,7 @@ async function load() {
 }
 
 async function selectSource(item:ApiSource) {
-  selectedSourceId.value=item.id; query.value="";method.value="";tag.value="";error.value="";testResult.value=null;
+  selectedSourceId.value=item.id; query.value="";error.value="";testResult.value=null;
   detailLoading.value=true;
   try { await loadEndpoints(item.id); }
   catch(cause){error.value=String(cause);}finally{detailLoading.value=false;}
@@ -247,18 +234,49 @@ async function selectEndpoint(item:ApiEndpointSummary) {
   try { expandEndpointPath(item);selected.value=await getApiEndpoint(item.id);await router.replace({query:{project:selected.value.projectProfileId,endpoint:item.id}}); }
   catch(cause){error.value=String(cause);}finally{detailLoading.value=false;}
 }
-function openCreate(source?:ApiSource) {
-  config.id=source?.id || ""; config.projectProfileId=source?.projectProfileId || configurableProfiles.value[0]?.id || ""; config.externalProjectId=source?.externalProjectId || ""; configOpen.value=true;error.value="";message.value="";
+function profileUnavailable(profileId:string) {
+  const linked=sources.value.find(item=>item.projectProfileId===profileId);
+  return Boolean(linked && linked.id!==config.id);
 }
-async function persistSource() {
-  loading.value=true;error.value="";message.value="";
-  try { const saved=await saveApiSource({...config});configOpen.value=false;message.value="项目关联已保存，可以开始同步接口文档。";await load();await selectSource(sources.value.find(item=>item.id===saved.id) || saved); }
-  catch(cause){error.value=String(cause);}finally{loading.value=false;}
+function profileSelectionLocked(profileId:string) {
+  return profileUnavailable(profileId) || Boolean(config.id && activeSource.value?.projectProfileId===profileId);
+}
+async function openProjectSettings(source?:ApiSource|null) {
+  const target=source || null;
+  configOpen.value=true;settingsLoading.value=true;error.value="";message.value="";
+  config.id=target?.id || "";
+  config.projectProfileIds=target ? [target.projectProfileId] : profiles.value.filter(item=>!profileUnavailable(item.id)).slice(0,1).map(item=>item.id);
+  config.externalProjectId=target?.externalProjectId || "";
+  config.apifoxProjectName=target?.apifoxProjectName || target?.documentTitle || "";
+  Object.assign(testConfig,{sourceId:target?.id || "",baseUrl:"",tokenHeader:"Authorization",token:""});
+  Object.assign(codeTemplate,{sourceId:target?.id || "",client:"request",functionPrefix:"_",importPath:"",includeImport:false,typescript:false});
+  testTokenConfigured.value=false;
+  if(!target) { settingsLoading.value=false;return; }
+  try {
+    const [requestConfig,template]=await Promise.all([getApiTestConfig(target.id),getApiCodeTemplate(target.id)]);
+    Object.assign(testConfig,{sourceId:requestConfig.sourceId,baseUrl:requestConfig.baseUrl,tokenHeader:requestConfig.tokenHeader || "Authorization",token:""});
+    testTokenConfigured.value=requestConfig.tokenConfigured;
+    Object.assign(codeTemplate,template);
+  } catch(cause) { error.value=String(cause); }
+  finally { settingsLoading.value=false; }
+}
+async function persistProjectSettings() {
+  settingsLoading.value=true;error.value="";message.value="";
+  try {
+    const saved=await saveApiSources({projectProfileIds:[...config.projectProfileIds],externalProjectId:config.externalProjectId,apifoxProjectName:config.apifoxProjectName});
+    await Promise.all(saved.flatMap(item=>[
+      saveApiTestConfig({...testConfig,sourceId:item.id}),
+      saveApiCodeTemplate({...codeTemplate,sourceId:item.id}),
+    ]));
+    const preferred=saved.find(item=>item.id===config.id) || saved[0];
+    configOpen.value=false;message.value=`已保存 ${saved.length} 个规范项目的 Apifox 关联和项目设置。`;await load();
+    if(preferred) await selectSource(sources.value.find(item=>item.id===preferred.id) || preferred);
+  } catch(cause){error.value=String(cause);}finally{settingsLoading.value=false;}
 }
 async function removeSource(item:ApiSource) {
   if(!confirm(`确定移除“${item.projectName}”的 Apifox 关联和本地接口缓存吗？Apifox 原项目不会删除。`)) return;
   loading.value=true;error.value="";
-  try { await removeApiSource(item.id);message.value="项目关联和本地接口缓存已移除。";selected.value=null;await load(); }
+  try { await removeApiSource(item.id);configOpen.value=false;message.value="项目关联和本地接口缓存已移除。";selected.value=null;await load(); }
   catch(cause){error.value=String(cause);}finally{loading.value=false;}
 }
 async function syncOne(item:ApiSource) {
@@ -287,41 +305,11 @@ async function copyPath() {
   try { await navigator.clipboard.writeText(selected.value.path);message.value="接口路径已复制。"; }
   catch(cause){error.value=String(cause);}
 }
-async function toggleFavorite() {
-  if(!selected.value) return;
-  const next=!selected.value.favorite;
-  try {
-    await setApiEndpointFavorite(selected.value.id,next);
-    selected.value.favorite=next;
-    const summary=endpoints.value.find(item=>item.id===selected.value?.id);
-    if(summary) summary.favorite=next;
-    message.value=next ? "接口已收藏。" : "已取消收藏。";
-  } catch(cause) { error.value=String(cause); }
-}
-async function openTestConfig() {
-  if(!activeSource.value) return;
-  testConfigLoading.value=true;error.value="";
-  try {
-    const value=await getApiTestConfig(activeSource.value.id);
-    testConfig.sourceId=value.sourceId;testConfig.baseUrl=value.baseUrl;testConfig.tokenHeader=value.tokenHeader || "Authorization";testConfig.token="";
-    testTokenConfigured.value=value.tokenConfigured;testConfigOpen.value=true;
-  } catch(cause) { error.value=String(cause); }
-  finally { testConfigLoading.value=false; }
-}
-async function persistTestConfig() {
-  testConfigLoading.value=true;error.value="";message.value="";
-  try {
-    const value=await saveApiTestConfig({...testConfig});
-    testConfig.baseUrl=value.baseUrl;testConfig.tokenHeader=value.tokenHeader;testConfig.token="";testTokenConfigured.value=value.tokenConfigured;testConfigOpen.value=false;
-    message.value="接口测试配置已保存。";
-  } catch(cause) { error.value=String(cause); }
-  finally { testConfigLoading.value=false; }
-}
 async function clearTestToken() {
   if(!testConfig.sourceId) return;
-  testConfigLoading.value=true;error.value="";
+  settingsLoading.value=true;error.value="";
   try { const value=await clearApiTestToken(testConfig.sourceId);testTokenConfigured.value=value.tokenConfigured;testConfig.token="";message.value="接口测试 Token 已清除。"; }
-  catch(cause){error.value=String(cause);}finally{testConfigLoading.value=false;}
+  catch(cause){error.value=String(cause);}finally{settingsLoading.value=false;}
 }
 async function runEndpointTest() {
   if(!selected.value) return;
@@ -330,7 +318,7 @@ async function runEndpointTest() {
     const value=await previewApiEndpointTest(selected.value.id);
     testPreview.value=value;testPreviewUrl.value=value.url;testPreviewBody.value=value.body===null ? "" : JSON.stringify(value.body,null,2);testPreviewOpen.value=true;
   }
-  catch(cause){error.value=String(cause);if(error.value.includes("请求基地址")) await openTestConfig();}
+  catch(cause){error.value=String(cause);if(error.value.includes("请求基地址")) await openProjectSettings(activeSource.value);}
   finally{testPreviewLoading.value=false;}
 }
 async function sendEndpointTest() {
@@ -363,44 +351,31 @@ async function copyTagExportUrl() {
 function openTagExportUrl() {
   if(tagExportUrl.value) window.open(tagExportUrl.value,"_blank","noopener,noreferrer");
 }
-async function openCodeTemplate() {
-  if(!activeSource.value) return;
-  codeTemplateLoading.value=true;error.value="";
-  try { Object.assign(codeTemplate,await getApiCodeTemplate(activeSource.value.id));codeTemplateOpen.value=true; }
-  catch(cause){error.value=String(cause);}finally{codeTemplateLoading.value=false;}
-}
-async function persistCodeTemplate() {
-  codeTemplateLoading.value=true;error.value="";message.value="";
-  try { Object.assign(codeTemplate,await saveApiCodeTemplate({...codeTemplate}));codeTemplateOpen.value=false;message.value="项目代码模板已保存，后续复制接口代码会自动使用该模板。"; }
-  catch(cause){error.value=String(cause);}finally{codeTemplateLoading.value=false;}
-}
-
 onMounted(load);
 </script>
 
 <template>
   <div class="view api-docs-view">
-    <header class="page-header"><div><h1>接口文档中心</h1><p>按规范项目同步 Apifox OpenAPI 文档，统一查询、复制和复用</p></div><div><RouterLink v-if="!credential.configured" class="button secondary link-button" to="/settings">配置 Apifox 令牌</RouterLink><button class="button secondary" :disabled="syncingAll || !sources.length || !credential.configured" @click="syncAll">{{ syncingAll ? "同步中…" : "同步全部" }}</button><button class="button primary" @click="openCreate()">＋ 关联项目</button></div></header>
+    <header class="page-header"><div><h1>接口文档中心</h1><p>按规范项目同步 Apifox OpenAPI 文档，统一查询、复制和复用</p></div><div><RouterLink v-if="!credential.configured" class="button secondary link-button" to="/settings">配置 Apifox 令牌</RouterLink><button class="button secondary" :disabled="syncingAll || !sources.length || !credential.configured" @click="syncAll">{{ syncingAll ? "同步中…" : "同步全部" }}</button><button class="button primary" @click="openProjectSettings(activeSource)">项目设置</button></div></header>
     <div v-if="message || error" class="scan-message" :class="{error:Boolean(error)}">{{ error || message }}</div>
     <section v-if="!credential.configured" class="panel api-onboarding"><b>先配置 Apifox API 访问令牌</b><p>令牌只保存在 Windows 凭据库，接口文档缓存才会写入本地 SQLite。</p><RouterLink class="button primary link-button" to="/settings">前往设置</RouterLink></section>
-    <section class="panel api-docs-layout">
+    <section class="panel api-docs-layout" :class="{'source-collapsed':sourcePanelCollapsed}">
       <aside class="api-source-panel">
-        <header><div><b>规范项目</b><small>{{ sources.length }} 个 Apifox 关联</small></div><button class="icon-button" title="新增关联" @click="openCreate()">＋</button></header>
+        <header><div><b>规范项目</b><small>{{ sources.length }} 个 Apifox 关联</small></div><button class="text-button" @click="sourcePanelCollapsed=true">收起</button></header>
         <div class="api-source-list">
-          <button v-for="item in sources" :key="item.id" :class="{active:item.id===selectedSourceId}" @click="selectSource(item)"><span><b>{{ item.projectName }}</b><small>{{ item.documentTitle || `Apifox ${item.externalProjectId}` }}</small><em :class="item.syncStatus">{{ statusText(item.syncStatus) }} · {{ item.endpointCount }} 个</em></span><i>›</i></button>
-          <p v-if="!sources.length">尚未关联项目。点击“关联项目”后填写 Apifox 项目 ID。</p>
+          <button v-for="item in sources" :key="item.id" :class="{active:item.id===selectedSourceId}" @click="selectSource(item)"><span><b>{{ item.projectName }}</b><small>{{ item.apifoxProjectName || item.documentTitle || `Apifox ${item.externalProjectId}` }}</small><em :class="item.syncStatus">{{ statusText(item.syncStatus) }} · {{ item.endpointCount }} 个</em></span></button>
+          <p v-if="!sources.length">尚未关联项目。点击“项目设置”后选择规范项目并填写 Apifox 项目信息。</p>
         </div>
-        <footer v-if="activeSource"><button class="text-button" @click="openCreate(activeSource)">编辑关联</button><button class="text-button danger-text" @click="removeSource(activeSource)">移除</button></footer>
       </aside>
 
       <main class="api-endpoint-panel">
-        <header><div><b>{{ activeSource?.projectName || "接口列表" }}</b><small>{{ activeSource ? `${formatTime(activeSource.lastSyncedAt)} · OpenAPI ${activeSource.openapiVersion || '待读取'}` : '请选择项目' }}</small></div><div v-if="activeSource" class="api-source-actions"><button class="button secondary small" :disabled="codeTemplateLoading" @click="openCodeTemplate">代码模板</button><button class="button secondary small" :disabled="testConfigLoading" @click="openTestConfig">测试配置</button><button class="button secondary small" :disabled="syncingSourceId===activeSource.id || !credential.configured" @click="syncOne(activeSource)">{{ syncingSourceId===activeSource.id ? "同步中…" : "↻ 同步" }}</button></div></header>
+        <header><div class="api-endpoint-heading"><button v-if="sourcePanelCollapsed" class="button secondary small" @click="sourcePanelCollapsed=false">项目列表</button><span><b>{{ activeSource?.apifoxProjectName || activeSource?.projectName || "接口列表" }}</b><small>{{ activeSource ? `更新于 ${formatTime(activeSource.lastSyncedAt)}` : '请选择项目' }}</small></span></div><div v-if="activeSource" class="api-source-actions"><button class="button secondary small" :disabled="syncingSourceId===activeSource.id || !credential.configured" @click="syncOne(activeSource)">{{ syncingSourceId===activeSource.id ? "同步中…" : "↻ 同步" }}</button></div></header>
         <div v-if="activeSource?.lastError" class="api-cache-warning"><b>{{ activeSource.syncStatus==='stale' ? '正在使用上次成功缓存' : '同步未完成' }}</b><span>{{ activeSource.lastError }}</span></div>
-        <div class="api-filters"><label>⌕<input v-model="query" placeholder="搜索名称、路径、描述或 Operation ID"></label><select v-model="method"><option value="">全部方法</option><option v-for="item in methods" :key="item">{{ item }}</option></select><select v-model="tag"><option value="">全部目录 / 标签</option><option v-for="item in tags" :key="item">{{ item }}</option></select></div>
+        <div class="api-filters"><label>⌕<input v-model="query" placeholder="搜索名称、路径、描述或 Operation ID"></label></div>
         <div class="api-endpoint-list" aria-label="接口目录树">
           <template v-for="row in treeRows" :key="row.key">
-            <div v-if="row.kind==='group'" class="api-tree-group" :style="{paddingLeft:`${12+row.depth*16}px`}"><button class="api-tree-toggle" :aria-expanded="row.expanded" @click="toggleTreeGroup(row)"><span class="api-tree-chevron">{{ row.expanded ? '⌄' : '›' }}</span><span class="api-tree-folder">▱</span><b>{{ row.name }}</b><em>{{ row.count }}</em></button><button class="api-tag-export-trigger" title="导出整个标签的 OpenAPI URL" :disabled="tagExportLoading" @click="openTagExport(row)">URL</button></div>
-            <button v-else class="api-tree-endpoint" :class="{active:row.item?.id===selected?.id}" :style="{paddingLeft:`${15+row.depth*16}px`}" @click="selectTreeEndpoint(row.item)"><span class="api-method" :class="row.item?.method.toLowerCase()">{{ row.item?.method }}</span><span class="api-tree-copy"><b>{{ row.item?.title }}</b><code>{{ row.item?.path }}</code></span><span v-if="row.item?.favorite" class="api-favorite-mark" title="已收藏">★</span><em v-if="row.item?.deprecated">弃用</em></button>
+            <div v-if="row.kind==='group'" class="api-tree-group" :style="{paddingLeft:`${12+row.depth*16}px`}"><button class="api-tree-toggle" :aria-expanded="row.expanded" @click="toggleTreeGroup(row)"><span class="api-tree-chevron">{{ row.expanded ? '⌄' : '›' }}</span><b>{{ row.name }}</b><em>{{ row.count }}</em></button><button class="api-tag-export-trigger" title="导出整个标签的 OpenAPI URL" :disabled="tagExportLoading" @click="openTagExport(row)">URL</button></div>
+            <button v-else class="api-tree-endpoint" :class="{active:row.item?.id===selected?.id}" :style="{paddingLeft:`${15+row.depth*16}px`}" @click="selectTreeEndpoint(row.item)"><span class="api-method" :class="row.item?.method.toLowerCase()">{{ row.item?.method }}</span><span class="api-tree-copy"><b>{{ row.item?.title }}</b><code>{{ row.item?.path }}</code></span><em v-if="row.item?.deprecated">弃用</em></button>
           </template>
           <p v-if="activeSource && !filtered.length">{{ endpoints.length ? "没有符合筛选条件的接口。" : "尚无缓存，请点击同步。" }}</p><p v-if="!activeSource">先从左侧选择或关联一个项目。</p>
         </div>
@@ -409,7 +384,7 @@ onMounted(load);
       <article class="api-detail-panel">
         <div v-if="detailLoading" class="api-detail-loading" role="status"><i></i><b>正在加载接口详情</b><span>请求参数、请求体和响应定义加载完成后会显示在这里。</span></div>
         <template v-else-if="selected">
-          <header><div><span class="api-method large" :class="selected.method.toLowerCase()">{{ selected.method }}</span><div><h2>{{ selected.title }}</h2><button class="api-path-copy" title="复制接口路径" @click="copyPath"><code>{{ selected.path }}</code><span>复制</span></button></div></div><div><button class="button secondary small" @click="toggleFavorite">{{ selected.favorite ? "★ 已收藏" : "☆ 收藏" }}</button><button class="button secondary small" :disabled="testingEndpointId===selected.id || testPreviewLoading" @click="runEndpointTest">{{ testPreviewLoading ? "生成预览…" : testingEndpointId===selected.id ? "测试中…" : "接口测试" }}</button><button class="button secondary small" @click="copyRequestCode">复制接口代码</button><button class="button primary small" @click="copyMarkdown">复制 Markdown</button></div></header>
+          <header><div><span class="api-method large" :class="selected.method.toLowerCase()">{{ selected.method }}</span><div><h2>{{ selected.title }}</h2><button class="api-path-copy" title="复制接口路径" @click="copyPath"><code>{{ selected.path }}</code><span>复制</span></button></div></div><div><button class="button secondary small" :disabled="testingEndpointId===selected.id || testPreviewLoading" @click="runEndpointTest">{{ testPreviewLoading ? "生成预览…" : testingEndpointId===selected.id ? "测试中…" : "接口测试" }}</button><button class="button secondary small" @click="copyRequestCode">复制接口代码</button><button class="button primary small" @click="copyMarkdown">复制 Markdown</button></div></header>
           <div class="api-detail-scroll">
             <section class="api-summary"><p>{{ selected.description || "暂无接口说明。" }}</p><div><span v-for="item in selected.tags" :key="item">{{ item }}</span><span v-if="selected.operationId">{{ selected.operationId }}</span><span v-if="selected.deprecated" class="danger">已弃用</span></div></section>
             <section v-if="testResult" class="api-test-result" :class="{success:testResult.success,error:!testResult.success}"><header><div><h3>接口测试结果</h3><p><b>HTTP {{ testResult.status }}</b> {{ testResult.statusText }} · {{ testResult.elapsedMs }} ms</p></div><span>{{ testResult.method }} {{ testResult.url }}</span></header><div class="api-test-result-grid"><article><b>自动生成的请求数据</b><pre>{{ pretty(testResult.requestData) }}</pre></article><article><b>实际响应数据</b><small v-if="testResult.contentType">{{ testResult.contentType }}</small><pre>{{ testResult.responseData===null ? '（空响应）' : pretty(testResult.responseData) }}</pre><p v-if="testResult.truncated">响应超过 1 MB，当前只展示前 1 MB。</p></article></div></section>
@@ -420,14 +395,12 @@ onMounted(load);
             <section v-if="warnings.length" class="api-warnings"><h3>解析提示</h3><p v-for="item in warnings" :key="item">{{ item }}</p></section>
           </div>
         </template>
-        <div v-else class="api-detail-empty"><b>选择一个接口查看详情</b><p>可收藏接口、复制路径或使用自动生成的数据执行接口测试。</p></div>
+        <div v-else class="api-detail-empty"><b>选择一个接口查看详情</b><p>可复制接口路径、请求代码，或使用自动生成的数据执行接口测试。</p></div>
       </article>
     </section>
 
-    <div v-if="configOpen" class="editor-backdrop" @click.self="configOpen=false"><aside class="task-editor api-source-editor"><header><div><h2>{{ config.id ? '编辑 Apifox 关联' : '关联 Apifox 项目' }}</h2><p>一个规范项目只关联一个 Apifox 项目；不同规范项目可以填写同一个 Apifox 项目 ID</p></div><button class="icon-button" @click="configOpen=false">×</button></header><label>规范项目<select v-model="config.projectProfileId" :disabled="Boolean(config.id)"><option value="">请选择项目</option><option v-for="item in configurableProfiles" :key="item.id" :value="item.id">{{ item.displayName }} · {{ item.repositoryPath || '未关联仓库' }}</option></select></label><label>Apifox 项目 ID<input v-model="config.externalProjectId" autocomplete="off" placeholder="在 Apifox 项目设置 → 基本设置中复制"></label><p>这里不保存令牌。全局令牌请在“设置 → 外部服务”中统一管理。</p><footer><span></span><button class="button secondary" @click="configOpen=false">取消</button><button class="button primary" :disabled="loading || !config.projectProfileId || !config.externalProjectId.trim()" @click="persistSource">保存关联</button></footer></aside></div>
-    <div v-if="testConfigOpen" class="editor-backdrop" @click.self="testConfigOpen=false"><aside class="task-editor api-test-config-editor"><header><div><h2>接口测试配置</h2><p>{{ activeSource?.projectName }} 的真实请求配置</p></div><button class="icon-button" @click="testConfigOpen=false">×</button></header><label>请求基地址<input v-model="testConfig.baseUrl" autocomplete="off" placeholder="例如 https://api.example.com；留空使用 OpenAPI servers[0]"></label><label>Token 请求头名称<input v-model="testConfig.tokenHeader" autocomplete="off" placeholder="例如 Authorization 或 hlzt-token"></label><label>Token 值<input v-model="testConfig.token" type="password" autocomplete="new-password" :placeholder="testTokenConfigured ? '已保存；留空不会覆盖' : '例如 Bearer xxx 或原始 Token'"></label><p>Token {{ testTokenConfigured ? '已保存到 Windows 凭据库' : '尚未配置' }}，不会写入数据库、日志或响应预览。接口测试会按文档字段类型和名称生成临时数据，并发往上面的真实地址。</p><footer><button v-if="testTokenConfigured" class="text-button danger-text" :disabled="testConfigLoading" @click="clearTestToken">清除 Token</button><span v-else></span><button class="button secondary" @click="testConfigOpen=false">取消</button><button class="button primary" :disabled="testConfigLoading || !testConfig.tokenHeader.trim()" @click="persistTestConfig">{{ testConfigLoading ? '保存中…' : '保存配置' }}</button></footer></aside></div>
+    <div v-if="configOpen" class="editor-backdrop" @click.self="configOpen=false"><aside class="task-editor api-project-settings-editor"><header><div><h2>项目设置</h2><p>统一管理 Apifox 关联、接口测试和复制代码配置</p></div><button class="icon-button" @click="configOpen=false">×</button></header><div class="api-project-settings-scroll"><section><h3>Apifox 项目</h3><div class="api-credential-status"><span>API 令牌：{{ credential.configured ? credential.source : '未配置' }}</span><RouterLink class="text-button" to="/settings">前往全局设置</RouterLink></div><label>Apifox 项目名称<input v-model="config.apifoxProjectName" autocomplete="off" placeholder="例如 client 接口项目"></label><label>Apifox 项目 ID<input v-model="config.externalProjectId" autocomplete="off" placeholder="在 Apifox 项目设置 → 基本设置中复制"></label><div class="api-profile-picker"><b>关联规范项目（可多选）</b><label v-for="item in profiles" :key="item.id" :class="{disabled:profileUnavailable(item.id)}"><input v-model="config.projectProfileIds" type="checkbox" :value="item.id" :disabled="profileSelectionLocked(item.id)"><span><strong>{{ item.displayName }}</strong><small>{{ item.repositoryPath || '未关联仓库' }}</small></span><em v-if="profileUnavailable(item.id)">已关联</em><em v-else-if="config.id && activeSource?.projectProfileId===item.id">当前关联</em></label><p v-if="!profiles.length">暂无规范项目，请先在项目资产中建立项目身份。</p></div></section><section><h3>接口测试</h3><label>请求基地址<input v-model="testConfig.baseUrl" autocomplete="off" placeholder="例如 https://api.example.com；留空使用 OpenAPI servers[0]"></label><label>Token 请求头名称<input v-model="testConfig.tokenHeader" autocomplete="off" placeholder="例如 Authorization 或 hlzt-token"></label><label>Token 值<input v-model="testConfig.token" type="password" autocomplete="new-password" :placeholder="testTokenConfigured ? '已保存；留空不会覆盖' : '例如 Bearer xxx 或原始 Token'"></label><p>Token {{ testTokenConfigured ? '已保存到 Windows 凭据库' : '尚未配置' }}，不会写入数据库、日志或请求预览。一次关联多个规范项目时，这里的配置会同时应用；已保存的 Token 不会自动复制到新增关联，如需共用请重新输入。</p><button v-if="testTokenConfigured" class="text-button danger-text api-clear-token" :disabled="settingsLoading" @click="clearTestToken">清除当前项目 Token</button></section><section><h3>复制代码模板</h3><label>请求客户端<select v-model="codeTemplate.client"><option value="request">request 封装</option><option value="axios">axios</option><option value="uni-request">uni.request</option></select></label><label>函数名前缀<input v-model="codeTemplate.functionPrefix" autocomplete="off" placeholder="例如 _ 或 api"></label><label class="api-template-check"><input v-model="codeTemplate.typescript" type="checkbox"><span>生成 TypeScript 参数类型</span></label><label v-if="codeTemplate.client!=='uni-request'" class="api-template-check"><input v-model="codeTemplate.includeImport" type="checkbox"><span>在代码顶部包含 import</span></label><label v-if="codeTemplate.includeImport && codeTemplate.client!=='uni-request'">导入路径<input v-model="codeTemplate.importPath" autocomplete="off" :placeholder="codeTemplate.client==='axios' ? 'axios' : '@/utils/request'"></label><p>GET、DELETE 使用 params，POST、PUT、PATCH 使用 data；路径参数会自动加入函数参数。</p></section></div><footer><button v-if="activeSource && config.id===activeSource.id" class="text-button danger-text" :disabled="settingsLoading" @click="removeSource(activeSource)">移除当前关联</button><span v-else></span><button class="button secondary" @click="configOpen=false">取消</button><button class="button primary" :disabled="settingsLoading || !config.projectProfileIds.length || !config.externalProjectId.trim() || !config.apifoxProjectName.trim() || !testConfig.tokenHeader.trim()" @click="persistProjectSettings">{{ settingsLoading ? '保存中…' : '保存项目设置' }}</button></footer></aside></div>
     <div v-if="testPreviewOpen && testPreview" class="editor-backdrop" @click.self="testPreviewOpen=false"><aside class="task-editor api-test-preview-editor"><header><div><h2>确认接口测试请求</h2><p>{{ testPreview.method }} 请求尚未发送，请先核对内容</p></div><button class="icon-button" @click="testPreviewOpen=false">×</button></header><div class="api-test-preview-scroll"><div class="api-preview-warning" :class="{danger:testPreview.requiresConfirmation}"><b>{{ testPreview.requiresConfirmation ? '可能修改真实数据' : '发送前确认' }}</b><span>{{ testPreview.warning }}</span></div><div v-if="testPreviewError" class="api-preview-error">{{ testPreviewError }}</div><label>最终请求地址<input v-model="testPreviewUrl" autocomplete="off"></label><section><b>请求头</b><div class="api-preview-headers"><span v-for="(value,name) in testPreview.headers" :key="name"><code>{{ name }}</code><em>{{ value }}</em></span><small v-if="!Object.keys(testPreview.headers).length">没有额外请求头</small></div></section><label v-if="testPreview.body!==null">请求体 JSON<textarea v-model="testPreviewBody" rows="10" spellcheck="false"></textarea></label><details><summary>查看自动生成的请求数据</summary><pre>{{ pretty(testPreview.requestData) }}</pre></details><label v-if="testPreview.requiresConfirmation" class="api-danger-confirm"><input v-model="testPreviewConfirmed" type="checkbox"><span>我已核对地址和请求体，并确认该请求可能修改真实业务数据</span></label></div><footer><span></span><button class="button secondary" @click="testPreviewOpen=false">取消</button><button class="button primary" :disabled="testingEndpointId===testPreview.endpointId || !testPreviewUrl.trim() || (testPreview.requiresConfirmation && !testPreviewConfirmed)" @click="sendEndpointTest">{{ testingEndpointId===testPreview.endpointId ? '发送中…' : `发送 ${testPreview.method} 请求` }}</button></footer></aside></div>
-    <div v-if="codeTemplateOpen" class="editor-backdrop" @click.self="codeTemplateOpen=false"><aside class="task-editor api-code-template-editor"><header><div><h2>项目代码模板</h2><p>{{ activeSource?.projectName }} 复制接口代码时使用</p></div><button class="icon-button" @click="codeTemplateOpen=false">×</button></header><label>请求客户端<select v-model="codeTemplate.client"><option value="request">request 封装</option><option value="axios">axios</option><option value="uni-request">uni.request</option></select></label><label>函数名前缀<input v-model="codeTemplate.functionPrefix" autocomplete="off" placeholder="例如 _ 或 api"></label><label class="api-template-check"><input v-model="codeTemplate.typescript" type="checkbox"><span>生成 TypeScript 参数类型</span></label><label v-if="codeTemplate.client!=='uni-request'" class="api-template-check"><input v-model="codeTemplate.includeImport" type="checkbox"><span>在代码顶部包含 import</span></label><label v-if="codeTemplate.includeImport && codeTemplate.client!=='uni-request'">导入路径<input v-model="codeTemplate.importPath" autocomplete="off" :placeholder="codeTemplate.client==='axios' ? 'axios' : '@/utils/request'"></label><p>配置只对当前规范项目生效。GET、DELETE 使用 params，POST、PUT、PATCH 使用 data；路径参数会自动加入函数参数。</p><footer><span></span><button class="button secondary" @click="codeTemplateOpen=false">取消</button><button class="button primary" :disabled="codeTemplateLoading" @click="persistCodeTemplate">{{ codeTemplateLoading ? '保存中…' : '保存模板' }}</button></footer></aside></div>
     <div v-if="tagExportOpen" class="editor-backdrop" @click.self="tagExportOpen=false"><aside class="task-editor api-tag-export-editor"><header><div><h2>标签 OpenAPI 导出</h2><p>“{{ tagExport.tagPath }}”及其子标签，共 {{ tagExport.endpointCount }} 个接口</p></div><button class="icon-button" @click="tagExportOpen=false">×</button></header><label>OpenAPI 版本<select v-model="tagExportVersion"><option value="3.0">OpenAPI 3.0</option><option value="3.1">OpenAPI 3.1</option></select></label><label>工作台本地 URL<input :value="tagExportUrl" readonly></label><p>该地址由工作台在 127.0.0.1 上只读提供，不依赖 Apifox 运行；工作台退出后地址会暂时不可访问。导出会保留公共 Schema 和鉴权定义，并遮盖敏感示例值。</p><footer><span></span><button class="button secondary" @click="openTagExportUrl">打开 URL</button><button class="button primary" @click="copyTagExportUrl">复制 URL</button></footer></aside></div>
   </div>
 </template>
@@ -435,19 +408,18 @@ onMounted(load);
 <style scoped>
 .api-docs-view{height:calc(100vh - 118px);min-height:600px;display:flex;flex-direction:column;overflow:hidden}.api-docs-view>.page-header{flex:0 0 72px}
 .api-onboarding{margin-bottom:12px;padding:18px;display:flex;align-items:center;gap:14px}.api-onboarding p{flex:1;margin:0;color:var(--muted)}
-.api-docs-layout{flex:1;min-height:0;display:grid;grid-template-columns:220px 340px minmax(0,1fr);overflow:hidden}.api-source-panel,.api-endpoint-panel,.api-detail-panel{min-width:0;min-height:0;display:flex;flex-direction:column}.api-source-panel,.api-endpoint-panel{border-right:1px solid var(--line)}.api-source-panel>header,.api-endpoint-panel>header{min-height:67px;padding:11px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.api-source-panel header div,.api-endpoint-panel header div{display:grid;gap:5px}.api-source-panel header small,.api-endpoint-panel header small{color:var(--muted);font-size:10px}.api-source-list,.api-endpoint-list{min-height:0;overflow-y:auto;overflow-x:hidden;flex:1;scrollbar-gutter:stable}.api-source-list>button{width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;color:inherit;padding:12px;display:flex;text-align:left;align-items:center;gap:8px}.api-source-list>button:hover,.api-source-list>button.active{background:var(--primary-soft)}.api-source-list button span{min-width:0;flex:1;display:grid;gap:5px}.api-source-list button small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}.api-source-list button em{font-style:normal;font-size:10px;color:var(--muted)}.api-source-list button em.ready{color:var(--success)}.api-source-list button em.stale,.api-source-list button em.error{color:var(--danger)}.api-source-list>p,.api-endpoint-list>p{padding:24px 14px;color:var(--muted);line-height:1.7}.api-source-panel>footer{padding:10px;border-top:1px solid var(--line);display:flex;justify-content:space-between}
-.api-cache-warning{margin:10px 12px 0;padding:9px;border-radius:7px;background:color-mix(in srgb,var(--warning) 10%,var(--surface));color:var(--warning);display:grid;gap:4px;font-size:10px}.api-filters{padding:10px 12px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,.72fr) minmax(0,1.28fr);gap:7px}.api-filters label{grid-column:1/3;height:37px;border:1px solid var(--line);border-radius:7px;display:flex;align-items:center;gap:7px;padding:0 9px;color:var(--muted)}.api-filters input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text)}.api-filters select{min-width:0;height:34px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--text);font-size:11px;padding:0 8px}.api-tree-group,.api-tree-endpoint{width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;color:inherit;text-align:left}.api-tree-group{min-height:43px;display:flex;align-items:center;gap:7px;padding-top:8px;padding-right:12px;padding-bottom:8px}.api-tree-group:hover{background:color-mix(in srgb,var(--primary) 6%,transparent)}.api-tree-chevron{width:12px;color:var(--muted);font-size:15px;text-align:center}.api-tree-folder{color:var(--muted);font-size:17px}.api-tree-group b{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.api-tree-group em{color:var(--muted);font-size:11px;font-style:normal}.api-tree-endpoint{min-height:62px;display:flex;align-items:flex-start;gap:9px;padding-top:9px;padding-right:12px;padding-bottom:9px}.api-tree-endpoint:hover,.api-tree-endpoint.active{background:var(--primary-soft)}.api-tree-copy{min-width:0;flex:1;display:grid;gap:5px}.api-tree-copy b,.api-tree-copy code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.api-tree-copy b{font-size:12px}.api-tree-copy code{color:var(--muted);font-size:11px}.api-tree-endpoint>em{font-size:9px;color:var(--danger);font-style:normal}
+.api-docs-layout{flex:1;min-height:0;display:grid;grid-template-columns:220px 340px minmax(0,1fr);overflow:hidden;transition:grid-template-columns .18s ease}.api-docs-layout.source-collapsed{grid-template-columns:0 340px minmax(0,1fr)}.api-source-panel,.api-endpoint-panel,.api-detail-panel{min-width:0;min-height:0;display:flex;flex-direction:column}.api-source-panel{overflow:hidden}.source-collapsed .api-source-panel{visibility:hidden;border-right:0}.api-source-panel,.api-endpoint-panel{border-right:1px solid var(--line)}.api-source-panel>header,.api-endpoint-panel>header{min-height:67px;padding:11px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.api-source-panel header div,.api-endpoint-panel header div{display:grid;gap:5px}.api-source-panel header small,.api-endpoint-panel header small{color:var(--muted);font-size:10px}.api-endpoint-heading{display:flex!important;align-items:center;gap:9px!important}.api-endpoint-heading>span{display:grid;gap:5px}.api-source-list,.api-endpoint-list{min-height:0;overflow-y:auto;overflow-x:hidden;flex:1;scrollbar-gutter:stable}.api-source-list>button{width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;color:inherit;padding:12px;display:flex;text-align:left;align-items:center;gap:8px}.api-source-list>button:hover,.api-source-list>button.active{background:var(--primary-soft)}.api-source-list button span{min-width:0;flex:1;display:grid;gap:5px}.api-source-list button small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}.api-source-list button em{font-style:normal;font-size:10px;color:var(--muted)}.api-source-list button em.ready{color:var(--success)}.api-source-list button em.stale,.api-source-list button em.error{color:var(--danger)}.api-source-list>p,.api-endpoint-list>p{padding:24px 14px;color:var(--muted);line-height:1.7}
+.api-cache-warning{margin:10px 12px 0;padding:9px;border-radius:7px;background:color-mix(in srgb,var(--warning) 10%,var(--surface));color:var(--warning);display:grid;gap:4px;font-size:10px}.api-filters{padding:10px 12px;border-bottom:1px solid var(--line)}.api-filters label{height:37px;border:1px solid var(--line);border-radius:7px;display:flex;align-items:center;gap:7px;padding:0 9px;color:var(--muted)}.api-filters input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--text)}.api-tree-group,.api-tree-endpoint{width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;color:inherit;text-align:left}.api-tree-group{min-height:43px;display:flex;align-items:center;gap:7px;padding-top:8px;padding-right:12px;padding-bottom:8px}.api-tree-group:hover{background:color-mix(in srgb,var(--primary) 6%,transparent)}.api-tree-chevron{width:12px;color:var(--muted);font-size:15px;text-align:center}.api-tree-group b{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.api-tree-group em{color:var(--muted);font-size:11px;font-style:normal}.api-tree-endpoint{min-height:62px;display:flex;align-items:flex-start;gap:9px;padding-top:9px;padding-right:12px;padding-bottom:9px}.api-tree-endpoint:hover,.api-tree-endpoint.active{background:var(--primary-soft)}.api-tree-copy{min-width:0;flex:1;display:grid;gap:5px}.api-tree-copy b,.api-tree-copy code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.api-tree-copy b{font-size:12px}.api-tree-copy code{color:var(--muted);font-size:11px}.api-tree-endpoint>em{font-size:9px;color:var(--danger);font-style:normal}
 .api-method{min-width:47px;padding:4px 5px;border-radius:5px;background:var(--surface-2);color:var(--muted);font-size:8px;font-weight:800;text-align:center}.api-method.get{background:color-mix(in srgb,#16845b 13%,var(--surface));color:#16845b}.api-method.post{background:color-mix(in srgb,#2563eb 13%,var(--surface));color:#2563eb}.api-method.put,.api-method.patch{background:color-mix(in srgb,#b7791f 14%,var(--surface));color:#b7791f}.api-method.delete{background:color-mix(in srgb,var(--danger) 13%,var(--surface));color:var(--danger)}.api-method.large{font-size:10px;padding:7px;min-width:56px}
 .api-detail-panel>header{min-height:82px;padding:12px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.api-detail-panel>header>div{display:flex;align-items:center;gap:10px}.api-detail-panel h2{margin:0 0 6px;font-size:19px}.api-detail-panel header code{color:var(--muted);font-size:13px}.api-detail-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:18px;font-size:13px;line-height:1.65;scrollbar-gutter:stable}.api-detail-scroll>section{margin-bottom:24px}.api-detail-scroll h3{font-size:15px;margin:0 0 11px}.api-detail-scroll h3 small{color:var(--danger);font-size:11px}.api-summary p{font-size:14px;line-height:1.75}.api-summary div{display:flex;gap:7px;flex-wrap:wrap}.api-summary span{padding:5px 8px;border-radius:5px;background:var(--surface-2);font-size:11px;color:var(--muted)}.api-summary span.danger{color:var(--danger)}.api-table-wrap{max-width:100%;overflow:auto;border:1px solid var(--line);border-radius:7px}.api-table-wrap table{width:100%;border-collapse:collapse;font-size:12px}.api-table-wrap th,.api-table-wrap td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;line-height:1.55}.api-table-wrap th{position:sticky;top:0;background:var(--surface-2);color:var(--muted);white-space:nowrap}.api-table-wrap code{font-size:12px}.api-table-wrap pre{margin:0;max-width:260px;white-space:pre-wrap;word-break:break-all;font:inherit}.api-schema-card{display:grid;gap:9px;margin:10px 0}.api-schema-card details{border:1px solid var(--line);border-radius:7px;padding:10px}.api-schema-card details pre{max-height:360px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.65}.api-response-card{border:1px solid var(--line);border-radius:8px;margin:10px 0;padding:12px}.api-response-card>header{display:flex;gap:10px;margin-bottom:9px}.api-response-card>header b{color:var(--primary)}.api-response-card>header span{color:var(--muted)}.api-warnings{padding:12px;border-radius:8px;background:color-mix(in srgb,var(--warning) 10%,var(--surface))}.api-warnings p{color:var(--warning)}.api-detail-empty{margin:auto;text-align:center;color:var(--muted)}.api-detail-empty b{color:var(--text);font-size:16px}.api-source-editor>p{padding:0 18px;color:var(--muted)}
 .api-detail-empty{padding:20px}
 .api-source-actions{display:flex!important;align-items:center;gap:6px}
 .api-tree-toggle{min-width:0;flex:1;display:flex;align-items:center;gap:7px;border:0;background:transparent;color:inherit;text-align:left;padding:0}.api-tree-toggle b{min-width:0;flex:1}.api-tag-export-trigger{flex:0 0 auto;border:1px solid var(--line);border-radius:5px;background:var(--surface-2);color:var(--muted);font-size:9px;padding:4px 6px}.api-tag-export-trigger:hover{border-color:var(--primary);color:var(--primary)}
-.api-favorite-mark{color:#f5b942;font-size:13px;line-height:20px}
 .api-path-copy{display:flex;align-items:center;gap:7px;border:0;background:transparent;padding:0;color:var(--muted);cursor:pointer}.api-path-copy:hover code,.api-path-copy:hover span{color:var(--primary)}.api-path-copy span{font-size:10px}
 .api-detail-loading{margin:auto;display:grid;justify-items:center;gap:10px;padding:28px;text-align:center;color:var(--muted)}.api-detail-loading i{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--primary);border-radius:50%;animation:api-detail-spin .8s linear infinite}.api-detail-loading b{color:var(--text);font-size:15px}.api-detail-loading span{font-size:12px}@keyframes api-detail-spin{to{transform:rotate(360deg)}}
 .api-test-result{border:1px solid var(--line);border-radius:9px;padding:14px;background:var(--surface-2)}.api-test-result.success{border-color:color-mix(in srgb,var(--success) 45%,var(--line))}.api-test-result.error{border-color:color-mix(in srgb,var(--danger) 45%,var(--line))}.api-test-result>header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}.api-test-result>header h3,.api-test-result>header p{margin:0}.api-test-result>header span{max-width:55%;color:var(--muted);font-size:11px;word-break:break-all}.api-test-result-grid{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:10px}.api-test-result-grid article{min-width:0;border:1px solid var(--line);border-radius:7px;padding:10px;background:var(--surface)}.api-test-result-grid article>b{display:block;margin-bottom:7px}.api-test-result-grid small{display:block;color:var(--muted);margin-bottom:7px}.api-test-result-grid pre{max-height:300px;overflow:auto;margin:0;padding:10px;border-radius:6px;background:var(--surface-2);white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.6}.api-test-result-grid p{color:var(--warning);font-size:11px}
-.api-test-config-editor>p,.api-tag-export-editor>p,.api-code-template-editor>p{padding:0 18px;color:var(--muted);line-height:1.6}
+.api-tag-export-editor>p{padding:0 18px;color:var(--muted);line-height:1.6}.api-project-settings-editor{width:min(760px,calc(100vw - 40px));max-height:calc(100vh - 48px);overflow:hidden}.api-project-settings-scroll{min-height:0;overflow-y:auto;padding:16px 18px;display:grid;gap:16px}.api-project-settings-scroll>section{display:grid;gap:12px;padding:15px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2)}.api-project-settings-scroll h3{margin:0;font-size:15px}.api-project-settings-scroll section>label{padding:0}.api-project-settings-scroll section>p{margin:0;color:var(--muted);font-size:11px;line-height:1.6}.api-credential-status{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 11px;border-radius:7px;background:var(--surface);color:var(--muted);font-size:12px}.api-profile-picker{display:grid;gap:7px}.api-profile-picker>b{font-size:12px}.api-profile-picker>label{display:flex!important;grid-template-columns:none!important;align-items:center!important;gap:9px!important;padding:9px 10px!important;border:1px solid var(--line);border-radius:7px;background:var(--surface)}.api-profile-picker>label.disabled{opacity:.55}.api-profile-picker input{width:auto!important;flex:0 0 auto}.api-profile-picker span{min-width:0;flex:1;display:grid;gap:3px}.api-profile-picker small{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.api-profile-picker em{font-style:normal;color:var(--muted);font-size:10px}.api-profile-picker p{margin:4px 0;color:var(--muted)}.api-clear-token{justify-self:start}
 .api-test-preview-editor{width:min(720px,calc(100vw - 40px));max-height:calc(100vh - 56px);overflow:hidden}.api-test-preview-scroll{min-height:0;overflow-y:auto;padding:16px 18px;display:grid;gap:15px}.api-test-preview-scroll>label{padding:0}.api-test-preview-scroll textarea{width:100%;min-height:170px;resize:vertical;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--text);padding:10px;font:12px/1.6 Consolas,monospace}.api-preview-warning{display:grid;gap:5px;padding:11px;border:1px solid color-mix(in srgb,var(--warning) 45%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--warning) 8%,var(--surface));color:var(--warning)}.api-preview-warning.danger{border-color:color-mix(in srgb,var(--danger) 45%,var(--line));background:color-mix(in srgb,var(--danger) 8%,var(--surface));color:var(--danger)}.api-preview-warning span{font-size:12px;line-height:1.6}.api-test-preview-scroll section{display:grid;gap:8px}.api-preview-headers{display:grid;border:1px solid var(--line);border-radius:7px;overflow:hidden}.api-preview-headers span{display:grid;grid-template-columns:minmax(130px,.5fr) minmax(0,1fr);gap:10px;padding:8px 10px;border-bottom:1px solid var(--line);font-size:12px}.api-preview-headers span:last-child{border-bottom:0}.api-preview-headers em{font-style:normal;color:var(--muted);word-break:break-all}.api-preview-headers small{padding:10px;color:var(--muted)}.api-test-preview-scroll details{border:1px solid var(--line);border-radius:7px;padding:10px}.api-test-preview-scroll details pre{max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px}.api-danger-confirm,.api-template-check{display:flex!important;align-items:flex-start!important;grid-template-columns:none!important;gap:9px!important}.api-danger-confirm{padding:11px!important;border:1px solid color-mix(in srgb,var(--danger) 40%,var(--line));border-radius:7px;color:var(--danger)!important}.api-danger-confirm input,.api-template-check input{width:auto!important;flex:0 0 auto;margin-top:2px}.api-code-template-editor{width:min(560px,calc(100vw - 40px))}.api-tag-export-editor input[readonly]{font-family:Consolas,monospace;color:var(--primary)}
 .api-preview-error{padding:9px 11px;border-radius:7px;background:color-mix(in srgb,var(--danger) 10%,var(--surface));color:var(--danger);font-size:12px}
-@media(max-width:1500px){.api-docs-layout{grid-template-columns:200px 320px minmax(0,1fr)}}
+@media(max-width:1500px){.api-docs-layout{grid-template-columns:200px 320px minmax(0,1fr)}.api-docs-layout.source-collapsed{grid-template-columns:0 320px minmax(0,1fr)}}
 </style>

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 42;
+pub const SCHEMA_VERSION: i64 = 43;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -826,6 +826,7 @@ impl DatabaseState {
                    project_profile_id TEXT NOT NULL UNIQUE,
                    provider TEXT NOT NULL DEFAULT 'apifox',
                    external_project_id TEXT NOT NULL,
+                   apifox_project_name TEXT NOT NULL DEFAULT '',
                    document_title TEXT NOT NULL DEFAULT '',
                    openapi_version TEXT NOT NULL DEFAULT '',
                    sync_status TEXT NOT NULL DEFAULT 'never',
@@ -1094,6 +1095,7 @@ impl DatabaseState {
             "ALTER TABLE commit_plans ADD COLUMN excluded_files_json TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE api_sources ADD COLUMN request_base_url TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE api_sources ADD COLUMN request_token_header TEXT NOT NULL DEFAULT 'Authorization'",
+            "ALTER TABLE api_sources ADD COLUMN apifox_project_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE api_sources ADD COLUMN openapi_document_json TEXT NOT NULL DEFAULT '{}'",
             "ALTER TABLE api_sources ADD COLUMN code_client TEXT NOT NULL DEFAULT 'request'",
             "ALTER TABLE api_sources ADD COLUMN code_function_prefix TEXT NOT NULL DEFAULT '_'",
@@ -1613,6 +1615,7 @@ mod migration_tests {
         for (table, column) in [
             ("api_sources", "request_base_url"),
             ("api_sources", "request_token_header"),
+            ("api_sources", "apifox_project_name"),
             ("api_sources", "openapi_document_json"),
             ("api_sources", "code_client"),
             ("api_sources", "code_function_prefix"),

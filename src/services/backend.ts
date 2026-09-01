@@ -189,6 +189,7 @@ export interface ApiSource {
   projectName: string;
   repositoryPath: string;
   externalProjectId: string;
+  apifoxProjectName: string;
   documentTitle: string;
   openapiVersion: string;
   syncStatus: ApiSyncStatus;
@@ -203,6 +204,13 @@ export interface ApiSourceUpdate {
   id: string;
   projectProfileId: string;
   externalProjectId: string;
+  apifoxProjectName: string;
+}
+
+export interface ApiSourceBatchUpdate {
+  projectProfileIds: string[];
+  externalProjectId: string;
+  apifoxProjectName: string;
 }
 
 export interface ApiEndpointFilter {
@@ -222,7 +230,6 @@ export interface ApiEndpointSummary {
   description: string;
   tags: string[];
   deprecated: boolean;
-  favorite: boolean;
   updatedAt: string;
 }
 
@@ -833,6 +840,8 @@ export interface AiStatus {
   model: string;
 }
 
+export type TranslationDirection = "zh-to-en" | "en-to-zh";
+
 export interface KnowledgeAnswer {
   answer: string;
   sources: Array<{ id: string; title: string; sourceType: string; sourceId?: string }>;
@@ -1394,6 +1403,10 @@ export async function saveApiSource(source: ApiSourceUpdate): Promise<ApiSource>
   return invoke<ApiSource>("save_api_source", { source });
 }
 
+export async function saveApiSources(source: ApiSourceBatchUpdate): Promise<ApiSource[]> {
+  return invoke<ApiSource[]>("save_api_sources", { source });
+}
+
 export async function removeApiSource(sourceId: string): Promise<void> {
   await invoke("remove_api_source", { sourceId });
 }
@@ -1412,10 +1425,6 @@ export async function listApiEndpoints(sourceId: string, filter?: ApiEndpointFil
 
 export async function getApiEndpoint(endpointId: string): Promise<ApiEndpointDetail> {
   return invoke<ApiEndpointDetail>("get_api_endpoint", { endpointId });
-}
-
-export async function setApiEndpointFavorite(endpointId: string, favorite: boolean): Promise<boolean> {
-  return invoke<boolean>("set_api_endpoint_favorite", { endpointId, favorite });
 }
 
 export async function getApiTagExport(sourceId: string, tagPath: string): Promise<ApiTagExport> {
@@ -1824,6 +1833,10 @@ export async function clearDeepSeekKey(): Promise<void> {
 
 export async function testDeepSeek(): Promise<string> {
   return invoke<string>("test_deepseek");
+}
+
+export async function translateText(text: string, direction: TranslationDirection): Promise<string> {
+  return invoke<string>("translate_text", { text, direction });
 }
 
 export async function refineReportWithAi(id: string): Promise<string> {
