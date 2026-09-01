@@ -7,6 +7,7 @@ defineProps<{ name: string }>();
     <template v-if="name === 'home'"><path d="M3.5 10.5 12 3.8l8.5 6.7"/><path d="M5.8 9.3v10.2h12.4V9.3"/><path d="M9.5 19.5v-6h5v6"/></template>
     <template v-else-if="name === 'records'"><rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></template>
     <template v-else-if="name === 'projects'"><path d="M4 7.5h6l1.7 2H20v8.8a2.2 2.2 0 0 1-2.2 2.2H6.2A2.2 2.2 0 0 1 4 18.3z"/><path d="M4 7.5V6.2A2.2 2.2 0 0 1 6.2 4h3.2l1.7 2H18"/></template>
+    <template v-else-if="name === 'api'"><path d="M8 4 3.5 8.5 8 13M16 4l4.5 4.5L16 13M14 2.5 10 15"/><rect x="4" y="17" width="16" height="4" rx="2"/></template>
     <template v-else-if="name === 'calendar'"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M7.5 3v4M16.5 3v4M3.5 9h17M8 13h.01M12 13h.01M16 13h.01M8 17h.01M12 17h.01"/></template>
     <template v-else-if="name === 'reports'"><path d="M6 3.5h9l3 3v14H6z"/><path d="M14.5 3.5V7H18M9 11h6M9 15h6M9 18h4"/></template>
     <template v-else-if="name === 'testing'"><path d="M9 3.5h6M10 3.5v5l-5.3 8.3A2.4 2.4 0 0 0 6.7 20h10.6a2.4 2.4 0 0 0 2-3.2L14 8.5v-5"/><path d="M7.5 15h9"/></template>

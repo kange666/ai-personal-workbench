@@ -103,9 +103,9 @@ async function ask() {
   catch (cause) { error.value = String(cause); }
   finally { aiLoading.value = false; }
 }
-function sourceText(item: KnowledgeItem) { return item.sourceType === "conversation" ? "Codex 对话" : item.sourceType === "report" ? "工作报告" : "人工记录"; }
+function sourceText(item: KnowledgeItem) { return item.sourceType === "conversation" ? "Codex 对话" : item.sourceType === "report" ? "工作报告" : item.sourceType === "api" ? "接口文档" : "人工记录"; }
 function statusText(item: KnowledgeItem) { return item.id.startsWith("auto:") ? "自动总结" : item.confirmed ? "已确认" : "AI 草稿"; }
-function openSource(item: KnowledgeItem) { if (item.sourceType === "conversation" && item.sourceId) void router.push(`/tokens?conversation=${item.sourceId}`); else if (item.sourceType === "report" && item.sourceId) void router.push(`/reports?report=${item.sourceId}`); }
+function openSource(item: KnowledgeItem) { if (item.sourceType === "conversation" && item.sourceId) void router.push(`/tokens?conversation=${item.sourceId}`); else if (item.sourceType === "report" && item.sourceId) void router.push(`/reports?report=${item.sourceId}`); else if (item.sourceType === "api" && item.sourceId) void router.push(`/api-docs?endpoint=${item.sourceId}`); }
 watch([() => route.query.item, () => items.value.length], () => { const id = String(route.query.item || ""); if (items.value.some(item => item.id === id)) highlightedId.value = id; }, { immediate: true });
 onMounted(() => { void refresh(); });
 </script>

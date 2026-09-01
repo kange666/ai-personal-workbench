@@ -1056,6 +1056,13 @@ pub fn list_knowledge(
 #[tauri::command]
 pub fn save_knowledge(
     state: tauri::State<'_, DatabaseState>,
+    item: KnowledgeItem,
+) -> Result<KnowledgeItem, String> {
+    save_knowledge_for_state(&state, item)
+}
+
+pub fn save_knowledge_for_state(
+    state: &DatabaseState,
     mut item: KnowledgeItem,
 ) -> Result<KnowledgeItem, String> {
     if item.title.trim().is_empty() || item.content.trim().is_empty() {

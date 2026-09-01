@@ -1,4 +1,5 @@
 mod ai;
+mod apifox;
 mod audit;
 mod capture;
 mod codex;
@@ -459,6 +460,18 @@ pub fn run() {
             database::project_token_metrics,
             database::model_token_metrics,
             database::search_workspace,
+            apifox::apifox_credential_status,
+            apifox::save_apifox_token,
+            apifox::clear_apifox_token,
+            apifox::list_api_sources,
+            apifox::save_api_source,
+            apifox::remove_api_source,
+            apifox::sync_api_source,
+            apifox::sync_all_api_sources,
+            apifox::list_api_endpoints,
+            apifox::get_api_endpoint,
+            apifox::render_api_endpoint_markdown,
+            apifox::save_api_endpoint_to_knowledge,
             content::list_content_ideas,
             content::generate_daily_content,
             content::update_content_status,

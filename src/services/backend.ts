@@ -176,6 +176,77 @@ export interface ProjectProfileUpdate {
   category: string;
 }
 
+export interface ApifoxCredentialStatus {
+  configured: boolean;
+  source: string;
+}
+
+export type ApiSyncStatus = "never" | "syncing" | "ready" | "stale" | "error";
+
+export interface ApiSource {
+  id: string;
+  projectProfileId: string;
+  projectName: string;
+  repositoryPath: string;
+  externalProjectId: string;
+  documentTitle: string;
+  openapiVersion: string;
+  syncStatus: ApiSyncStatus;
+  endpointCount: number;
+  lastSyncedAt?: string;
+  lastError: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApiSourceUpdate {
+  id: string;
+  projectProfileId: string;
+  externalProjectId: string;
+}
+
+export interface ApiEndpointFilter {
+  query: string;
+  method: string;
+  tag: string;
+  deprecated?: boolean;
+}
+
+export interface ApiEndpointSummary {
+  id: string;
+  sourceId: string;
+  operationId: string;
+  method: string;
+  path: string;
+  title: string;
+  description: string;
+  tags: string[];
+  deprecated: boolean;
+  updatedAt: string;
+}
+
+export interface ApiEndpointDetail extends ApiEndpointSummary {
+  projectProfileId: string;
+  projectName: string;
+  repositoryPath: string;
+  documentTitle: string;
+  openapiVersion: string;
+  lastSyncedAt?: string;
+  document: Record<string, unknown>;
+}
+
+export interface ApiSyncSummary {
+  sourceId: string;
+  projectName: string;
+  status: ApiSyncStatus;
+  added: number;
+  updated: number;
+  removed: number;
+  total: number;
+  syncedAt?: string;
+  error: string;
+}
+
 export interface NotificationSyncSummary {
   filesScanned: number;
   notificationsCreated: number;
@@ -623,7 +694,7 @@ export interface DailyActivity {
 
 export interface WorkspaceSearchResult {
   id: string;
-  kind: "任务" | "Codex 对话" | "报告" | "知识" | "内容";
+  kind: "任务" | "Codex 对话" | "报告" | "知识" | "内容" | "接口";
   title: string;
   subtitle: string;
   date?: string;
@@ -675,7 +746,7 @@ export interface KnowledgeItem {
   title: string;
   content: string;
   project?: string;
-  sourceType?: "manual" | "conversation" | "report";
+  sourceType?: "manual" | "conversation" | "report" | "api";
   sourceId?: string;
   tags: string;
   confirmed: boolean;
@@ -1237,6 +1308,54 @@ export async function listProjectProfiles(): Promise<ProjectProfile[]> {
 
 export async function saveProjectProfile(profile: ProjectProfileUpdate): Promise<ProjectProfile> {
   return invoke<ProjectProfile>("save_project_profile", { profile });
+}
+
+export async function getApifoxCredentialStatus(): Promise<ApifoxCredentialStatus> {
+  return invoke<ApifoxCredentialStatus>("apifox_credential_status");
+}
+
+export async function saveApifoxToken(token: string): Promise<void> {
+  await invoke("save_apifox_token", { token });
+}
+
+export async function clearApifoxToken(): Promise<void> {
+  await invoke("clear_apifox_token");
+}
+
+export async function listApiSources(): Promise<ApiSource[]> {
+  return invoke<ApiSource[]>("list_api_sources");
+}
+
+export async function saveApiSource(source: ApiSourceUpdate): Promise<ApiSource> {
+  return invoke<ApiSource>("save_api_source", { source });
+}
+
+export async function removeApiSource(sourceId: string): Promise<void> {
+  await invoke("remove_api_source", { sourceId });
+}
+
+export async function syncApiSource(sourceId: string): Promise<ApiSyncSummary> {
+  return invoke<ApiSyncSummary>("sync_api_source", { sourceId });
+}
+
+export async function syncAllApiSources(): Promise<ApiSyncSummary[]> {
+  return invoke<ApiSyncSummary[]>("sync_all_api_sources");
+}
+
+export async function listApiEndpoints(sourceId: string, filter?: ApiEndpointFilter): Promise<ApiEndpointSummary[]> {
+  return invoke<ApiEndpointSummary[]>("list_api_endpoints", { sourceId, filter: filter || null });
+}
+
+export async function getApiEndpoint(endpointId: string): Promise<ApiEndpointDetail> {
+  return invoke<ApiEndpointDetail>("get_api_endpoint", { endpointId });
+}
+
+export async function renderApiEndpointMarkdown(endpointId: string): Promise<string> {
+  return invoke<string>("render_api_endpoint_markdown", { endpointId });
+}
+
+export async function saveApiEndpointToKnowledge(endpointId: string): Promise<KnowledgeItem> {
+  return invoke<KnowledgeItem>("save_api_endpoint_to_knowledge", { endpointId });
 }
 
 export async function getEmailNotificationStatus(): Promise<EmailNotificationStatus> {

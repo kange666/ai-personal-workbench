@@ -232,7 +232,8 @@ async function refresh() {
   if (!isTauriRuntime()) return;
   const availableProjects = await listTestProjects();
   projects.value = availableProjects;
-  const restoredProject = availableProjects.find(item => normalizedProjectPath(item.path) === normalizedProjectPath(selectedProjectPath.value));
+  const requestedProject = String(route.query.project || "");
+  const restoredProject = availableProjects.find(item => normalizedProjectPath(item.path) === normalizedProjectPath(requestedProject || selectedProjectPath.value));
   selectedProjectPath.value = restoredProject?.path || availableProjects[0]?.path || "";
   const paritySummary = await syncFeatureParity();
   paritySourceMessage.value = paritySummary.sourceMessage;

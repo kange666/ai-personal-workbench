@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 37;
+pub const SCHEMA_VERSION: i64 = 38;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -754,6 +754,42 @@ impl DatabaseState {
                  );
                  CREATE UNIQUE INDEX IF NOT EXISTS idx_project_profiles_repository ON project_profiles(repository_path) WHERE repository_path<>'';
                  CREATE INDEX IF NOT EXISTS idx_project_profiles_name ON project_profiles(display_name);
+                 CREATE TABLE IF NOT EXISTS api_sources (
+                   id TEXT PRIMARY KEY,
+                   project_profile_id TEXT NOT NULL UNIQUE,
+                   provider TEXT NOT NULL DEFAULT 'apifox',
+                   external_project_id TEXT NOT NULL UNIQUE,
+                   document_title TEXT NOT NULL DEFAULT '',
+                   openapi_version TEXT NOT NULL DEFAULT '',
+                   sync_status TEXT NOT NULL DEFAULT 'never',
+                   endpoint_count INTEGER NOT NULL DEFAULT 0,
+                   content_hash TEXT NOT NULL DEFAULT '',
+                   last_synced_at TEXT,
+                   last_error TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   FOREIGN KEY(project_profile_id) REFERENCES project_profiles(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_api_sources_status ON api_sources(sync_status,updated_at DESC);
+                 CREATE TABLE IF NOT EXISTS api_endpoints (
+                   id TEXT PRIMARY KEY,
+                   source_id TEXT NOT NULL,
+                   operation_id TEXT NOT NULL DEFAULT '',
+                   method TEXT NOT NULL,
+                   path TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   description TEXT NOT NULL DEFAULT '',
+                   tags_json TEXT NOT NULL DEFAULT '[]',
+                   deprecated INTEGER NOT NULL DEFAULT 0,
+                   document_json TEXT NOT NULL DEFAULT '{}',
+                   document_hash TEXT NOT NULL DEFAULT '',
+                   search_text TEXT NOT NULL DEFAULT '',
+                   updated_at TEXT NOT NULL,
+                   UNIQUE(source_id,method,path),
+                   FOREIGN KEY(source_id) REFERENCES api_sources(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_api_endpoints_source ON api_endpoints(source_id,method,path);
+                 CREATE INDEX IF NOT EXISTS idx_api_endpoints_title ON api_endpoints(title);
                  CREATE TABLE IF NOT EXISTS work_inbox_items (
                    id TEXT PRIMARY KEY,
                    source_type TEXT NOT NULL,
@@ -1356,6 +1392,11 @@ pub fn search_workspace(
         "内容",
         "/content?idea=",
     )?;
+    collect(
+        "SELECT e.id,e.title,upper(e.method) || ' ' || e.path || ' · ' || p.display_name,substr(e.updated_at,1,10) FROM api_endpoints e JOIN api_sources s ON s.id=e.source_id JOIN project_profiles p ON p.id=s.project_profile_id WHERE e.title LIKE ?1 ESCAPE '\\' OR e.path LIKE ?1 ESCAPE '\\' OR e.description LIKE ?1 ESCAPE '\\' OR e.search_text LIKE ?1 ESCAPE '\\' ORDER BY e.updated_at DESC LIMIT 15",
+        "接口",
+        "/api-docs?endpoint=",
+    )?;
     results.sort_by(|a, b| b.date.cmp(&a.date));
     results.truncate(50);
     Ok(results)
@@ -1464,6 +1505,16 @@ mod migration_tests {
             )
             .unwrap();
         assert!(repository_runtime_runs_exists);
+        for table in ["api_sources", "api_endpoints"] {
+            let exists: bool = upgraded
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "数据库升级后缺少 {table}");
+        }
         for column in [
             "grouping_mode",
             "generator",

@@ -14,6 +14,7 @@ import VideoCenterView from "../views/VideoCenterView.vue";
 import ProjectsView from "../views/ProjectsView.vue";
 import InboxView from "../views/InboxView.vue";
 import ProjectMappingView from "../views/ProjectMappingView.vue";
+import ApiDocsView from "../views/ApiDocsView.vue";
 import { getVipStatus, isTauriRuntime } from "../services/backend";
 
 const router = createRouter({
@@ -23,6 +24,7 @@ const router = createRouter({
     { path: "/work-records", name: "work-records", component: WorkRecordsView, meta: { title: "工作记录" } },
     { path: "/projects", name: "projects", component: ProjectsView, meta: { title: "项目资产" } },
     { path: "/project-mapping", name: "project-mapping", component: ProjectMappingView, meta: { title: "项目身份映射" } },
+    { path: "/api-docs", name: "api-docs", component: ApiDocsView, meta: { title: "接口文档中心" } },
     { path: "/inbox", name: "inbox", component: InboxView, meta: { title: "待处理收件箱" } },
     { path: "/tasks", redirect: (to) => ({ path: "/calendar", query: { ...to.query, tab: "tasks" } }) },
     { path: "/calendar", name: "calendar", component: CalendarView, meta: { title: "工作日历" } },

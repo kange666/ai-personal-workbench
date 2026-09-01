@@ -8,6 +8,7 @@ import NavIcon from "../components/NavIcon.vue";
 import { loadNavigationOrder, orderedNavigationItems, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
 import {
   clearDeepSeekKey,
+  clearApifoxToken,
   clearTapdCredentials,
   activateVip,
   checkForUpdates,
@@ -16,6 +17,7 @@ import {
   deleteQqEmailConfig,
   exportDatabaseBackup,
   getAiStatus,
+  getApifoxCredentialStatus,
   getBackupStatus,
   getEmailNotificationStatus,
   getTapdStatus,
@@ -26,6 +28,7 @@ import {
   restoreDatabaseBackup,
   revealLocalFile,
   saveDeepSeekKey,
+  saveApifoxToken,
   saveQqEmailConfig,
   saveTapdCredentials,
   saveWorkTimeSettings,
@@ -33,6 +36,7 @@ import {
   testQqEmail,
   testTapdConnection,
   type AiStatus,
+  type ApifoxCredentialStatus,
   type BackupStatus,
   type EmailNotificationStatus,
   type TapdStatus,
@@ -42,6 +46,8 @@ import {
 
 const route = useRoute();
 const status = ref<AiStatus>({ configured: false, source: "未配置", model: "deepseek-v4-flash" });
+const apifoxStatus = ref<ApifoxCredentialStatus>({ configured:false, source:"未配置" });
+const apifoxToken = ref("");
 const key = ref("");
 const message = ref("");
 const error = ref("");
@@ -78,8 +84,9 @@ function emailStateText() {
 
 async function refresh() {
   if (!isTauriRuntime()) return;
-  [status.value, tapdStatus.value, emailStatus.value, vipStatus.value, backupStatus.value, updateStatus.value] = await Promise.all([
+  [status.value, apifoxStatus.value, tapdStatus.value, emailStatus.value, vipStatus.value, backupStatus.value, updateStatus.value] = await Promise.all([
     getAiStatus(),
+    getApifoxCredentialStatus(),
     getTapdStatus(),
     getEmailNotificationStatus(),
     getVipStatus(),
@@ -218,6 +225,8 @@ async function test() {
   finally { loading.value = false; }
 }
 async function clear() { await clearDeepSeekKey(); await refresh(); message.value = "已删除 Windows 凭据库中的 DeepSeek 密钥。"; }
+async function saveApifox() { loading.value=true;error.value="";message.value="";try{await saveApifoxToken(apifoxToken.value);apifoxToken.value="";await refresh();message.value="Apifox API 访问令牌已安全保存到 Windows 凭据库。";}catch(cause){error.value=String(cause);}finally{loading.value=false;} }
+async function clearApifox() { loading.value=true;error.value="";message.value="";try{await clearApifoxToken();await refresh();message.value="已删除 Windows 凭据库中的 Apifox 令牌；本地接口缓存仍然保留。";}catch(cause){error.value=String(cause);}finally{loading.value=false;} }
 async function toggleAutostart() { if (!isTauriRuntime()) return; if (autostartEnabled.value) await disable(); else await enable(); autostartEnabled.value = await isEnabled(); }
 async function saveWorkGap() { loading.value = true; error.value = ""; message.value = ""; try { const value = await saveWorkTimeSettings(workGapMinutes.value); workGapMinutes.value = value.gapMinutes; message.value = "工时估算间隔已保存，下一次打开工时明细时自动重新估算。"; } catch (cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function saveTapd() { loading.value=true; error.value=""; message.value=""; try { await saveTapdCredentials(tapdAuthMode.value,tapdUser.value,tapdPassword.value,tapdAccessToken.value,tapdOwner.value); tapdUser.value=""; tapdPassword.value=""; tapdAccessToken.value=""; await refresh(); message.value=`TAPD ${tapdAuthMode.value==='token'?'个人访问令牌':'OpenAPI 账号'}已安全保存到 Windows 凭据库。`; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
@@ -333,6 +342,13 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
         <p v-if="emailStatus.lastError" class="email-settings-error">{{ emailStatus.lastError }}<span v-if="emailStatus.retryingCount || emailStatus.failedCount"> · 重试中 {{ emailStatus.retryingCount }} 封，失败 {{ emailStatus.failedCount }} 封</span></p>
         <div class="settings-actions"><button v-if="emailStatus.configured" class="button secondary" :disabled="loading" @click="testEmail">发送测试邮件</button><button class="button primary" :disabled="loading || !qqEmail.trim() || !qqAuthCode.trim()" @click="saveEmail">保存配置</button><button v-if="emailStatus.configured" class="button secondary danger-button" :disabled="loading" @click="clearEmail">删除配置</button></div>
         <small>固定使用 smtp.qq.com:465（SSL/TLS），发件人与收件人相同。授权码仅保存在 Windows 凭据管理器中，不会写入数据库、日志或回显到页面。</small>
+      </article>
+      <article class="panel settings-card apifox-settings">
+        <div><h2>Apifox 开放 API</h2><p>用于接口文档中心只读同步多个项目的 OpenAPI 文档。</p></div>
+        <span class="settings-status" :class="{ready:apifoxStatus.configured}">{{ apifoxStatus.configured ? `已配置 · ${apifoxStatus.source}` : '未配置' }}</span>
+        <label>API 访问令牌<input v-model="apifoxToken" type="password" autocomplete="off" placeholder="粘贴 Apifox API 访问令牌；保存后不再回显"></label>
+        <div class="settings-actions"><RouterLink class="button secondary link-button" to="/api-docs">打开接口文档</RouterLink><button v-if="apifoxStatus.configured" class="button secondary danger-button" :disabled="loading" @click="clearApifox">删除令牌</button><button class="button primary" :disabled="loading || !apifoxToken.trim()" @click="saveApifox">保存到凭据库</button></div>
+        <small>令牌仅保存在 Windows 凭据库，不写入 SQLite、日志或页面。项目 ID 和同步后的脱敏接口文档保存在本机数据库。</small>
       </article>
       </div>
     </details>

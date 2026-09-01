@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { isTauriRuntime, listProjectProfiles, saveProjectProfile, type ProjectProfile, type ProjectProfileUpdate } from "../services/backend";
+import { isTauriRuntime, listApiSources, listProjectProfiles, saveProjectProfile, type ApiSource, type ProjectProfile, type ProjectProfileUpdate } from "../services/backend";
 
 const profiles = ref<ProjectProfile[]>([]);
+const apiSources = ref<ApiSource[]>([]);
 const selectedId = ref("");
 const query = ref("");
 const loading = ref(false);
@@ -15,6 +16,7 @@ const filtered = computed(() => {
   const keyword=query.value.trim().toLowerCase();
   return keyword ? profiles.value.filter(item => [item.displayName,item.repositoryPath,item.tapdWorkspaceId,...item.aliases].some(value=>value.toLowerCase().includes(keyword))) : profiles.value;
 });
+const apiSourceByProfile = computed(() => new Map(apiSources.value.map(item=>[item.projectProfileId,item])));
 
 function selectProfile(item:ProjectProfile) {
   selectedId.value=item.id;
@@ -27,7 +29,7 @@ async function load() {
   if (!isTauriRuntime()) return;
   loading.value=true; error.value="";
   try {
-    profiles.value=await listProjectProfiles();
+    [profiles.value,apiSources.value]=await Promise.all([listProjectProfiles(),listApiSources()]);
     const current=profiles.value.find(item=>item.id===selectedId.value) || profiles.value[0];
     if(current) selectProfile(current);
   } catch(cause) { error.value=String(cause); }
@@ -60,7 +62,7 @@ onMounted(load);
         <header><div><h2>规范项目</h2><p>{{ profiles.length }} 个本地项目已纳入映射</p></div></header>
         <label class="mapping-search">⌕<input v-model="query" placeholder="搜索项目、路径或别名"></label>
         <div>
-          <button v-for="item in filtered" :key="item.id" :class="{active:item.id===selectedId}" @click="selectProfile(item)"><span><b>{{ item.displayName }}</b><small>{{ item.repositoryPath || "未关联本地目录" }}</small></span><em>{{ item.aliases.length }} 个别名</em></button>
+          <button v-for="item in filtered" :key="item.id" :class="{active:item.id===selectedId}" @click="selectProfile(item)"><span><b>{{ item.displayName }}</b><small>{{ item.repositoryPath || "未关联本地目录" }}</small></span><em>{{ item.aliases.length }} 个别名 · {{ apiSourceByProfile.has(item.id) ? '已关联 Apifox' : '未关联 Apifox' }}</em></button>
           <p v-if="!filtered.length">没有符合条件的项目。</p>
         </div>
       </aside>

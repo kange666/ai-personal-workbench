@@ -597,7 +597,7 @@ onBeforeUnmount(() => {
       <div class="side-footer"><RouterLink class="settings-link" to="/settings" title="设置"><NavIcon name="settings" /><em>设置</em></RouterLink></div>
     </aside>
     <header class="app-topbar" @mousedown="prepareWindowDragging" @dblclick="toggleMaximizeFromTopbar">
-      <button class="top-search" title="搜索全部本地数据" @click="openSearch">⌕<span>搜索任务、对话、报告、知识与内容</span><kbd>Ctrl K</kbd></button>
+      <button class="top-search" title="搜索全部本地数据" @click="openSearch">⌕<span>搜索任务、对话、报告、知识与接口</span><kbd>Ctrl K</kbd></button>
       <span class="topbar-drag-zone" aria-hidden="true"></span>
       <span class="top-date">{{ dateText }}</span>
       <div class="top-runtime" @focusout="closeHealthOnBlur">
