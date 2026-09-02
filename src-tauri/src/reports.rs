@@ -1965,7 +1965,7 @@ mod tests {
                     minutes: 105,
                 },
                 WorkBreakdown {
-                    name: "AI个人工作台".into(),
+                    name: "星枢工作台".into(),
                     minutes: 185,
                 },
             ],

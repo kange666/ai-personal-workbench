@@ -1,4 +1,4 @@
-use crate::{ai, database::DatabaseState};
+use crate::{ai, database::DatabaseState, project_identity};
 use chrono::Utc;
 use keyring::Entry;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1840,8 +1840,71 @@ pub fn list_repository_assets(
             })
         })
         .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let mut assets = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let conversations = {
+        let mut statement = connection
+            .prepare(
+                "SELECT COALESCE(cwd,''),COALESCE(project_override,''),COALESCE(NULLIF(title,''),'未命名 Codex 任务'),COALESCE(updated_at,started_at,'') FROM conversations",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    for asset in &mut assets {
+        let canonical_project =
+            project_identity::canonical_project_name(&connection, &asset.name, &asset.path);
+        let mut related = conversations
+            .iter()
+            .filter(|(cwd, project_override, _, _)| {
+                project_identity::canonical_project_name(
+                    &connection,
+                    if project_override.trim().is_empty() {
+                        cwd
+                    } else {
+                        project_override
+                    },
+                    cwd,
+                ) == canonical_project
+            })
+            .collect::<Vec<_>>();
+        related.sort_by(|left, right| right.3.cmp(&left.3));
+        asset.conversation_count = related.len() as i64;
+        let latest_title = related
+            .first()
+            .map(|(_, _, title, _)| title.as_str())
+            .unwrap_or("");
+        if let Some((_, _, _, updated_at)) = related.first() {
+            if updated_at > &asset.last_activity_at {
+                asset.last_activity_at = updated_at.clone();
+            }
+        }
+        (
+            asset.pending_level,
+            asset.pending_summary,
+            asset.next_action,
+        ) = repository_attention(
+            &asset.health_level,
+            &asset.runtime_status,
+            asset.behind_count,
+            asset.changed_file_count,
+            &asset.last_activity_at,
+            latest_title,
+        );
+    }
+    Ok(assets)
 }
 
 #[tauri::command]
@@ -1857,27 +1920,45 @@ pub fn repository_asset_details(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| error.to_string())?;
-    let normalized = path.replace('/', "\\").to_lowercase();
+    let canonical_project =
+        project_identity::canonical_project_name(&connection, &repository_name, &path);
     let mut conversation_statement = connection
         .prepare(
-            "SELECT id,COALESCE(NULLIF(title,''),'未命名 Codex 任务'),COALESCE(updated_at,started_at,''),archived
-             FROM conversations
-             WHERE lower(replace(COALESCE(cwd,''),'/','\')) LIKE ?1 || '%'
-             ORDER BY COALESCE(updated_at,started_at) DESC LIMIT 30",
+            "SELECT id,COALESCE(NULLIF(title,''),'未命名 Codex 任务'),COALESCE(updated_at,started_at,''),archived,COALESCE(cwd,''),COALESCE(project_override,'')
+             FROM conversations ORDER BY COALESCE(updated_at,started_at) DESC LIMIT 500",
         )
         .map_err(|error| error.to_string())?;
     let conversations = conversation_statement
-        .query_map([&normalized], |row| {
-            Ok(RepositoryConversation {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                updated_at: row.get(2)?,
-                archived: row.get::<_, i64>(3)? != 0,
-            })
+        .query_map([], |row| {
+            Ok((
+                RepositoryConversation {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    archived: row.get::<_, i64>(3)? != 0,
+                },
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|(_, cwd, project_override)| {
+            project_identity::canonical_project_name(
+                &connection,
+                if project_override.trim().is_empty() {
+                    cwd
+                } else {
+                    project_override
+                },
+                cwd,
+            ) == canonical_project
+        })
+        .map(|(conversation, _, _)| conversation)
+        .take(30)
+        .collect::<Vec<_>>();
     let mut commit_statement = connection
         .prepare(
             "SELECT commit_hash,subject,committed_at FROM git_commits

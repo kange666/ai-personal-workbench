@@ -443,14 +443,22 @@ pub fn list_inbox_items(
     status: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<InboxItem>, String> {
-    sync_inbox_for_state(&state)?;
+    list_inbox_items_for_state(&state, status, limit)
+}
+
+fn list_inbox_items_for_state(
+    state: &DatabaseState,
+    status: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<InboxItem>, String> {
+    sync_inbox_for_state(state)?;
     let connection = state.connect()?;
     let status = status.unwrap_or_default();
     let mut statement = connection
         .prepare(
             "SELECT id,source_type,source_id,project,title,summary,detail,route,priority,workflow_status,source_status,created_at,updated_at
              FROM work_inbox_items
-             WHERE (?1='' OR workflow_status=?1)
+             WHERE source_type<>'video' AND (?1='' OR workflow_status=?1)
              ORDER BY CASE workflow_status WHEN 'needs_decision' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'new' THEN 2 WHEN 'done' THEN 3 ELSE 4 END,
                       CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,datetime(updated_at) DESC
              LIMIT ?2",
@@ -550,7 +558,7 @@ pub fn create_task_from_inbox(
 
 #[cfg(test)]
 mod tests {
-    use super::sync_inbox_for_state;
+    use super::{list_inbox_items_for_state, sync_inbox_for_state};
     use crate::database::DatabaseState;
 
     #[test]
@@ -618,6 +626,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(codex_rows, (1, "最新结果".into()));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn inbox_list_excludes_video_sources() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-inbox-video-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let connection = state.connect().unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO work_inbox_items(id,source_type,source_id,project,title,created_at,updated_at)
+                 VALUES('manual-1','quick_capture','capture-1','未归类项目','整理发布说明','2026-09-02T10:00:00Z','2026-09-02T10:00:00Z');
+                 INSERT INTO video_jobs(id,title,video_type,project_root,status,created_at,updated_at)
+                 VALUES('video-1','视频任务','tech','F:/video','failed','2026-09-02T10:00:00Z','2026-09-02T10:00:00Z');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let items = list_inbox_items_for_state(&state, None, Some(100)).unwrap();
+        assert!(items.iter().any(|item| item.source_type == "quick_capture"));
+        assert!(items.iter().all(|item| item.source_type != "video"));
 
         std::fs::remove_dir_all(directory).unwrap();
     }

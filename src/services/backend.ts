@@ -55,10 +55,10 @@ export interface UpdateStatus {
 
 export interface QuickCapture {
   id: string;
-  kind: "note" | "idea" | "url";
+  kind: "note" | "idea" | "url" | "task";
   content: string;
   sourceUrl: string;
-  status: "inbox" | "archived";
+  status: "inbox" | "archived" | "routed";
   createdAt: string;
   updatedAt: string;
 }
@@ -142,7 +142,7 @@ export type InboxWorkflowStatus = "needs_decision" | "in_progress" | "done" | "a
 
 export interface InboxItem {
   id: string;
-  sourceType: "codex" | "tapd" | "tapd_job" | "task_suggestion" | "test" | "repository" | "video";
+  sourceType: "codex" | "tapd" | "tapd_job" | "task_suggestion" | "quick_capture" | "test" | "repository" | "video";
   sourceId: string;
   project: string;
   title: string;
@@ -185,9 +185,7 @@ export type ApiSyncStatus = "never" | "syncing" | "ready" | "stale" | "error";
 
 export interface ApiSource {
   id: string;
-  projectProfileId: string;
-  projectName: string;
-  repositoryPath: string;
+  projectProfileId?: string | null;
   externalProjectId: string;
   apifoxProjectName: string;
   documentTitle: string;
@@ -202,13 +200,6 @@ export interface ApiSource {
 
 export interface ApiSourceUpdate {
   id: string;
-  projectProfileId: string;
-  externalProjectId: string;
-  apifoxProjectName: string;
-}
-
-export interface ApiSourceBatchUpdate {
-  projectProfileIds: string[];
   externalProjectId: string;
   apifoxProjectName: string;
 }
@@ -234,9 +225,8 @@ export interface ApiEndpointSummary {
 }
 
 export interface ApiEndpointDetail extends ApiEndpointSummary {
-  projectProfileId: string;
-  projectName: string;
-  repositoryPath: string;
+  externalProjectId: string;
+  apifoxProjectName: string;
   documentTitle: string;
   openapiVersion: string;
   lastSyncedAt?: string;
@@ -457,10 +447,12 @@ export interface JenkinsConnectionStatus {
 
 export interface JenkinsJob {
   name: string;
+  displayName: string;
   fullName: string;
   url: string;
   className: string;
   favorite: boolean;
+  viewNames: string[];
 }
 
 export interface JenkinsBranchOptions {
@@ -474,6 +466,13 @@ export interface JenkinsPipelineStage {
   name: string;
   status: string;
   durationMs: number;
+}
+
+export interface JenkinsChange {
+  commitId: string;
+  message: string;
+  author: string;
+  timestamp?: number;
 }
 
 export interface JenkinsPublishRecord {
@@ -492,6 +491,7 @@ export interface JenkinsPublishRecord {
   queueReason: string;
   currentStage: string;
   stages: JenkinsPipelineStage[];
+  changes: JenkinsChange[];
   startedAt: string;
   buildStartedAt?: string;
   finishedAt?: string;
@@ -894,6 +894,11 @@ export interface AiStatus {
 }
 
 export type TranslationDirection = "zh-to-en" | "en-to-zh";
+
+export interface TranslationCandidate {
+  label: string;
+  text: string;
+}
 
 export interface KnowledgeAnswer {
   answer: string;
@@ -1456,10 +1461,6 @@ export async function saveApiSource(source: ApiSourceUpdate): Promise<ApiSource>
   return invoke<ApiSource>("save_api_source", { source });
 }
 
-export async function saveApiSources(source: ApiSourceBatchUpdate): Promise<ApiSource[]> {
-  return invoke<ApiSource[]>("save_api_sources", { source });
-}
-
 export async function removeApiSource(sourceId: string): Promise<void> {
   await invoke("remove_api_source", { sourceId });
 }
@@ -1638,6 +1639,10 @@ export async function listJenkinsJobBranches(jobFullName: string): Promise<Jenki
 
 export async function setJenkinsJobFavorite(jobFullName: string, favorite: boolean): Promise<void> {
   await invoke("set_jenkins_job_favorite", { jobFullName, favorite });
+}
+
+export async function setJenkinsJobDisplayName(jobFullName: string, displayName: string): Promise<void> {
+  await invoke("set_jenkins_job_display_name", { jobFullName, displayName });
 }
 
 export async function triggerJenkinsPublish(jobFullName: string, branch: string): Promise<JenkinsPublishRecord> {
@@ -1928,8 +1933,8 @@ export async function testDeepSeek(): Promise<string> {
   return invoke<string>("test_deepseek");
 }
 
-export async function translateText(text: string, direction: TranslationDirection): Promise<string> {
-  return invoke<string>("translate_text", { text, direction });
+export async function translateText(text: string, direction: TranslationDirection): Promise<TranslationCandidate[]> {
+  return invoke<TranslationCandidate[]>("translate_text", { text, direction });
 }
 
 export async function refineReportWithAi(id: string): Promise<string> {

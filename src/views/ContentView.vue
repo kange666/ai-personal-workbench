@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { generateDailyContent, getCodexCliStatus, getContentVideoJob, isTauriRuntime, listContentIdeas, startContentVideoJob, updateContentStatus, type CodexCliStatus, type ContentIdea, type VideoJob } from "../services/backend";
+import { confirmAction } from "../utils/confirm";
 
 const route = useRoute();
 const router = useRouter();
@@ -49,7 +50,7 @@ async function load() {
 
 async function regenerate() {
   if (!isTauriRuntime()) return;
-  if ((selectedCount.value > 0) && !window.confirm("已选择的内容会保留，其余候选会重新生成。是否继续？")) return;
+  if ((selectedCount.value > 0) && !await confirmAction({ title:"重新生成候选内容", message:"已选择的内容会保留，其余候选会重新生成。是否继续？", confirmText:"重新生成", tone:"warning" })) return;
   loading.value = true;
   message.value = "";
   error.value = "";
@@ -84,7 +85,7 @@ async function startCodexVideo() {
     if (!cliStatus.value.installed || !cliStatus.value.authenticated) { error.value=cliStatus.value.message; return; }
     const skill = selected.value.contentType === "reasoning" ? "$generate-reasoning-short-video" : "$generate-tech-short-video";
     const action = activeJob.value ? "继续同一个 Codex 视频任务" : "创建新的 Codex 视频任务";
-    if (!window.confirm(`${action}并调用 ${skill}。\n\n为正常启动 Chrome、FFmpeg、配音和截图工具，本次视频任务将使用完整本地执行权限；制作目标仍固定为该视频项目目录。完成后会发送工作台消息。是否开始？`)) return;
+    if (!await confirmAction({ title:"启动视频制作", message:`${action}并调用 ${skill}。\n\n为正常启动 Chrome、FFmpeg、配音和截图工具，本次视频任务将使用完整本地执行权限；制作目标仍固定为该视频项目目录。完成后会发送工作台消息。是否开始？`, confirmText:"开始制作", tone:"warning" })) return;
     startingVideo.value=true;
     activeJob.value=await startContentVideoJob(selected.value.id);
     message.value=`已启动 ${skill}，可以继续使用工作台；完成后会收到消息。`;

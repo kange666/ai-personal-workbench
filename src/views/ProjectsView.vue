@@ -157,18 +157,20 @@ const attentionCount = computed(() => visibleAssets.value.filter((item) => item.
 const latestScanAt = computed(() => lastScanAt.value || visibleAssets.value.map((item) => item.lastScannedAt).filter(Boolean).sort().at(-1) || "");
 const selectedRuntime = computed<RunningProjectProcess | null>(() => {
   if (!selected.value) return null;
-  return runtimeMap.value.get(selected.value.path) ?? (selected.value.runtimeStartedAt ? {
+  const current = runtimeMap.value.get(selected.value.path);
+  if (current) return current;
+  return selected.value.runtimeStartedAt ? {
     projectPath: selected.value.path,
     projectName: selected.value.name,
     command: selected.value.startCommand,
     processId: 0,
-    status: selected.value.runtimeStatus || "stopped",
+    status: selected.value.runtimeStatus === "failed" ? "failed" : "stopped",
     startedAt: selected.value.runtimeStartedAt,
-    localUrl: selected.value.runtimeLocalUrl,
+    localUrl: "",
     logPath: selected.value.runtimeLogPath,
     logExcerpt: selected.value.runtimeLogExcerpt,
     errorMessage: selected.value.runtimeError,
-  } : null);
+  } : null;
 });
 const mergeOptions = computed(() => gitStatus.value?.branches.filter((branch) => branch !== gitStatus.value?.currentBranch) ?? []);
 
@@ -203,10 +205,14 @@ function runtimeDuration(value?: string) {
 function needsProjectConfirmation(item: RepositoryAsset) { return !item.manuallyConfirmed && (!item.category.trim() || item.category === "待确认"); }
 function projectDescription(item: RepositoryAsset) { return item.purpose || (needsProjectConfirmation(item) ? "AI 推断待确认" : "已完成分类"); }
 function isProjectRunning(path: string) { return runtimeMap.value.has(path) || runningPaths.value.includes(path); }
-function projectRuntimeUrl(item: RepositoryAsset) {
+function projectRuntimeStatus(item: RepositoryAsset) {
   const current = runtimeMap.value.get(item.path);
-  if (current) return current.localUrl;
-  return item.runtimeStatus === "running" || item.runtimeStatus === "starting" ? item.runtimeLocalUrl : "";
+  if (current) return current.status;
+  if (item.runtimeStatus === "failed") return "failed";
+  return item.runtimeStartedAt ? "stopped" : "idle";
+}
+function projectRuntimeUrl(item: RepositoryAsset) {
+  return runtimeMap.value.get(item.path)?.localUrl || "";
 }
 function fillForm(item: RepositoryAsset) { Object.assign(form, { path: item.path, category: item.category, purpose: item.purpose, technologyStack: item.technologyStack, mainModules: item.mainModules, installCommand: item.installCommand, startCommand: item.startCommand, testCommand: item.testCommand, buildCommand: item.buildCommand, commandSource: item.commandSource }); }
 function syncCommitMessages() { for (const key of Object.keys(commitMessages)) delete commitMessages[key]; for (const group of details.value.commitPlan?.groups ?? []) commitMessages[group.id] = group.commitMessage; }
@@ -514,9 +520,9 @@ async function save() {
 function exportText(format: "markdown" | "csv") {
   if (format === "csv") {
     const quote = (value: string | number | boolean) => `"${String(value).replaceAll('"', '""')}"`;
-    return [["置顶", "项目", "路径", "分类", "用途", "当前分支", "运行状态", "健康状态", "修改文件", "待处理", "Codex任务", "提交记录"].map(quote).join(","), ...filtered.value.map((item) => [item.isPinned ? "是" : "否", item.name, item.path, item.category, item.purpose, item.defaultBranch, runtimeLabel(item.runtimeStatus), item.healthLevel, item.changedFileCount, item.pendingSummary, item.conversationCount, item.commitCount].map(quote).join(","))].join("\n");
+    return [["置顶", "项目", "路径", "分类", "用途", "当前分支", "运行状态", "健康状态", "修改文件", "待处理", "Codex任务", "提交记录"].map(quote).join(","), ...filtered.value.map((item) => [item.isPinned ? "是" : "否", item.name, item.path, item.category, item.purpose, item.defaultBranch, runtimeLabel(projectRuntimeStatus(item)), item.healthLevel, item.changedFileCount, item.pendingSummary, item.conversationCount, item.commitCount].map(quote).join(","))].join("\n");
   }
-  return ["# 项目资产清单", "", `共 ${filtered.value.length} 个项目`, "", ...filtered.value.flatMap((item) => [`## ${item.isPinned ? "📌 " : ""}${item.name}`, `- 路径：${item.path}`, `- 分类：${item.category}`, `- 用途：${item.purpose || "待确认"}`, `- 当前分支：${item.defaultBranch || "无分支"}`, `- 运行：${runtimeLabel(item.runtimeStatus)}`, `- 健康：${item.healthLevel}`, `- 待处理：${item.pendingSummary}`, ""])].join("\n");
+  return ["# 项目资产清单", "", `共 ${filtered.value.length} 个项目`, "", ...filtered.value.flatMap((item) => [`## ${item.isPinned ? "📌 " : ""}${item.name}`, `- 路径：${item.path}`, `- 分类：${item.category}`, `- 用途：${item.purpose || "待确认"}`, `- 当前分支：${item.defaultBranch || "无分支"}`, `- 运行：${runtimeLabel(projectRuntimeStatus(item))}`, `- 健康：${item.healthLevel}`, `- 待处理：${item.pendingSummary}`, ""])].join("\n");
 }
 async function copyExport(format: "markdown" | "csv") { await navigator.clipboard.writeText(exportText(format)); message.value = `${format === "csv" ? "CSV" : "Markdown"} 清单已复制，可直接保存为文件。`; }
 onMounted(async () => {
@@ -548,7 +554,7 @@ onBeforeUnmount(() => { if (runtimeTimer) window.clearInterval(runtimeTimer); })
               <td><button class="category-button" title="点击修改分类" @click.stop="openCategoryEditor(item)">{{ item.category }}</button><small>{{ projectDescription(item) }}</small></td>
               <td><b class="branch-name">{{ item.defaultBranch || "无分支" }}</b><small v-if="branchSyncSummary(item)" class="branch-sync" :class="{ behind: item.behindCount > 0 }">{{ branchSyncSummary(item) }}</small></td>
               <td><div class="work-state"><i v-if="item.healthLevel !== '健康'" class="health-pill" :class="healthClass(item.healthLevel)">健康：{{ item.healthLevel }}</i><i v-if="item.changedFileCount" class="dirty-pill">{{ item.changedFileCount }} 个文件修改</i><small v-if="item.healthLevel === '健康' && !item.changedFileCount" class="clean-state">工作区干净</small></div></td>
-              <td><div class="runtime-cell"><i class="runtime-pill" :class="runtimeClass(runtimeMap.get(item.path)?.status || item.runtimeStatus)">{{ runtimeLabel(runtimeMap.get(item.path)?.status || item.runtimeStatus) }}</i><button v-if="projectRuntimeUrl(item)" class="runtime-address-button" :title="`使用默认浏览器打开 ${projectRuntimeUrl(item)}`" @click.stop="openRuntimeUrl(projectRuntimeUrl(item))">{{ projectRuntimeUrl(item) }}</button><small v-else class="runtime-address-empty">{{ isProjectRunning(item.path) ? '正在获取运行地址…' : '—' }}</small></div></td>
+              <td><div class="runtime-cell"><i class="runtime-pill" :class="runtimeClass(projectRuntimeStatus(item))">{{ runtimeLabel(projectRuntimeStatus(item)) }}</i><button v-if="projectRuntimeUrl(item)" class="runtime-address-button" :title="`使用默认浏览器打开 ${projectRuntimeUrl(item)}`" @click.stop="openRuntimeUrl(projectRuntimeUrl(item))">{{ projectRuntimeUrl(item) }}</button><small v-else class="runtime-address-empty">{{ isProjectRunning(item.path) ? '正在获取运行地址…' : '—' }}</small></div></td>
               <td><div class="asset-row-actions"><button class="asset-row-button launch" :class="{ stop: isProjectRunning(item.path) }" :disabled="Boolean(startingPath)" @click.stop="toggleProjectProcess(item)">{{ startingPath === item.path ? (isProjectRunning(item.path) ? '停止中…' : '启动中…') : (isProjectRunning(item.path) ? '■ 停止' : '▶ 启动') }}</button><button class="asset-row-button git" @click.stop="openAsset(item, 'git')">Git</button></div></td>
             </tr>
           </tbody>

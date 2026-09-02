@@ -28,17 +28,30 @@ function mountCockpit(){return mount(CockpitScreensaver,{props:{quota:{available
 describe("CockpitScreensaver",()=>{
   beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date(2026,8,1,14,32,8));mocks.getDailyActivity.mockClear();});
 
-  it("完整展示顶部统计、三十天热力和实时信息",async()=>{
+  it("完整展示顶部统计、九十天热力和实时信息",async()=>{
     const wrapper=mountCockpit();await flushPromises();
     expect(wrapper.findAll(".cockpit-kpis article")).toHaveLength(6);
+    expect(wrapper.findAll(".cockpit-kpis .cockpit-icon")).toHaveLength(6);
     expect(wrapper.find(".cockpit-kpis").text()).toContain("报告数量18");
-    expect(wrapper.findAll(".heat-grid>i")).toHaveLength(30);
+    expect(wrapper.findAll(".heat-grid>i")).toHaveLength(90);
+    expect(mocks.getDailyActivity).toHaveBeenCalledWith("2026-06-04","2026-09-01");
+    expect(wrapper.find(".cockpit-quota-summary").text()).toContain("5h68%7d83%");
+    expect(wrapper.find(".quota-panel").exists()).toBe(false);
     expect(wrapper.findAll(".messages-panel>div>button")).toHaveLength(3);
+    expect(wrapper.findAll(".messages-panel .cockpit-icon")).toHaveLength(3);
     expect(wrapper.findAll(".running-panel>div>button")).toHaveLength(3);
     expect(wrapper.find(".running-panel").text()).toContain("项目 · 个人工作台");
     expect(wrapper.find(".running-panel").text()).toContain("测试 · 接口回归");
     expect(wrapper.find(".running-panel").text()).toContain("自动处理 · TAPD #415");
     expect(wrapper.text()).not.toContain("视频");
+    wrapper.unmount();vi.useRealTimers();
+  });
+
+  it("没有运行任务时不渲染虚假的项目、测试和自动处理行",async()=>{
+    const wrapper=mount(CockpitScreensaver,{props:{quota:{available:false,freshness:"",selectionReason:""},notifications:[],runningProjects:[],testRuns:[],tapdJobs:[]}});await flushPromises();
+    expect(wrapper.findAll(".running-panel>div>button")).toHaveLength(0);
+    expect(wrapper.find(".running-panel").text()).toContain("当前没有运行中的任务");
+    expect(wrapper.find(".running-panel").text()).not.toContain("暂无运行");
     wrapper.unmount();vi.useRealTimers();
   });
 

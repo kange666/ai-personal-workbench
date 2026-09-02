@@ -34,9 +34,7 @@ pub struct ApifoxCredentialStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ApiSource {
     pub id: String,
-    pub project_profile_id: String,
-    pub project_name: String,
-    pub repository_path: String,
+    pub project_profile_id: Option<String>,
     pub external_project_id: String,
     pub apifox_project_name: String,
     pub document_title: String,
@@ -53,17 +51,8 @@ pub struct ApiSource {
 #[serde(rename_all = "camelCase")]
 pub struct ApiSourceUpdate {
     pub id: String,
-    pub project_profile_id: String,
     pub external_project_id: String,
     #[serde(default)]
-    pub apifox_project_name: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApiSourceBatchUpdate {
-    pub project_profile_ids: Vec<String>,
-    pub external_project_id: String,
     pub apifox_project_name: String,
 }
 
@@ -100,9 +89,8 @@ pub struct ApiEndpointSummary {
 pub struct ApiEndpointDetail {
     #[serde(flatten)]
     pub summary: ApiEndpointSummary,
-    pub project_profile_id: String,
-    pub project_name: String,
-    pub repository_path: String,
+    pub external_project_id: String,
+    pub apifox_project_name: String,
     pub document_title: String,
     pub openapi_version: String,
     pub last_synced_at: Option<String>,
@@ -221,7 +209,7 @@ struct PreparedApiTest {
 #[derive(Debug, Clone)]
 struct SourceRow {
     id: String,
-    project_name: String,
+    apifox_project_name: String,
     external_project_id: String,
     last_synced_at: Option<String>,
 }
@@ -330,8 +318,8 @@ fn strip_apifox_extensions(value: &Value) -> Value {
     }
 }
 
-fn source_id(project_profile_id: &str) -> String {
-    format!("api-source-{}", stable_hash(project_profile_id))
+fn source_id(external_project_id: &str) -> String {
+    format!("api-source-{}", stable_hash(external_project_id))
 }
 
 fn endpoint_id(source_id: &str, method: &str, path: &str) -> String {
@@ -354,34 +342,31 @@ fn valid_external_project_id(value: &str) -> bool {
 
 #[tauri::command]
 pub fn list_api_sources(state: tauri::State<'_, DatabaseState>) -> Result<Vec<ApiSource>, String> {
-    crate::project_identity::sync_project_profiles_for_state(&state)?;
     let connection = state.connect()?;
     connection.execute(
         "UPDATE api_sources SET sync_status=CASE WHEN last_synced_at IS NULL THEN 'error' ELSE 'stale' END,last_error=CASE WHEN last_error='' THEN '上次同步未正常完成。' ELSE last_error END WHERE sync_status='syncing'",
         [],
     ).map_err(|error| error.to_string())?;
     let mut statement = connection.prepare(
-        "SELECT s.id,s.project_profile_id,p.display_name,p.repository_path,s.external_project_id,s.apifox_project_name,s.document_title,s.openapi_version,s.sync_status,s.endpoint_count,s.last_synced_at,s.last_error,s.created_at,s.updated_at
-         FROM api_sources s JOIN project_profiles p ON p.id=s.project_profile_id
-         ORDER BY p.display_name COLLATE NOCASE",
+        "SELECT id,project_profile_id,external_project_id,apifox_project_name,document_title,openapi_version,sync_status,endpoint_count,last_synced_at,last_error,created_at,updated_at
+         FROM api_sources
+         ORDER BY COALESCE(NULLIF(apifox_project_name,''),NULLIF(document_title,''),external_project_id) COLLATE NOCASE",
     ).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
             Ok(ApiSource {
                 id: row.get(0)?,
                 project_profile_id: row.get(1)?,
-                project_name: row.get(2)?,
-                repository_path: row.get(3)?,
-                external_project_id: row.get(4)?,
-                apifox_project_name: row.get(5)?,
-                document_title: row.get(6)?,
-                openapi_version: row.get(7)?,
-                sync_status: row.get(8)?,
-                endpoint_count: row.get(9)?,
-                last_synced_at: row.get(10)?,
-                last_error: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                external_project_id: row.get(2)?,
+                apifox_project_name: row.get(3)?,
+                document_title: row.get(4)?,
+                openapi_version: row.get(5)?,
+                sync_status: row.get(6)?,
+                endpoint_count: row.get(7)?,
+                last_synced_at: row.get(8)?,
+                last_error: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -394,50 +379,55 @@ pub fn save_api_source(
     state: tauri::State<'_, DatabaseState>,
     source: ApiSourceUpdate,
 ) -> Result<ApiSource, String> {
-    crate::project_identity::sync_project_profiles_for_state(&state)?;
-    let profile_id = source.project_profile_id.trim();
+    let id = save_api_source_record(&state, &source)?;
+    list_api_sources(state)?
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| "Apifox 项目保存后无法读取。".to_string())
+}
+
+fn save_api_source_record(
+    state: &DatabaseState,
+    source: &ApiSourceUpdate,
+) -> Result<String, String> {
     let external_id = source.external_project_id.trim();
     let apifox_project_name =
         validate_apifox_project_name(&source.apifox_project_name, external_id)?;
-    if profile_id.is_empty() {
-        return Err("请选择要关联的规范项目。".into());
-    }
     if !valid_external_project_id(external_id) {
         return Err("Apifox 项目 ID 只能包含字母、数字、短横线或下划线。".into());
     }
     let connection = state.connect()?;
-    let profile_exists = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM project_profiles WHERE id=?1)",
-            [profile_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(|error| error.to_string())?;
-    if !profile_exists {
-        return Err("所选规范项目不存在，请重新同步项目资产。".into());
+    if source.id.trim().is_empty() {
+        let exists = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM api_sources WHERE external_project_id=?1)",
+                [external_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if exists {
+            return Err("该 Apifox 项目 ID 已经存在，请直接编辑现有项目。".into());
+        }
     }
     let id = if source.id.trim().is_empty() {
-        source_id(profile_id)
+        source_id(external_id)
     } else {
         source.id.trim().to_string()
     };
     let now = Utc::now().to_rfc3339();
     connection.execute(
         "INSERT INTO api_sources(id,project_profile_id,provider,external_project_id,apifox_project_name,created_at,updated_at)
-         VALUES(?1,?2,'apifox',?3,?4,?5,?5)
-         ON CONFLICT(id) DO UPDATE SET project_profile_id=excluded.project_profile_id,external_project_id=excluded.external_project_id,apifox_project_name=excluded.apifox_project_name,updated_at=excluded.updated_at",
-        params![id, profile_id, external_id, apifox_project_name, now],
+         VALUES(?1,NULL,'apifox',?2,?3,?4,?4)
+         ON CONFLICT(id) DO UPDATE SET external_project_id=excluded.external_project_id,apifox_project_name=excluded.apifox_project_name,updated_at=excluded.updated_at",
+        params![id, external_id, apifox_project_name, now],
     ).map_err(|error| {
         if error.to_string().contains("UNIQUE constraint failed") {
-            "该规范项目已经存在 Apifox 关联。".to_string()
+            "该 Apifox 项目 ID 已经存在，请直接编辑现有项目。".to_string()
         } else {
             error.to_string()
         }
     })?;
-    list_api_sources(state)?
-        .into_iter()
-        .find(|item| item.id == id)
-        .ok_or_else(|| "Apifox 项目关联保存后无法读取。".to_string())
+    Ok(id)
 }
 
 fn validate_apifox_project_name(value: &str, external_id: &str) -> Result<String, String> {
@@ -447,73 +437,6 @@ fn validate_apifox_project_name(value: &str, external_id: &str) -> Result<String
         return Err("Apifox 项目名称不能超过 120 个字符，也不能包含换行。".into());
     }
     Ok(value.to_string())
-}
-
-#[tauri::command]
-pub fn save_api_sources(
-    state: tauri::State<'_, DatabaseState>,
-    source: ApiSourceBatchUpdate,
-) -> Result<Vec<ApiSource>, String> {
-    crate::project_identity::sync_project_profiles_for_state(&state)?;
-    let profile_ids = save_api_sources_transaction(&state, &source)?;
-    let saved = list_api_sources(state)?
-        .into_iter()
-        .filter(|item| profile_ids.contains(&item.project_profile_id))
-        .collect::<Vec<_>>();
-    if saved.len() != profile_ids.len() {
-        return Err("部分 Apifox 项目关联保存后无法读取。".into());
-    }
-    Ok(saved)
-}
-
-fn save_api_sources_transaction(
-    state: &DatabaseState,
-    source: &ApiSourceBatchUpdate,
-) -> Result<Vec<String>, String> {
-    let external_id = source.external_project_id.trim();
-    if !valid_external_project_id(external_id) {
-        return Err("Apifox 项目 ID 只能包含字母、数字、短横线或下划线。".into());
-    }
-    let apifox_project_name =
-        validate_apifox_project_name(&source.apifox_project_name, external_id)?;
-    let mut profile_ids = source
-        .project_profile_ids
-        .iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    profile_ids.sort();
-    profile_ids.dedup();
-    if profile_ids.is_empty() {
-        return Err("请至少选择一个要关联的规范项目。".into());
-    }
-    let mut connection = state.connect()?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    let now = Utc::now().to_rfc3339();
-    for profile_id in &profile_ids {
-        let profile_exists = transaction
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM project_profiles WHERE id=?1)",
-                [profile_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|error| error.to_string())?;
-        if !profile_exists {
-            return Err("所选规范项目不存在，请重新同步项目资产。".into());
-        }
-        transaction
-            .execute(
-                "INSERT INTO api_sources(id,project_profile_id,provider,external_project_id,apifox_project_name,created_at,updated_at)
-                 VALUES(?1,?2,'apifox',?3,?4,?5,?5)
-                 ON CONFLICT(project_profile_id) DO UPDATE SET external_project_id=excluded.external_project_id,apifox_project_name=excluded.apifox_project_name,updated_at=excluded.updated_at",
-                params![source_id(profile_id),profile_id,external_id,apifox_project_name,now],
-            )
-            .map_err(|error| error.to_string())?;
-    }
-    transaction.commit().map_err(|error| error.to_string())?;
-    Ok(profile_ids)
 }
 
 #[tauri::command]
@@ -542,12 +465,12 @@ fn source_row(state: &DatabaseState, id: &str) -> Result<SourceRow, String> {
     state
         .connect()?
         .query_row(
-            "SELECT s.id,p.display_name,s.external_project_id,s.last_synced_at FROM api_sources s JOIN project_profiles p ON p.id=s.project_profile_id WHERE s.id=?1",
+            "SELECT id,COALESCE(NULLIF(apifox_project_name,''),NULLIF(document_title,''),'Apifox ' || external_project_id),external_project_id,last_synced_at FROM api_sources WHERE id=?1",
             [id],
             |row| {
                 Ok(SourceRow {
                     id: row.get(0)?,
-                    project_name: row.get(1)?,
+                    apifox_project_name: row.get(1)?,
                     external_project_id: row.get(2)?,
                     last_synced_at: row.get(3)?,
                 })
@@ -555,7 +478,7 @@ fn source_row(state: &DatabaseState, id: &str) -> Result<SourceRow, String> {
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "接口文档项目关联不存在。".to_string())
+        .ok_or_else(|| "Apifox 接口项目不存在。".to_string())
 }
 
 fn export_payload() -> Value {
@@ -891,7 +814,7 @@ fn sync_source(state: &DatabaseState, source: &SourceRow) -> Result<ApiSyncSumma
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(ApiSyncSummary {
         source_id: source.id.clone(),
-        project_name: source.project_name.clone(),
+        project_name: source.apifox_project_name.clone(),
         status: "ready".into(),
         added,
         updated,
@@ -931,7 +854,7 @@ pub fn sync_all_api_sources(
                 mark_sync_failure(&state, &source, &error);
                 summaries.push(ApiSyncSummary {
                     source_id: source.id,
-                    project_name: source.project_name,
+                    project_name: source.apifox_project_name,
                     status: if source.last_synced_at.is_some() {
                         "stale"
                     } else {
@@ -1015,14 +938,14 @@ pub fn list_api_endpoints(
 
 fn endpoint_detail(state: &DatabaseState, endpoint_id: &str) -> Result<ApiEndpointDetail, String> {
     state.connect()?.query_row(
-        "SELECT e.id,e.source_id,e.operation_id,e.method,e.path,e.title,e.description,e.tags_json,e.deprecated,e.is_favorite,e.updated_at,s.project_profile_id,p.display_name,p.repository_path,s.document_title,s.openapi_version,s.last_synced_at,e.document_json
-         FROM api_endpoints e JOIN api_sources s ON s.id=e.source_id JOIN project_profiles p ON p.id=s.project_profile_id WHERE e.id=?1",
+        "SELECT e.id,e.source_id,e.operation_id,e.method,e.path,e.title,e.description,e.tags_json,e.deprecated,e.is_favorite,e.updated_at,s.external_project_id,COALESCE(NULLIF(s.apifox_project_name,''),NULLIF(s.document_title,''),'Apifox ' || s.external_project_id),s.document_title,s.openapi_version,s.last_synced_at,e.document_json
+         FROM api_endpoints e JOIN api_sources s ON s.id=e.source_id WHERE e.id=?1",
         [endpoint_id],
         |row| {
-            let raw: String = row.get(17)?;
+            let raw: String = row.get(16)?;
             Ok(ApiEndpointDetail {
                 summary: ApiEndpointSummary { id:row.get(0)?,source_id:row.get(1)?,operation_id:row.get(2)?,method:row.get(3)?,path:row.get(4)?,title:row.get(5)?,description:row.get(6)?,tags:tags_from_json(row.get(7)?),deprecated:row.get(8)?,favorite:row.get(9)?,updated_at:row.get(10)? },
-                project_profile_id:row.get(11)?, project_name:row.get(12)?,repository_path:row.get(13)?,document_title:row.get(14)?,openapi_version:row.get(15)?,last_synced_at:row.get(16)?,document:serde_json::from_str(&raw).unwrap_or_else(|_| json!({})),
+                external_project_id:row.get(11)?,apifox_project_name:row.get(12)?,document_title:row.get(13)?,openapi_version:row.get(14)?,last_synced_at:row.get(15)?,document:serde_json::from_str(&raw).unwrap_or_else(|_| json!({})),
             })
         },
     ).optional().map_err(|error| error.to_string())?.ok_or_else(|| "接口文档不存在，可能已在最近同步中删除。".into())
@@ -2111,7 +2034,7 @@ fn render_markdown(detail: &ApiEndpointDetail) -> String {
     let mut output = format!(
         "# {}\n\n- 项目：{}\n- 接口：`{} {}`\n- OpenAPI：{}\n- 最后同步：{}\n",
         detail.summary.title,
-        detail.project_name,
+        detail.apifox_project_name,
         detail.summary.method,
         detail.summary.path,
         detail.openapi_version,
@@ -2691,9 +2614,8 @@ mod tests {
                 favorite: false,
                 updated_at: "2026-08-31".into(),
             },
-            project_profile_id: "p".into(),
-            project_name: "项目".into(),
-            repository_path: "F:/project".into(),
+            external_project_id: "1001".into(),
+            apifox_project_name: "项目".into(),
             document_title: "示例".into(),
             openapi_version: "3.1.0".into(),
             last_synced_at: Some("2026-08-31".into()),
@@ -2721,9 +2643,8 @@ mod tests {
                 favorite: false,
                 updated_at: String::new(),
             },
-            project_profile_id: "project-1".into(),
-            project_name: "项目".into(),
-            repository_path: String::new(),
+            external_project_id: "1001".into(),
+            apifox_project_name: "项目".into(),
             document_title: "示例".into(),
             openapi_version: "3.1.0".into(),
             last_synced_at: None,
@@ -2804,7 +2725,7 @@ mod tests {
             .connect()
             .unwrap()
             .execute(
-                "INSERT INTO api_sources(id,project_profile_id,external_project_id,openapi_document_json,created_at,updated_at) VALUES('source-1','project-1','1001',?1,?2,?2)",
+                "INSERT INTO api_sources(id,external_project_id,openapi_document_json,created_at,updated_at) VALUES('source-1','1001',?1,?2,?2)",
                 params![serde_json::to_string(&root).unwrap(),now],
             )
             .unwrap();
@@ -2850,9 +2771,8 @@ mod tests {
                 favorite: false,
                 updated_at: String::new(),
             },
-            project_profile_id: "p".into(),
-            project_name: "项目".into(),
-            repository_path: String::new(),
+            external_project_id: "1001".into(),
+            apifox_project_name: "项目".into(),
             document_title: "示例".into(),
             openapi_version: "3.1.0".into(),
             last_synced_at: None,
@@ -2891,9 +2811,8 @@ mod tests {
                 favorite: false,
                 updated_at: String::new(),
             },
-            project_profile_id: "project-1".into(),
-            project_name: "项目".into(),
-            repository_path: String::new(),
+            external_project_id: "1001".into(),
+            apifox_project_name: "项目".into(),
             document_title: "示例".into(),
             openapi_version: "3.1.0".into(),
             last_synced_at: None,
@@ -3010,62 +2929,41 @@ mod tests {
     }
 
     #[test]
-    fn multiple_project_profiles_are_linked_in_one_transaction_with_apifox_name() {
+    fn apifox_project_can_be_saved_without_a_project_profile() {
         let database_path = std::env::temp_dir().join(format!(
-            "workbench-apifox-multi-link-{}.sqlite3",
+            "workbench-apifox-project-{}.sqlite3",
             uuid::Uuid::new_v4()
         ));
         let state = DatabaseState::new(database_path.clone()).unwrap();
-        let now = Utc::now().to_rfc3339();
-        let connection = state.connect().unwrap();
-        for (id, name) in [("project-1", "项目一"), ("project-2", "项目二")] {
-            connection
-                .execute(
-                    "INSERT INTO project_profiles(id,display_name,created_at,updated_at) VALUES(?1,?2,?3,?3)",
-                    params![id, name, now],
-                )
-                .unwrap();
-        }
-        drop(connection);
-        let profile_ids = save_api_sources_transaction(
+        let saved_id = save_api_source_record(
             &state,
-            &ApiSourceBatchUpdate {
-                project_profile_ids: vec!["project-2".into(), "project-1".into()],
+            &ApiSourceUpdate {
+                id: String::new(),
                 external_project_id: "1001".into(),
                 apifox_project_name: "统一接口项目".into(),
             },
         )
         .unwrap();
-        assert_eq!(profile_ids, vec!["project-1", "project-2"]);
+        assert_eq!(saved_id, source_id("1001"));
         let connection = state.connect().unwrap();
-        let linked: i64 = connection
+        let stored: (Option<String>, String) = connection
             .query_row(
-                "SELECT COUNT(*) FROM api_sources WHERE external_project_id='1001' AND apifox_project_name='统一接口项目'",
+                "SELECT project_profile_id,apifox_project_name FROM api_sources WHERE external_project_id='1001'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(linked, 2);
+        assert_eq!(stored, (None, "统一接口项目".into()));
         drop(connection);
-        assert!(save_api_sources_transaction(
+        assert!(save_api_source_record(
             &state,
-            &ApiSourceBatchUpdate {
-                project_profile_ids: vec!["project-1".into(), "missing-project".into()],
-                external_project_id: "2002".into(),
-                apifox_project_name: "不应写入".into(),
+            &ApiSourceUpdate {
+                id: String::new(),
+                external_project_id: "1001".into(),
+                apifox_project_name: "重复项目".into(),
             },
         )
         .is_err());
-        let external_id: String = state
-            .connect()
-            .unwrap()
-            .query_row(
-                "SELECT external_project_id FROM api_sources WHERE project_profile_id='project-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(external_id, "1001");
         let _ = std::fs::remove_file(database_path);
     }
 }

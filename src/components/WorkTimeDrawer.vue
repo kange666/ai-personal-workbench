@@ -16,7 +16,7 @@ const projects = computed(() => [...new Set(sessions.value.map(item => item.proj
 
 function today() { return new Date().toLocaleDateString("sv-SE"); }
 function blankSession(date = props.startDate || today()): WorkSession {
-  return { id: "", date, startTime: "09:00", endTime: "10:00", durationMinutes: 60, project: "AI个人工作台", workType: "功能开发", source: "manual", note: "", createdAt: "", updatedAt: "" };
+  return { id: "", date, startTime: "09:00", endTime: "10:00", durationMinutes: 60, project: "星枢工作台", workType: "功能开发", source: "manual", note: "", createdAt: "", updatedAt: "" };
 }
 function formatMinutes(value: number) {
   const hours = Math.floor(value / 60); const minutes = value % 60;

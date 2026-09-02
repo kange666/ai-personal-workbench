@@ -16,7 +16,7 @@ const loading=ref(false);
 const message=ref("");
 const error=ref("");
 
-const sourceLabels:Record<string,string>={codex:"Codex",tapd:"TAPD",tapd_job:"TAPD 自动处理",task_suggestion:"任务建议",test:"测试",repository:"项目资产",video:"视频"};
+const sourceLabels:Record<string,string>={codex:"Codex",tapd:"TAPD",tapd_job:"TAPD 自动处理",task_suggestion:"任务建议",quick_capture:"快速任务",test:"测试",repository:"项目资产"};
 const statusLabels:Record<string,string>={needs_decision:"待决策",in_progress:"处理中",done:"已完成",archived:"已归档"};
 const projects=computed(()=>["全部项目",...Array.from(new Set(items.value.map(item=>item.project))).sort((a,b)=>a.localeCompare(b,"zh-CN"))]);
 const sources=computed(()=>["全部来源",...Array.from(new Set(items.value.map(item=>item.sourceType))).map(value=>({value,label:sourceLabels[value]||value}))]);
@@ -45,7 +45,7 @@ async function load(){
   if(!isTauriRuntime())return;
   loading.value=true;error.value="";
   try{
-    items.value=await listInboxItems(undefined,300);
+    items.value=(await listInboxItems(undefined,300)).filter(item=>item.sourceType!=="video");
     const target=String(route.query.item||"");
     if(target) selected.value=items.value.find(item=>item.id===target)||null;
   }catch(cause){error.value=String(cause);}finally{loading.value=false;}
@@ -83,7 +83,7 @@ onMounted(load);
 
 <template>
   <div class="view inbox-view">
-    <header class="page-header"><div><h1>待处理收件箱</h1><p>统一处理 Codex、TAPD、测试、项目风险和视频结果</p></div><div><button class="button secondary" :disabled="loading" @click="load">{{ loading?"同步中…":"↻ 同步来源" }}</button><RouterLink class="button primary link-button" to="/calendar?tab=tasks">打开工作日历</RouterLink></div></header>
+    <header class="page-header"><div><h1>待处理收件箱</h1><p>统一处理快速任务、Codex、TAPD、测试和项目风险</p></div><div><button class="button secondary" :disabled="loading" @click="load">{{ loading?"同步中…":"↻ 同步来源" }}</button><RouterLink class="button primary link-button" to="/calendar?tab=tasks">打开工作日历</RouterLink></div></header>
     <div v-if="message||error" class="inbox-message" :class="{error:Boolean(error)}">{{ error||message }}</div>
     <section class="inbox-metrics">
       <article><small>需要行动</small><b>{{ counts.open }}</b><span>待决策与处理中</span></article>
@@ -105,7 +105,7 @@ onMounted(load);
         <div v-if="!filtered.length" class="inbox-empty"><b>{{ loading?'正在同步本地来源':'当前筛选条件下没有事项' }}</b><p>已完成和已归档记录不会出现在“需要行动”中。</p></div>
       </div>
     </section>
-    <div v-if="selected" class="activity-backdrop" @click.self="selected=null"><aside class="activity-drawer panel inbox-detail"><header><div><small>{{ sourceLabels[selected.sourceType] }} · {{ selected.project }}</small><h2 :title="selected.title">{{ compactDetailTitle(selected.title) }}</h2><p>{{ statusLabels[selected.workflowStatus] }} · {{ formatTime(selected.updatedAt) }}</p></div><button class="icon-button" @click="selected=null">×</button></header><section class="inbox-detail-tags"><span :class="`priority-${selected.priority}`">{{ priorityLabel(selected.priority) }}</span><span>{{ selected.sourceStatus||"来源状态未知" }}</span></section><section><h3>事项摘要</h3><p>{{ selected.summary||"暂无摘要" }}</p></section><section><h3>来源与处理说明</h3><p>{{ selected.detail||"暂无补充信息" }}</p><dl><div><dt>来源类型</dt><dd>{{ sourceLabels[selected.sourceType] }}</dd></div><div><dt>来源 ID</dt><dd>{{ selected.sourceId||"未关联" }}</dd></div><div><dt>规范项目</dt><dd>{{ selected.project }}</dd></div></dl></section><footer><button class="button secondary" @click="openSource(selected)">查看来源</button><button v-if="selected.workflowStatus==='needs_decision'" class="button secondary" @click="createTask(selected)">转为今日任务</button><button v-if="selected.workflowStatus==='needs_decision'" class="button primary" @click="changeStatus(selected,'in_progress')">开始处理</button><button v-else-if="selected.workflowStatus==='in_progress'" class="button primary" @click="changeStatus(selected,'done')">标记完成</button></footer></aside></div>
+    <div v-if="selected" class="activity-backdrop" @click.self="selected=null"><aside class="activity-drawer panel inbox-detail"><header><div><small>{{ sourceLabels[selected.sourceType] }} · {{ selected.project }}</small><h2 :title="selected.title">{{ compactDetailTitle(selected.title) }}</h2><p>{{ statusLabels[selected.workflowStatus] }} · {{ formatTime(selected.updatedAt) }}</p></div><button class="icon-button" @click="selected=null">×</button></header><section class="inbox-detail-tags"><span :class="`priority-${selected.priority}`">{{ priorityLabel(selected.priority) }}</span><span>{{ selected.sourceStatus||"来源状态未知" }}</span></section><section><h3>事项摘要</h3><p>{{ selected.summary||"暂无摘要" }}</p></section><section><h3>来源与处理说明</h3><p>{{ selected.detail||"暂无补充信息" }}</p><dl><div><dt>来源类型</dt><dd>{{ sourceLabels[selected.sourceType] }}</dd></div><div><dt>来源 ID</dt><dd>{{ selected.sourceId||"未关联" }}</dd></div><div><dt>规范项目</dt><dd>{{ selected.project }}</dd></div></dl></section><footer><button v-if="selected.route" class="button secondary" @click="openSource(selected)">查看来源</button><button v-if="selected.workflowStatus==='needs_decision'" class="button secondary" @click="createTask(selected)">转为今日任务</button><button v-if="selected.workflowStatus==='needs_decision'" class="button primary" @click="changeStatus(selected,'in_progress')">开始处理</button><button v-else-if="selected.workflowStatus==='in_progress'" class="button primary" @click="changeStatus(selected,'done')">标记完成</button></footer></aside></div>
   </div>
 </template>
 

@@ -10,6 +10,7 @@ import {
   listJenkinsPublishRecords,
   openJenkinsUrl,
   saveJenkinsConnection,
+  setJenkinsJobDisplayName,
   setJenkinsJobFavorite,
   testJenkinsConnection,
   triggerJenkinsPublish,
@@ -29,6 +30,11 @@ const selectedBranch = ref("");
 const branchOptions = ref<JenkinsBranchOptions | null>(null);
 const projectMenuOpen = ref(false);
 const projectQuery = ref("");
+const selectedView = ref("all");
+const aliasJob = ref<JenkinsJob | null>(null);
+const aliasValue = ref("");
+const aliasSaving = ref(false);
+const confirmingPublish = ref(false);
 const configuring = ref(false);
 const configBaseUrl = ref("");
 const configUsername = ref("");
@@ -48,14 +54,19 @@ const historyPeriod = ref<"all"|"today"|"7d">("all");
 const historyQuery = ref("");
 
 const selectedJob = computed(() => jobs.value.find(item => item.fullName === selectedJobName.value) || null);
+const availableViews = computed(() => [...new Set(jobs.value.flatMap(item => item.viewNames || []))].sort((left,right)=>left.localeCompare(right,"zh-CN")));
 const filteredJobs = computed(() => {
   const keyword = projectQuery.value.trim().toLocaleLowerCase();
   return jobs.value
-    .filter(item => !keyword || `${item.name} ${item.fullName}`.toLocaleLowerCase().includes(keyword))
-    .sort((left,right) => Number(right.favorite)-Number(left.favorite) || left.fullName.localeCompare(right.fullName,"zh-CN"));
+    .filter(item => !keyword || `${item.displayName} ${item.name} ${item.fullName}`.toLocaleLowerCase().includes(keyword))
+    .sort((left,right) => Number(right.favorite)-Number(left.favorite) || left.displayName.localeCompare(right.displayName,"zh-CN") || left.fullName.localeCompare(right.fullName,"zh-CN"));
 });
 const favoriteJobs = computed(() => filteredJobs.value.filter(item => item.favorite));
-const normalJobs = computed(() => filteredJobs.value.filter(item => !item.favorite));
+const normalJobs = computed(() => {
+  const searching=Boolean(projectQuery.value.trim());
+  return filteredJobs.value.filter(item => !item.favorite && (searching || selectedView.value === "all" || (item.viewNames || []).includes(selectedView.value)));
+});
+const hasVisibleJobs = computed(() => favoriteJobs.value.length + normalJobs.value.length > 0);
 const activeRecords = computed(() => records.value.filter(item => item.status === "queued" || item.status === "running"));
 const allFinishedRecords = computed(() => records.value.filter(item => item.status !== "queued" && item.status !== "running"));
 const finishedRecords = computed(() => {
@@ -115,6 +126,7 @@ function activeDetail(record:JenkinsPublishRecord) {
   if (record.currentStage) return `当前阶段：${record.currentStage}`;
   return record.status === "running" ? "Jenkins 正在执行发布任务" : record.errorMessage || record.result || "发布已结束";
 }
+function shortCommit(value:string) { return value ? value.slice(0,8) : "—"; }
 
 async function loadConnection() {
   if (!isTauriRuntime()) return;
@@ -127,6 +139,7 @@ async function loadJobs() {
   loadingJobs.value=true; error.value="";
   try {
     jobs.value=await listJenkinsJobs();
+    if (selectedView.value !== "all" && !availableViews.value.includes(selectedView.value)) selectedView.value="all";
     if (selectedJobName.value && !jobs.value.some(item=>item.fullName===selectedJobName.value)) {
       selectedJobName.value=""; selectedBranch.value=""; branchOptions.value=null;
     }
@@ -166,20 +179,46 @@ async function toggleFavorite(job:JenkinsJob) {
     jobs.value=[...jobs.value].sort((left,right)=>Number(right.favorite)-Number(left.favorite)||left.fullName.localeCompare(right.fullName,"zh-CN"));
   } catch(cause) { error.value=String(cause); }
 }
-async function publish() {
+function openAlias(job:JenkinsJob) {
+  aliasJob.value=job;
+  aliasValue.value=job.displayName === job.name ? "" : job.displayName;
+  projectMenuOpen.value=false;
+  error.value="";
+}
+async function saveAlias() {
+  const job=aliasJob.value;
+  if (!job || aliasSaving.value) return;
+  aliasSaving.value=true; error.value="";
+  try {
+    await setJenkinsJobDisplayName(job.fullName,aliasValue.value);
+    const displayName=aliasValue.value.trim() || job.name;
+    job.displayName=displayName;
+    records.value=records.value.map(record=>record.jobFullName===job.fullName?{...record,jobName:displayName}:record);
+    jobs.value=[...jobs.value];
+    window.dispatchEvent(new CustomEvent("workbench-active-operations-changed"));
+    aliasJob.value=null;
+    message.value=aliasValue.value.trim()?`已将 ${job.fullName} 显示为“${displayName}”。`:`已恢复 ${job.fullName} 的 Jenkins 原名。`;
+  } catch(cause) { error.value=String(cause); }
+  finally { aliasSaving.value=false; }
+}
+function requestPublish() {
   const job=selectedJob.value;
   if (!job || !selectedBranch.value || publishing.value) return;
   if (duplicateActiveRecord.value) {
     error.value=`${job.fullName} · ${selectedBranch.value} 已有正在执行的发布，请等待完成后再试。`;
     return;
   }
-  const confirmed=window.confirm(`确认发布？\n\n项目：${job.fullName}\n分支：${selectedBranch.value}\n\n其他参数将使用 Jenkins 中配置的默认值。`);
-  if (!confirmed) return;
+  confirmingPublish.value=true;
+}
+async function publish() {
+  const job=selectedJob.value;
+  if (!job || !selectedBranch.value || publishing.value) return;
+  confirmingPublish.value=false;
   publishing.value=true; error.value=""; message.value="";
   try {
     const record=await triggerJenkinsPublish(job.fullName,selectedBranch.value);
     records.value=[record,...records.value.filter(item=>item.id!==record.id)];
-    message.value=`${job.name} · ${selectedBranch.value} 已进入 Jenkins 队列。`;
+    message.value=`${job.displayName} · ${selectedBranch.value} 已进入 Jenkins 队列。`;
     window.dispatchEvent(new CustomEvent("workbench-active-operations-changed"));
   } catch(cause) { error.value=String(cause); }
   finally { publishing.value=false; }
@@ -246,18 +285,20 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
       <section class="panel deployment-launcher">
         <header><div><small>JENKINS PUBLISH</small><h2>选择项目与分支</h2></div><span class="connection-ready"><i></i>Jenkins {{ connection.version || "已连接" }}</span></header>
         <div class="deployment-fields">
-          <label class="project-select-field"><span>项目</span><div class="project-select-control"><button type="button" class="project-select-trigger" :class="{open:projectMenuOpen}" @click="projectMenuOpen=!projectMenuOpen"><b>{{ selectedJob?.fullName || "选择 Jenkins 项目" }}</b><em>{{ projectMenuOpen ? "▴" : "▾" }}</em></button><button v-if="selectedJob" class="selected-favorite" :class="{active:selectedJob.favorite}" :title="selectedJob.favorite?'取消收藏':'收藏项目'" @click="toggleFavorite(selectedJob)">{{ selectedJob.favorite ? "★" : "☆" }}</button></div>
+          <label class="project-select-field"><span>项目</span><div class="project-select-control"><button type="button" class="project-select-trigger" :class="{open:projectMenuOpen}" :aria-expanded="projectMenuOpen" @click="projectMenuOpen=!projectMenuOpen"><b>{{ selectedJob?.displayName || "选择 Jenkins 项目" }}</b><i class="disclosure-icon" aria-hidden="true"></i></button><button v-if="selectedJob" type="button" class="selected-project-action" :class="{active:selectedJob.favorite}" :title="selectedJob.favorite?'取消收藏':'收藏项目'" @click="toggleFavorite(selectedJob)">{{ selectedJob.favorite ? "★" : "☆" }}</button><button v-if="selectedJob" type="button" class="selected-project-action" title="修改工作台显示名称" @click="openAlias(selectedJob)">✎</button></div>
             <div v-if="projectMenuOpen" class="project-picker panel">
-              <input v-model="projectQuery" autofocus placeholder="搜索 Jenkins 项目">
+              <input v-model="projectQuery" autofocus placeholder="搜索名称、自定义名称或完整路径">
+              <nav v-if="availableViews.length" class="project-view-tabs" aria-label="Jenkins View"><button type="button" :class="{active:selectedView==='all'}" @click="selectedView='all'">全部</button><button v-for="viewName in availableViews" :key="viewName" type="button" :class="{active:selectedView===viewName}" @click="selectedView=viewName">{{ viewName }}</button></nav>
               <div class="project-picker-list">
-                <section v-if="favoriteJobs.length"><h3>已收藏</h3><button v-for="job in favoriteJobs" :key="job.fullName" @click="selectJob(job)"><span><b>{{ job.name }}</b><small>{{ job.fullName }}</small></span><i class="active" title="取消收藏" @click.stop="toggleFavorite(job)">★</i></button></section>
-                <section v-if="normalJobs.length"><h3>{{ favoriteJobs.length ? "全部项目" : "项目" }}</h3><button v-for="job in normalJobs" :key="job.fullName" @click="selectJob(job)"><span><b>{{ job.name }}</b><small>{{ job.fullName }}</small></span><i title="收藏项目" @click.stop="toggleFavorite(job)">☆</i></button></section>
-                <p v-if="!filteredJobs.length">没有匹配的 Jenkins 项目。</p>
+                <section v-if="favoriteJobs.length"><h3>已收藏 · 固定置顶</h3><div v-for="job in favoriteJobs" :key="job.fullName" class="project-option"><button type="button" class="project-option-main" @click="selectJob(job)"><span><b>{{ job.displayName }}</b><small>{{ job.fullName }}</small></span></button><button type="button" class="project-option-action" title="修改显示名称" @click="openAlias(job)">✎</button><button type="button" class="project-option-action active" title="取消收藏" @click="toggleFavorite(job)">★</button></div></section>
+                <section v-if="normalJobs.length"><h3>{{ projectQuery.trim() ? "搜索结果" : selectedView === "all" ? "全部项目" : selectedView }}</h3><div v-for="job in normalJobs" :key="job.fullName" class="project-option"><button type="button" class="project-option-main" @click="selectJob(job)"><span><b>{{ job.displayName }}</b><small>{{ job.fullName }}</small></span></button><button type="button" class="project-option-action" title="修改显示名称" @click="openAlias(job)">✎</button><button type="button" class="project-option-action" title="收藏项目" @click="toggleFavorite(job)">☆</button></div></section>
+                <p v-if="!hasVisibleJobs">没有匹配的 Jenkins 项目。</p>
               </div>
             </div>
+            <small>{{ selectedJob ? selectedJob.fullName : "支持 Jenkins View 分组和完整路径搜索" }}</small>
           </label>
           <label><span>分支</span><select v-model="selectedBranch" :disabled="!selectedJob || loadingBranches"><option value="">{{ loadingBranches ? "正在读取分支…" : selectedJob ? "选择已配置分支" : "请先选择项目" }}</option><option v-for="branch in branchOptions?.branches || []" :key="branch" :value="branch">{{ branch }}</option></select><small v-if="duplicateActiveRecord" class="duplicate-publish-hint">该项目和分支正在发布，完成后可再次发布</small><small v-else-if="branchOptions">参数：{{ branchOptions.parameterName }} · 其他参数使用 Jenkins 默认值</small></label>
-          <button class="button primary publish-button" :disabled="!canPublish" @click="publish">{{ publishing ? "正在提交…" : duplicateActiveRecord ? "正在发布" : "发布" }}</button>
+          <button class="button primary publish-button" :disabled="!canPublish" @click="requestPublish">{{ publishing ? "正在提交…" : duplicateActiveRecord ? "正在发布" : "发布" }}</button>
         </div>
       </section>
 
@@ -269,6 +310,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
             <div class="deployment-progress"><i></i></div>
             <p>{{ activeDetail(record) }}</p>
             <div v-if="record.stages.length" class="stage-list"><span v-for="stage in record.stages" :key="stage.id || stage.name" :class="stage.status.toLowerCase()"><i></i><b>{{ stage.name }}</b><small>{{ stageLabel(stage) }}</small></span></div>
+            <details class="record-changes" :open="Boolean(record.changes?.length)"><summary>本次实际 Changes <b>{{ record.changes?.length || 0 }}</b></summary><div v-if="record.changes?.length" class="change-list"><article v-for="(change,index) in record.changes" :key="`${change.commitId}-${index}`"><code>{{ shortCommit(change.commitId) }}</code><span><b>{{ change.message || "未提供变更说明" }}</b><small>{{ change.author || "未知提交人" }}</small></span></article></div><p v-else>{{ record.status === "queued" ? "构建开始后从 Jenkins 读取。" : "Jenkins 暂未返回本次构建的 Changes。" }}</p></details>
             <footer><span>{{ record.stages.length ? `${completedStages(record)} / ${record.stages.length} 阶段` : `已运行 ${durationText(record)}` }}</span><button v-if="record.buildUrl || record.jobUrl" class="text-button" @click="openJenkinsUrl(record.buildUrl || record.jobUrl)">打开 Jenkins ↗</button></footer>
           </article>
         </div>
@@ -279,11 +321,28 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
         <div class="panel deployment-history">
           <article v-for="record in finishedRecords" :key="record.id" :class="[record.status,{highlighted:highlightedRun===record.id}]">
             <i class="result-dot"></i><div class="history-main"><span><b>{{ record.jobName }}</b><small>{{ record.jobFullName }}</small></span><code>{{ record.branch }}</code></div><div class="history-result"><b>{{ statusLabel(record) }}</b><small>{{ record.currentStage || record.result || record.errorMessage }}</small></div><div class="history-time"><b>{{ durationText(record) }}</b><small>{{ formatTime(record.finishedAt || record.updatedAt) }}</small></div><button class="button secondary small" :disabled="!record.buildUrl && !record.jobUrl" @click="openJenkinsUrl(record.buildUrl || record.jobUrl)">打开 Jenkins</button>
+            <details class="record-changes history-changes"><summary>本次实际 Changes <b>{{ record.changes?.length || 0 }}</b></summary><div v-if="record.changes?.length" class="change-list"><article v-for="(change,index) in record.changes" :key="`${change.commitId}-${index}`"><code>{{ shortCommit(change.commitId) }}</code><span><b>{{ change.message || "未提供变更说明" }}</b><small>{{ change.author || "未知提交人" }}</small></span></article></div><p v-else>本次构建没有可用的 Changes。</p></details>
           </article>
           <div v-if="!finishedRecords.length" class="empty-state"><b>{{ allFinishedRecords.length ? "没有符合条件的发布记录" : "还没有发布记录" }}</b><p>{{ allFinishedRecords.length ? "可以调整结果、项目名称或时间范围。" : "选择 Jenkins 项目和分支后点击发布，状态会显示在这里。" }}</p></div>
         </div>
       </section>
     </template>
+
+    <div v-if="confirmingPublish" class="activity-backdrop jenkins-dialog-backdrop" @click.self="confirmingPublish=false">
+      <section class="panel jenkins-confirm-dialog">
+        <header><div><h2>确认发布</h2><p>工作台只传递所选分支，不修改 Jenkins 配置。</p></div><button type="button" class="icon-button" @click="confirmingPublish=false">×</button></header>
+        <div class="publish-confirm-content"><dl><div><dt>项目</dt><dd><b>{{ selectedJob?.displayName }}</b><small>{{ selectedJob?.fullName }}</small></dd></div><div><dt>分支</dt><dd><code>{{ selectedBranch }}</code></dd></div></dl><aside><b>本次实际 Changes</b><p>构建开始后从 Jenkins 当前构建读取，将显示在“正在发布”和发布历史中。</p></aside><p>其他参数使用 Jenkins Job 中已配置的默认值。</p></div>
+        <footer><button type="button" class="button secondary" @click="confirmingPublish=false">取消</button><button type="button" class="button primary" @click="publish">确认发布</button></footer>
+      </section>
+    </div>
+
+    <div v-if="aliasJob" class="activity-backdrop jenkins-dialog-backdrop" @click.self="aliasJob=null">
+      <form class="panel jenkins-alias-dialog" @submit.prevent="saveAlias">
+        <header><div><h2>自定义项目名称</h2><p>只改变工作台显示，不修改 Jenkins Job。</p></div><button type="button" class="icon-button" @click="aliasJob=null">×</button></header>
+        <div><label>Jenkins 完整路径<input :value="aliasJob.fullName" disabled></label><label>工作台显示名称<input v-model="aliasValue" maxlength="80" :placeholder="aliasJob.name"><small>留空保存可恢复 Jenkins 原名。</small></label></div>
+        <footer><button type="button" class="button secondary" @click="aliasJob=null">取消</button><button class="button primary" :disabled="aliasSaving">{{ aliasSaving ? "保存中…" : "保存" }}</button></footer>
+      </form>
+    </div>
 
     <div v-if="configuring" class="activity-backdrop jenkins-config-backdrop" @click.self="configuring=false">
       <form class="panel jenkins-config-dialog" @submit.prevent="saveConfiguration">
@@ -299,12 +358,14 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
 .deployments-view{max-width:1500px}.status-banner{margin-bottom:12px;padding:11px 14px;border-radius:9px}.status-banner.success{background:color-mix(in srgb,var(--success) 12%,var(--surface));color:var(--success)}.status-banner.error{background:color-mix(in srgb,var(--danger) 12%,var(--surface));color:var(--danger)}
 .deployment-empty-connection{min-height:180px;padding:28px;display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:18px;align-items:center}.deployment-empty-connection>span{width:58px;height:58px;border-radius:14px;background:var(--primary);color:#fff;display:grid;place-items:center;font-size:27px;font-weight:900}.deployment-empty-connection h2{margin:0}.deployment-empty-connection p{margin:8px 0 0;color:var(--muted)}
 .deployment-launcher{padding:20px;overflow:visible;position:relative;z-index:10}.deployment-launcher>header,.deployment-section>header{display:flex;align-items:center;justify-content:space-between;gap:16px}.deployment-launcher h2,.deployment-section h2{margin:4px 0 0}.deployment-launcher header small{color:var(--primary);font:10px ui-monospace,monospace;letter-spacing:1.4px}.connection-ready{padding:6px 9px;border-radius:99px;background:color-mix(in srgb,var(--success) 12%,transparent);color:var(--success);font-size:11px}.connection-ready i{display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:var(--success)}
-.deployment-fields{display:grid;grid-template-columns:minmax(300px,1.25fr) minmax(260px,1fr) 130px;gap:14px;align-items:end;margin-top:20px}.deployment-fields label{position:relative;display:grid;gap:7px;color:var(--muted)}.deployment-fields select,.project-select-trigger{width:100%;height:43px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text);padding:0 12px}.deployment-fields label>small{min-height:14px;font-size:9px}.publish-button{height:43px}.project-select-control{display:grid;grid-template-columns:minmax(0,1fr) 43px;gap:7px}.project-select-trigger{display:flex;align-items:center;justify-content:space-between;text-align:left}.project-select-trigger b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-select-trigger em{font-style:normal}.project-select-trigger.open{border-color:var(--primary)}.selected-favorite{height:43px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--muted);font-size:20px}.selected-favorite.active{color:#f2b94b}
+.deployment-fields{display:grid;grid-template-columns:minmax(340px,1.25fr) minmax(260px,1fr) 130px;gap:14px;align-items:start;margin-top:20px}.deployment-fields>label{position:relative;display:grid;grid-template-rows:18px 43px 14px;gap:7px;color:var(--muted)}.deployment-fields select,.project-select-trigger{width:100%;height:43px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text);padding:0 12px}.deployment-fields label>small{min-height:14px;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.publish-button{height:43px;margin-top:25px}.project-select-control{display:grid;grid-template-columns:minmax(0,1fr) 43px 43px;gap:7px}.project-select-trigger{display:flex;align-items:center;justify-content:space-between;text-align:left}.project-select-trigger b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-select-trigger em{font-style:normal}.project-select-trigger.open{border-color:var(--primary)}.selected-project-action{height:43px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--muted);font-size:19px}.selected-project-action.active{color:#f2b94b}
 .duplicate-publish-hint{color:var(--warning)}
-.project-picker{position:absolute;left:0;top:76px;width:100%;max-height:430px;padding:10px;z-index:30;box-shadow:0 18px 45px rgba(0,0,0,.28)}.project-picker>input{width:100%;height:38px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);padding:0 10px}.project-picker-list{max-height:360px;margin-top:8px;overflow:auto}.project-picker-list section+section{margin-top:8px}.project-picker-list h3{margin:0;padding:7px 8px;color:var(--muted);font-size:10px}.project-picker-list button{width:100%;min-height:48px;padding:7px 8px;border:0;border-radius:7px;background:transparent;color:var(--text);display:grid;grid-template-columns:minmax(0,1fr) 34px;align-items:center;text-align:left}.project-picker-list button:hover{background:var(--primary-soft)}.project-picker-list button span{min-width:0;display:flex;flex-direction:column;gap:4px}.project-picker-list button b,.project-picker-list button small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-picker-list button small{color:var(--muted)}.project-picker-list button i{height:32px;display:grid;place-items:center;font-style:normal;font-size:18px;color:var(--muted)}.project-picker-list button i.active{color:#f2b94b}.project-picker-list>p{padding:22px;text-align:center;color:var(--muted)}
+.project-picker{position:absolute;left:0;top:75px;width:100%;max-height:510px;padding:10px;z-index:30;box-shadow:0 18px 45px rgba(0,0,0,.28)}.project-picker>input{width:100%;height:38px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);padding:0 10px}.project-view-tabs{display:flex;gap:6px;margin-top:9px;padding-bottom:3px;overflow-x:auto}.project-view-tabs button{flex:0 0 auto;height:30px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--muted);white-space:nowrap}.project-view-tabs button.active{border-color:var(--primary);background:var(--primary-soft);color:var(--primary)}.project-picker-list{max-height:380px;margin-top:6px;overflow:auto}.project-picker-list section+section{margin-top:8px}.project-picker-list h3{margin:0;padding:7px 8px;color:var(--muted);font-size:10px}.project-option{min-height:52px;border-radius:7px;display:grid;grid-template-columns:minmax(0,1fr) 36px 36px;align-items:center}.project-option:hover{background:var(--primary-soft)}.project-option button{border:0;background:transparent;color:var(--text)}.project-option-main{min-width:0;height:52px;padding:7px 8px;text-align:left}.project-option-main span{min-width:0;display:flex;flex-direction:column;gap:4px}.project-option-main b,.project-option-main small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-option-main small{color:var(--muted)}.project-option-action{height:36px;font-size:18px;color:var(--muted)!important}.project-option-action.active{color:#f2b94b!important}.project-picker-list>p{padding:22px;text-align:center;color:var(--muted)}
 .deployment-section{margin-top:20px}.deployment-section>header{margin-bottom:12px}.deployment-section>header p{margin:5px 0 0;color:var(--muted)}.deployment-section>header>b{padding:6px 10px;border-radius:99px;background:var(--primary-soft);color:var(--primary)}.deployment-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.deployment-card{padding:17px;border-color:color-mix(in srgb,var(--primary) 32%,var(--line))}.deployment-card.highlighted,.deployment-history article.highlighted{box-shadow:0 0 0 2px var(--primary)}.deployment-card>header,.deployment-card>footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.deployment-card h3{margin:5px 0 0}.deployment-card header small{color:var(--muted)}.deployment-card header>span{padding:5px 8px;border-radius:99px;background:var(--primary-soft);color:var(--primary);font-size:10px}.deployment-card header>span.reconnecting{background:color-mix(in srgb,var(--warning) 12%,transparent);color:var(--warning)}.deployment-card>p{margin:10px 0;color:var(--muted)}.deployment-progress{height:6px;margin-top:14px;border-radius:99px;background:var(--surface-2);overflow:hidden}.deployment-progress i{display:block;width:38%;height:100%;border-radius:inherit;background:linear-gradient(90deg,transparent,var(--primary),transparent);animation:deployment-loading 1.4s linear infinite}.stage-list{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0}.stage-list span{padding:6px 8px;border-radius:7px;background:var(--surface-2);display:flex;align-items:center;gap:5px}.stage-list span>i{width:6px;height:6px;border-radius:50%;background:var(--muted)}.stage-list span.success>i{background:var(--success)}.stage-list span.failed>i,.stage-list span.aborted>i{background:var(--danger)}.stage-list span.in_progress>i,.stage-list span.paused_pending_input>i{background:var(--primary)}.stage-list small{color:var(--muted);font-size:9px}.deployment-card>footer{padding-top:11px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.text-button{border:0;background:transparent;color:var(--primary);cursor:pointer}@keyframes deployment-loading{from{transform:translateX(-100%)}to{transform:translateX(280%)}}
-.deployment-history{overflow:hidden}.deployment-history>article{min-height:68px;padding:10px 14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:10px minmax(260px,1fr) minmax(160px,.6fr) 145px auto;gap:12px;align-items:center}.deployment-history>article:last-child{border-bottom:0}.result-dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}.deployment-history article.success .result-dot{background:var(--success)}.deployment-history article.failed .result-dot{background:var(--danger)}.deployment-history article.aborted .result-dot{background:var(--warning)}.history-main{min-width:0;display:flex;align-items:center;gap:12px}.history-main>span,.history-result,.history-time{min-width:0;display:flex;flex-direction:column;gap:4px}.history-main b,.history-main small,.history-result small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-main small,.history-result small,.history-time small{color:var(--muted);font-size:9px}.history-main code{padding:4px 7px;border-radius:5px;background:var(--surface-2);color:var(--primary);white-space:nowrap}.history-result b{color:var(--text)}.deployment-history article.success .history-result b{color:var(--success)}.deployment-history article.failed .history-result b{color:var(--danger)}
+.record-changes{margin:11px 0;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--surface-2) 65%,transparent);overflow:hidden}.record-changes summary{padding:9px 11px;cursor:pointer;color:var(--text);font-weight:700;list-style-position:inside}.record-changes summary b{margin-left:5px;padding:2px 6px;border-radius:99px;background:var(--primary-soft);color:var(--primary);font-size:9px}.record-changes>p{margin:0;padding:0 11px 10px;color:var(--muted);font-size:10px}.change-list{padding:0 10px 9px;display:grid;gap:6px}.change-list article{min-width:0;padding:7px 8px;border-radius:6px;background:var(--surface);display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;align-items:start}.change-list code{color:var(--primary)}.change-list span{min-width:0;display:flex;flex-direction:column;gap:3px}.change-list span b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.change-list span small{color:var(--muted);font-size:9px}
+.deployment-history{overflow:hidden}.deployment-history>article{min-height:68px;padding:10px 14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:10px minmax(260px,1fr) minmax(160px,.6fr) 145px auto;gap:12px;align-items:center}.deployment-history>article:last-child{border-bottom:0}.result-dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}.deployment-history article.success .result-dot{background:var(--success)}.deployment-history article.failed .result-dot{background:var(--danger)}.deployment-history article.aborted .result-dot{background:var(--warning)}.history-main{min-width:0;display:flex;align-items:center;gap:12px}.history-main>span,.history-result,.history-time{min-width:0;display:flex;flex-direction:column;gap:4px}.history-main b,.history-main small,.history-result small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-main small,.history-result small,.history-time small{color:var(--muted);font-size:9px}.history-main code{padding:4px 7px;border-radius:5px;background:var(--surface-2);color:var(--primary);white-space:nowrap}.history-result b{color:var(--text)}.deployment-history article.success .history-result b{color:var(--success)}.deployment-history article.failed .history-result b{color:var(--danger)}.history-changes{grid-column:2/-1;width:100%;margin:0}
 .deployment-history-filters{display:flex;align-items:center;gap:7px}.deployment-history-filters select,.deployment-history-filters input{height:34px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--text);padding:0 9px}.deployment-history-filters input{width:190px}.deployment-history-filters select{min-width:105px}
 .jenkins-config-backdrop{z-index:220}.jenkins-config-dialog{width:560px;overflow:hidden}.jenkins-config-dialog>header{height:72px;padding:0 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.jenkins-config-dialog h2{margin:0}.jenkins-config-dialog header p{margin:5px 0 0;color:var(--muted)}.jenkins-config-dialog>div{padding:18px;display:grid;gap:14px}.jenkins-config-dialog label{display:grid;gap:7px;color:var(--muted)}.jenkins-config-dialog input{height:41px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);padding:0 11px}.jenkins-config-dialog label small{font-size:9px}.jenkins-config-dialog>footer{height:64px;padding:0 18px;border-top:1px solid var(--line);display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:center}
-@media(max-width:1050px){.deployment-fields{grid-template-columns:1fr}.deployment-grid{grid-template-columns:1fr}.history-section>header{align-items:flex-start;flex-direction:column}.deployment-history-filters{width:100%;flex-wrap:wrap}.deployment-history-filters label{flex:1}.deployment-history-filters input{width:100%}.deployment-history>article{grid-template-columns:10px minmax(0,1fr) auto}.history-result,.history-time{display:none}}
+.jenkins-dialog-backdrop{z-index:230}.jenkins-confirm-dialog,.jenkins-alias-dialog{width:min(560px,calc(100vw - 32px));overflow:hidden}.jenkins-confirm-dialog>header,.jenkins-alias-dialog>header{min-height:72px;padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:16px}.jenkins-confirm-dialog h2,.jenkins-alias-dialog h2{margin:0}.jenkins-confirm-dialog header p,.jenkins-alias-dialog header p{margin:5px 0 0;color:var(--muted)}.publish-confirm-content,.jenkins-alias-dialog>div{padding:18px;display:grid;gap:14px}.publish-confirm-content dl{margin:0;display:grid;gap:9px}.publish-confirm-content dl>div{padding:10px;border-radius:8px;background:var(--surface-2);display:grid;grid-template-columns:75px minmax(0,1fr);gap:10px}.publish-confirm-content dt{color:var(--muted)}.publish-confirm-content dd{margin:0;min-width:0}.publish-confirm-content dd small{display:block;margin-top:4px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.publish-confirm-content aside{padding:11px;border:1px solid color-mix(in srgb,var(--primary) 35%,var(--line));border-radius:8px;background:var(--primary-soft)}.publish-confirm-content aside p,.publish-confirm-content>p{margin:5px 0 0;color:var(--muted)}.jenkins-alias-dialog label{display:grid;gap:7px;color:var(--muted)}.jenkins-alias-dialog input{height:41px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);padding:0 11px}.jenkins-alias-dialog input:disabled{opacity:.7}.jenkins-alias-dialog label small{font-size:9px}.jenkins-confirm-dialog>footer,.jenkins-alias-dialog>footer{min-height:64px;padding:10px 18px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;align-items:center;gap:8px}
+@media(max-width:1050px){.deployment-fields{grid-template-columns:1fr}.publish-button{margin-top:0}.deployment-grid{grid-template-columns:1fr}.history-section>header{align-items:flex-start;flex-direction:column}.deployment-history-filters{width:100%;flex-wrap:wrap}.deployment-history-filters label{flex:1}.deployment-history-filters input{width:100%}.deployment-history>article{grid-template-columns:10px minmax(0,1fr) auto}.history-result,.history-time{display:none}.history-changes{grid-column:2/-1}}
 </style>

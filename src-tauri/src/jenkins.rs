@@ -6,7 +6,7 @@ use reqwest::header::LOCATION;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -46,10 +46,12 @@ pub struct JenkinsConnectionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct JenkinsJob {
     pub name: String,
+    pub display_name: String,
     pub full_name: String,
     pub url: String,
     pub class_name: String,
     pub favorite: bool,
+    pub view_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -67,6 +69,15 @@ pub struct JenkinsPipelineStage {
     pub name: String,
     pub status: String,
     pub duration_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JenkinsChange {
+    pub commit_id: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -87,6 +98,7 @@ pub struct JenkinsPublishRecord {
     pub queue_reason: String,
     pub current_stage: String,
     pub stages: Vec<JenkinsPipelineStage>,
+    pub changes: Vec<JenkinsChange>,
     pub started_at: String,
     pub build_started_at: Option<String>,
     pub finished_at: Option<String>,
@@ -313,14 +325,92 @@ fn favorite_names(state: &DatabaseState, base_url: &str) -> Result<HashSet<Strin
         .map_err(|error| error.to_string())
 }
 
+fn job_aliases(state: &DatabaseState, base_url: &str) -> Result<HashMap<String, String>, String> {
+    let connection = state.connect()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT job_full_name,display_name FROM jenkins_job_aliases WHERE jenkins_base_url=?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([base_url], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn view_memberships(value: &Value) -> HashMap<String, HashSet<String>> {
+    let mut memberships = HashMap::<String, HashSet<String>>::new();
+    for view in value
+        .get("views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let class_name = view
+            .get("_class")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if class_name.contains("allview") {
+            continue;
+        }
+        let view_name = view.get("name").and_then(Value::as_str).unwrap_or_default();
+        if view_name.is_empty() {
+            continue;
+        }
+        for job in view
+            .get("jobs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(full_name) = job.get("fullName").and_then(Value::as_str) {
+                memberships
+                    .entry(format!("name:{full_name}"))
+                    .or_default()
+                    .insert(view_name.to_string());
+            }
+            if let Some(url) = job.get("url").and_then(Value::as_str) {
+                memberships
+                    .entry(format!("url:{}", url.trim_end_matches('/')))
+                    .or_default()
+                    .insert(view_name.to_string());
+            }
+        }
+    }
+    memberships
+}
+
+fn job_view_names(
+    memberships: &HashMap<String, HashSet<String>>,
+    inherited: &[String],
+    full_name: &str,
+    url: &str,
+) -> Vec<String> {
+    let mut names = inherited.iter().cloned().collect::<HashSet<_>>();
+    for key in [
+        format!("name:{full_name}"),
+        format!("url:{}", url.trim_end_matches('/')),
+    ] {
+        if let Some(direct) = memberships.get(&key) {
+            names.extend(direct.iter().cloned());
+        }
+    }
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+    names
+}
+
 fn list_jobs_for_state(state: &DatabaseState) -> Result<Vec<JenkinsJob>, String> {
     let connection = saved_connection(state)?;
     let client = http_client()?;
     let favorites = favorite_names(state, &connection.base_url)?;
+    let aliases = job_aliases(state, &connection.base_url)?;
     let mut jobs = Vec::new();
-    let mut pending = vec![connection.base_url.clone()];
+    let mut pending = vec![(connection.base_url.clone(), Vec::<String>::new())];
     let mut visited = HashSet::new();
-    while let Some(container_url) = pending.pop() {
+    while let Some((container_url, inherited_views)) = pending.pop() {
         if !visited.insert(container_url.clone()) {
             continue;
         }
@@ -331,7 +421,7 @@ fn list_jobs_for_state(state: &DatabaseState) -> Result<Vec<JenkinsJob>, String>
             &client,
             &connection,
             &format!(
-                "{}api/json?tree=jobs[name,fullName,url,buildable,_class]",
+                "{}api/json?tree=jobs[name,fullName,url,buildable,_class],views[name,_class,jobs[fullName,url]]",
                 container_url.trim_end_matches('/').to_string() + "/"
             ),
         )?;
@@ -341,6 +431,7 @@ fn list_jobs_for_state(state: &DatabaseState) -> Result<Vec<JenkinsJob>, String>
         let value = response
             .json::<Value>()
             .map_err(|error| format!("无法解析 Jenkins 项目列表：{error}"))?;
+        let memberships = view_memberships(&value);
         for item in value
             .get("jobs")
             .and_then(Value::as_array)
@@ -357,25 +448,36 @@ fn list_jobs_for_state(state: &DatabaseState) -> Result<Vec<JenkinsJob>, String>
             if name.is_empty() || full_name.is_empty() || url.is_empty() {
                 continue;
             }
+            let view_names = job_view_names(&memberships, &inherited_views, full_name, url);
             let lower_class = class_name.to_ascii_lowercase();
             if lower_class.contains("folder") || lower_class.contains("multibranch") {
-                pending.push(url.to_string());
+                pending.push((url.to_string(), view_names));
             } else if item.get("buildable").and_then(Value::as_bool) == Some(true) {
                 jobs.push(JenkinsJob {
                     name: name.to_string(),
+                    display_name: aliases
+                        .get(full_name)
+                        .cloned()
+                        .unwrap_or_else(|| name.to_string()),
                     full_name: full_name.to_string(),
                     url: url.to_string(),
                     class_name: class_name.to_string(),
                     favorite: favorites.contains(full_name),
+                    view_names,
                 });
             }
         }
     }
     jobs.sort_by(|left, right| {
         right.favorite.cmp(&left.favorite).then_with(|| {
-            left.full_name
+            left.display_name
                 .to_lowercase()
-                .cmp(&right.full_name.to_lowercase())
+                .cmp(&right.display_name.to_lowercase())
+                .then_with(|| {
+                    left.full_name
+                        .to_lowercase()
+                        .cmp(&right.full_name.to_lowercase())
+                })
         })
     });
     Ok(jobs)
@@ -415,6 +517,64 @@ pub fn set_jenkins_job_favorite(
             .execute(
                 "DELETE FROM jenkins_favorite_jobs WHERE jenkins_base_url=?1 AND job_full_name=?2",
                 params![connection.base_url, job_full_name],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn normalize_display_name(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 80 {
+        return Err("自定义名称不能超过 80 个字符。".to_string());
+    }
+    if value.chars().any(char::is_control) {
+        return Err("自定义名称不能包含控制字符。".to_string());
+    }
+    Ok(Some(value.to_string()))
+}
+
+#[tauri::command]
+pub fn set_jenkins_job_display_name(
+    state: tauri::State<'_, DatabaseState>,
+    job_full_name: String,
+    display_name: String,
+) -> Result<(), String> {
+    let connection = saved_connection(&state)?;
+    let job_full_name = job_full_name.trim();
+    if job_full_name.is_empty() {
+        return Err("Jenkins 项目名称不能为空。".to_string());
+    }
+    let display_name = normalize_display_name(&display_name)?;
+    let original_name = job_full_name.rsplit('/').next().unwrap_or(job_full_name);
+    let database = state.connect()?;
+    if let Some(display_name) = display_name {
+        database
+            .execute(
+                "INSERT INTO jenkins_job_aliases(jenkins_base_url,job_full_name,display_name,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(jenkins_base_url,job_full_name) DO UPDATE SET display_name=excluded.display_name,updated_at=excluded.updated_at",
+                params![connection.base_url, job_full_name, display_name, now()],
+            )
+            .map_err(|error| error.to_string())?;
+        database
+            .execute(
+                "UPDATE jenkins_publish_records SET job_name=?1 WHERE jenkins_base_url=?2 AND job_full_name=?3",
+                params![display_name, connection.base_url, job_full_name],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        database
+            .execute(
+                "DELETE FROM jenkins_job_aliases WHERE jenkins_base_url=?1 AND job_full_name=?2",
+                params![connection.base_url, job_full_name],
+            )
+            .map_err(|error| error.to_string())?;
+        database
+            .execute(
+                "UPDATE jenkins_publish_records SET job_name=?1 WHERE jenkins_base_url=?2 AND job_full_name=?3",
+                params![original_name, connection.base_url, job_full_name],
             )
             .map_err(|error| error.to_string())?;
     }
@@ -592,6 +752,7 @@ fn absolute_url(base_url: &str, value: &str) -> Result<String, String> {
 
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JenkinsPublishRecord> {
     let stages_json: String = row.get(15)?;
+    let changes_json: String = row.get(16)?;
     Ok(JenkinsPublishRecord {
         id: row.get(0)?,
         job_name: row.get(1)?,
@@ -608,16 +769,17 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JenkinsPublishRe
         queue_reason: row.get(12)?,
         current_stage: row.get(13)?,
         stages: serde_json::from_str(&stages_json).unwrap_or_default(),
-        started_at: row.get(16)?,
-        build_started_at: row.get(17)?,
-        finished_at: row.get(18)?,
-        updated_at: row.get(19)?,
-        result: row.get(20)?,
-        error_message: row.get(21)?,
+        changes: serde_json::from_str(&changes_json).unwrap_or_default(),
+        started_at: row.get(17)?,
+        build_started_at: row.get(18)?,
+        finished_at: row.get(19)?,
+        updated_at: row.get(20)?,
+        result: row.get(21)?,
+        error_message: row.get(22)?,
     })
 }
 
-const RECORD_SELECT: &str = "SELECT id,job_name,job_full_name,job_url,branch_parameter,branch,queue_id,queue_url,build_number,build_url,status,sync_state,queue_reason,current_stage,progress_percent,stages_json,started_at,build_started_at,finished_at,updated_at,result,error_message FROM jenkins_publish_records";
+const RECORD_SELECT: &str = "SELECT id,job_name,job_full_name,job_url,branch_parameter,branch,queue_id,queue_url,build_number,build_url,status,sync_state,queue_reason,current_stage,progress_percent,stages_json,changes_json,started_at,build_started_at,finished_at,updated_at,result,error_message FROM jenkins_publish_records";
 
 fn get_record(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRecord, String> {
     state
@@ -761,6 +923,97 @@ fn stage_snapshot(value: &Value) -> (String, Vec<JenkinsPipelineStage>) {
     (current, stages)
 }
 
+fn append_change_items(
+    change_set: &Value,
+    changes: &mut Vec<JenkinsChange>,
+    seen: &mut HashSet<String>,
+) {
+    for item in change_set
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if changes.len() >= 100 {
+            return;
+        }
+        let commit_id = item
+            .get("commitId")
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let message = item
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let author = item
+            .get("author")
+            .and_then(|author| author.get("fullName"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let timestamp = item.get("timestamp").and_then(Value::as_i64);
+        if commit_id.is_empty() && message.is_empty() && author.is_empty() {
+            continue;
+        }
+        let key = format!("{commit_id}\n{message}\n{author}");
+        if seen.insert(key) {
+            changes.push(JenkinsChange {
+                commit_id,
+                message,
+                author,
+                timestamp,
+            });
+        }
+    }
+}
+
+fn changes_from_value(value: &Value) -> Vec<JenkinsChange> {
+    let mut changes = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(change_set) = value.get("changeSet") {
+        append_change_items(change_set, &mut changes, &mut seen);
+    }
+    for change_set in value
+        .get("changeSets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        append_change_items(change_set, &mut changes, &mut seen);
+    }
+    changes
+}
+
+fn merge_changes(existing: &[JenkinsChange], current: Vec<JenkinsChange>) -> Vec<JenkinsChange> {
+    let mut changes = existing.to_vec();
+    let mut seen = changes
+        .iter()
+        .map(|change| {
+            format!(
+                "{}\n{}\n{}",
+                change.commit_id, change.message, change.author
+            )
+        })
+        .collect::<HashSet<_>>();
+    for change in current {
+        if changes.len() >= 100 {
+            break;
+        }
+        let key = format!(
+            "{}\n{}\n{}",
+            change.commit_id, change.message, change.author
+        );
+        if seen.insert(key) {
+            changes.push(change);
+        }
+    }
+    changes
+}
+
 fn build_result_status(result: &str) -> &'static str {
     match result {
         "SUCCESS" => "success",
@@ -869,7 +1122,7 @@ fn sync_publish_once(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRe
         }
     } else if record.status == "running" {
         let build_api = format!(
-            "{}api/json?tree=number,url,building,result,timestamp,duration,queueId",
+            "{}api/json?tree=number,url,building,result,timestamp,duration,queueId,changeSet[items[commitId,id,msg,author[fullName],timestamp]],changeSets[items[commitId,id,msg,author[fullName],timestamp]]",
             record.build_url.trim_end_matches('/').to_string() + "/"
         );
         let response = authenticated_get(&client, &connection, &build_api)?;
@@ -895,14 +1148,17 @@ fn sync_publish_once(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRe
             _ => (String::new(), Vec::new()),
         };
         let stages_json = serde_json::to_string(&stages).map_err(|error| error.to_string())?;
+        let changes_json =
+            serde_json::to_string(&merge_changes(&record.changes, changes_from_value(&value)))
+                .map_err(|error| error.to_string())?;
         let building = value
             .get("building")
             .and_then(Value::as_bool)
             .unwrap_or(true);
         if building {
             state.connect()?.execute(
-                "UPDATE jenkins_publish_records SET current_stage=?1,stages_json=?2,sync_state='synced',updated_at=?3,error_message='' WHERE id=?4",
-                params![current_stage,stages_json,timestamp,id],
+                "UPDATE jenkins_publish_records SET current_stage=?1,stages_json=?2,changes_json=?3,sync_state='synced',updated_at=?4,error_message='' WHERE id=?5",
+                params![current_stage,stages_json,changes_json,timestamp,id],
             ).map_err(|error| error.to_string())?;
         } else {
             let result = value
@@ -916,8 +1172,8 @@ fn sync_publish_once(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRe
                 String::new()
             };
             state.connect()?.execute(
-                "UPDATE jenkins_publish_records SET status=?1,current_stage=?2,stages_json=?3,sync_state='synced',result=?4,error_message=?5,finished_at=?6,updated_at=?6 WHERE id=?7",
-                params![status,current_stage,stages_json,result,error_message,timestamp,id],
+                "UPDATE jenkins_publish_records SET status=?1,current_stage=?2,stages_json=?3,changes_json=?4,sync_state='synced',result=?5,error_message=?6,finished_at=?7,updated_at=?7 WHERE id=?8",
+                params![status,current_stage,stages_json,changes_json,result,error_message,timestamp,id],
             ).map_err(|error| error.to_string())?;
         }
     }
@@ -1004,7 +1260,7 @@ pub async fn trigger_jenkins_publish(
         let timestamp = now();
         database.connect()?.execute(
             "INSERT INTO jenkins_publish_records(id,jenkins_base_url,job_name,job_full_name,job_url,branch_parameter,branch,queue_id,queue_url,status,sync_state,started_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued','synced',?10,?10)",
-            params![id,connection.base_url,job.name,job.full_name,job.url,options.parameter_name,branch,queue_id_from_url(&queue_url),queue_url,timestamp],
+            params![id,connection.base_url,job.display_name,job.full_name,job.url,options.parameter_name,branch,queue_id_from_url(&queue_url),queue_url,timestamp],
         ).map_err(|error| error.to_string())?;
         let record = get_record(&database, &id)?;
         spawn_monitor(app_for_monitor, database.clone(), id);
@@ -1136,6 +1392,57 @@ mod tests {
         assert_eq!(build_result_status("SUCCESS"), "success");
         assert_eq!(build_result_status("ABORTED"), "aborted");
         assert_eq!(build_result_status("UNSTABLE"), "failed");
+    }
+
+    #[test]
+    fn reads_explicit_jenkins_views_and_inherits_folder_view() {
+        let value = json!({"views":[
+            {"name":"All","_class":"hudson.model.AllView","jobs":[{"fullName":"folder","url":"https://jenkins/job/folder/"}]},
+            {"name":"生产安全","_class":"hudson.model.ListView","jobs":[{"fullName":"folder","url":"https://jenkins/job/folder/"}]},
+            {"name":"大数据","_class":"hudson.model.ListView","jobs":[{"fullName":"folder/web","url":"https://jenkins/job/folder/job/web/"}]}
+        ]});
+        let memberships = view_memberships(&value);
+        assert_eq!(
+            job_view_names(
+                &memberships,
+                &["上级 View".to_string()],
+                "folder/web",
+                "https://jenkins/job/folder/job/web/"
+            ),
+            vec!["上级 View", "大数据"]
+        );
+        assert_eq!(
+            job_view_names(&memberships, &[], "folder", "https://jenkins/job/folder/"),
+            vec!["生产安全"]
+        );
+    }
+
+    #[test]
+    fn reads_changes_from_freestyle_and_pipeline_without_duplicates() {
+        let value = json!({
+            "changeSet":{"items":[{"commitId":"abcdef123","msg":"fix: 修复问题","author":{"fullName":"张三"},"timestamp":1710000000000_i64}]},
+            "changeSets":[
+                {"items":[{"commitId":"abcdef123","msg":"fix: 修复问题","author":{"fullName":"张三"},"timestamp":1710000000000_i64}]},
+                {"items":[{"id":"987654","msg":"feat: 新增功能","author":{"fullName":"李四"}}]}
+            ]
+        });
+        let changes = changes_from_value(&value);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].commit_id, "abcdef123");
+        assert_eq!(changes[0].author, "张三");
+        assert_eq!(changes[1].commit_id, "987654");
+        let merged = merge_changes(&changes[..1], changes.clone());
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn validates_optional_job_display_name() {
+        assert_eq!(
+            normalize_display_name("  前端管理端  ").unwrap(),
+            Some("前端管理端".to_string())
+        );
+        assert_eq!(normalize_display_name("  ").unwrap(), None);
+        assert!(normalize_display_name(&"x".repeat(81)).is_err());
     }
 
     #[test]

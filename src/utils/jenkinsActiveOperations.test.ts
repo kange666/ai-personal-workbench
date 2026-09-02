@@ -17,6 +17,7 @@ function record(overrides: Partial<JenkinsPublishRecord> = {}): JenkinsPublishRe
     queueReason: "等待可用节点",
     currentStage: "",
     stages: [],
+    changes: [],
     startedAt: "2026-09-01T08:00:00Z",
     updatedAt: "2026-09-01T08:00:00Z",
     result: "",

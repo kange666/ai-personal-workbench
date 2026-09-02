@@ -1,4 +1,4 @@
-use crate::{codex_video, database::DatabaseState};
+use crate::{codex_video, database::DatabaseState, project_identity};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Local, Utc};
 use rusqlite::{params, OptionalExtension};
@@ -16,8 +16,10 @@ use tauri::Manager;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const CLIENT_ROOT: &str = r"F:\TB-project\client";
-const APP_ROOT: &str = r"F:\TB-project\APP";
+const CLIENT_ROOT: &str = r"F:\TB-project\scaq-client";
+const LEGACY_CLIENT_ROOT: &str = r"F:\TB-project\client";
+const APP_ROOT: &str = r"F:\TB-project\scaq-APP";
+const LEGACY_APP_ROOT: &str = r"F:\TB-project\APP";
 const TEST_RUN_COLUMNS: &str = "id,menu_id,project,project_path,menu_name,mode,status,started_at,finished_at,report_markdown,source_report_path,output_excerpt,error_message,selected_scenarios,scenario_results,artifacts,total_count,passed_count,failed_count,skipped_count,duration_ms,exit_code,environment_summary,cleanup_status";
 const COMMON_REAL_SUITE_ID: &str = "common-real";
 const DEDICATED_REAL_SUITE_ID: &str = "dedicated-real";
@@ -140,13 +142,25 @@ impl TestCaseGenerationState {
 pub(crate) fn client_root() -> PathBuf {
     std::env::var_os("AI_WORKBENCH_CLIENT_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(CLIENT_ROOT))
+        .unwrap_or_else(|| {
+            [CLIENT_ROOT, LEGACY_CLIENT_ROOT]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_dir())
+                .unwrap_or_else(|| PathBuf::from(CLIENT_ROOT))
+        })
 }
 
 pub(crate) fn app_root() -> PathBuf {
     std::env::var_os("AI_WORKBENCH_APP_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(APP_ROOT))
+        .unwrap_or_else(|| {
+            [APP_ROOT, LEGACY_APP_ROOT]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_dir())
+                .unwrap_or_else(|| PathBuf::from(APP_ROOT))
+        })
 }
 
 fn display_path(path: &Path) -> String {
@@ -1893,37 +1907,41 @@ pub fn list_test_runs(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .map(|path| canonical_project_asset(&state, path))
-        .transpose()?
-        .map(|(root, name)| (display_path(&root), root.display().to_string(), name));
+        .transpose()?;
     let connection = state.connect()?;
-    let sql = match (menu_id.is_some(), project.is_some()) {
-        (true, true) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 AND (project_path=?2 OR project_path=?3 OR (project_path='' AND LOWER(project)=LOWER(?4))) ORDER BY started_at DESC"),
-        (true, false) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 ORDER BY started_at DESC"),
-        (false, true) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE project_path=?1 OR project_path=?2 OR (project_path='' AND LOWER(project)=LOWER(?3)) ORDER BY started_at DESC LIMIT 300"),
-        (false, false) => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs ORDER BY started_at DESC LIMIT 300"),
+    let sql = match menu_id.is_some() {
+        true => format!(
+            "SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 ORDER BY started_at DESC"
+        ),
+        false => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs ORDER BY started_at DESC"),
     };
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
-    let rows = match (menu_id, project) {
-        (Some(id), Some((friendly, canonical, name))) => statement
-            .query_map(params![id, friendly, canonical, name], row_to_run)
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>(),
-        (Some(id), None) => statement
+    let rows = match menu_id {
+        Some(id) => statement
             .query_map([id], row_to_run)
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>(),
-        (None, Some((friendly, canonical, name))) => statement
-            .query_map(params![friendly, canonical, name], row_to_run)
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>(),
-        (None, None) => statement
+        None => statement
             .query_map([], row_to_run)
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>(),
     };
-    rows.map_err(|error| error.to_string())
+    let mut rows = rows.map_err(|error| error.to_string())?;
+    if let Some((root, name)) = project {
+        let canonical = project_identity::canonical_project_name(
+            &connection,
+            &name,
+            &root.display().to_string(),
+        );
+        rows.retain(|run| {
+            project_identity::canonical_project_name(&connection, &run.project, &run.project_path)
+                == canonical
+        });
+    }
+    rows.truncate(300);
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -2632,7 +2650,7 @@ fn generated_case_value(root: &Path, menu: &TestMenu, scenarios: &[String]) -> V
             "strategy": "page-business-source",
             "description": "根据页面查询项、列表字段、表单字段和操作按钮自动生成"
         },
-        "generatedBy": "AI个人工作台",
+        "generatedBy": "星枢工作台 ASTRION",
         "workbenchMenuId": menu.id,
         "generatedAt": Utc::now().to_rfc3339()
     })
@@ -4114,7 +4132,7 @@ fn pdf_html(run: &TestRun) -> String {
     format!(
         r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
 @page{{size:A4;margin:16mm 14mm}}*{{box-sizing:border-box}}body{{font-family:"Microsoft YaHei","Segoe UI",sans-serif;color:#202535;font-size:10.5pt;line-height:1.65;margin:0}}.cover{{padding:18px 20px;border:1px solid #dce1eb;border-radius:12px;background:#f7f8fc;margin-bottom:15px}}.eyebrow{{color:#6757d9;letter-spacing:2px;font-size:8pt}}h1{{margin:6px 0 3px;font-size:22pt}}.meta{{color:#697084}}.summary{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}}.summary div{{padding:10px;border:1px solid #dce1eb;border-radius:8px;text-align:center}}.summary b{{display:block;font-size:17pt}}.scenario{{break-inside:avoid;margin:0 0 12px;border:1px solid #dce1eb;border-radius:10px;overflow:hidden}}.scenario.failed,.scenario.blocked{{border-color:#ef9298}}.scenario header{{display:flex;align-items:center;gap:9px;padding:10px 12px;background:#f6f7fb}}.scenario header span{{width:26px;height:26px;border-radius:7px;background:#ece9ff;color:#6757d9;text-align:center;line-height:26px}}.scenario h2{{font-size:12.5pt;margin:0;flex:1}}.scenario header b{{color:#4ba778}}.scenario.failed header b,.scenario.blocked header b{{color:#d94b56}}.purpose{{margin:10px 12px;color:#596174}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px}}h3{{font-size:10pt;margin:3px 0}}ol,ul{{margin:4px 0;padding-left:20px}}pre{{margin:0 12px 10px;padding:9px;border-radius:7px;background:#fff0f1;color:#8c2530;white-space:pre-wrap;word-break:break-word}}figure{{margin:8px 12px 12px;break-inside:avoid}}img{{display:block;max-width:100%;max-height:220mm;border:1px solid #dce1eb;border-radius:7px}}figcaption{{color:#697084;font-size:8pt;margin-top:4px}}footer{{margin-top:15px;border-top:1px solid #dce1eb;padding-top:8px;color:#697084;font-size:8pt}}</style></head><body>
-<section class="cover"><div class="eyebrow">TEST REPORT</div><h1>{}</h1><div class="meta">{} · {} · {}</div><div class="summary"><div><span>结果</span><b>{}</b></div><div><span>场景</span><b>{}</b></div><div><span>通过</span><b>{}</b></div><div><span>失败</span><b>{}</b></div></div><div class="meta">环境：{}<br>项目目录：{}</div></section>{}<footer>由 AI 个人工作台导出 · {}</footer></body></html>"#,
+<section class="cover"><div class="eyebrow">TEST REPORT</div><h1>{}</h1><div class="meta">{} · {} · {}</div><div class="summary"><div><span>结果</span><b>{}</b></div><div><span>场景</span><b>{}</b></div><div><span>通过</span><b>{}</b></div><div><span>失败</span><b>{}</b></div></div><div class="meta">环境：{}<br>项目目录：{}</div></section>{}<footer>由星枢工作台 ASTRION 导出 · {}</footer></body></html>"#,
         html_escape(&run.menu_name),
         html_escape(&run.project),
         html_escape(&run.mode),

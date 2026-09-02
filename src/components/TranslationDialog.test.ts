@@ -31,7 +31,10 @@ describe("TranslationDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     backend.isTauriRuntime.mockReturnValue(true);
-    backend.translateText.mockResolvedValue("Hello, world.");
+    backend.translateText.mockResolvedValue([
+      { label: "自然表达", text: "Hello, world." },
+      { label: "简洁表达", text: "Hello world." },
+    ]);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText: vi.fn(async () => undefined) },
@@ -85,9 +88,9 @@ describe("TranslationDialog", () => {
     expect(backend.translateText).not.toHaveBeenCalled();
   });
 
-  it("翻译期间阻止重复请求，成功后可复制译文", async () => {
-    let resolveRequest: (value: string) => void = () => undefined;
-    backend.translateText.mockReturnValueOnce(new Promise<string>(resolve => { resolveRequest = resolve; }));
+  it("翻译期间阻止重复请求，成功后展示并复制多个候选译文", async () => {
+    let resolveRequest: (value: Array<{ label:string; text:string }>) => void = () => undefined;
+    backend.translateText.mockReturnValueOnce(new Promise<Array<{ label:string; text:string }>>(resolve => { resolveRequest = resolve; }));
     const wrapper = mountDialog();
     await wrapper.get(".translation-source textarea").setValue("你好");
 
@@ -97,13 +100,36 @@ describe("TranslationDialog", () => {
     expect(backend.translateText).toHaveBeenCalledOnce();
     expect(translateButton.text()).toBe("翻译中…");
 
-    resolveRequest("Hello");
+    resolveRequest([
+      { label: "常用译法", text: "Hello" },
+      { label: "正式表达", text: "Greetings" },
+      { label: "口语表达", text: "Hi" },
+    ]);
     await flushPromises();
-    expect(wrapper.get<HTMLTextAreaElement>(".translation-result textarea").element.value).toBe("Hello");
-    await action(wrapper, "复制译文").trigger("click");
+    expect(wrapper.findAll(".translation-candidate")).toHaveLength(3);
+    expect(wrapper.get(".translation-result").text()).toContain("常用译法");
+    expect(wrapper.get(".translation-result").text()).toContain("Greetings");
+    await action(wrapper, "复制首选").trigger("click");
     await flushPromises();
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith("Hello");
-    expect(wrapper.get(".translation-dialog>footer").text()).toContain("已复制");
+    expect(wrapper.get(".translation-dialog>footer").text()).toContain("已复制：常用译法");
+
+    await wrapper.findAll(".translation-candidate .text-button")[1].trigger("click");
+    await flushPromises();
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("Greetings");
+  });
+
+  it("原文框按 Enter 翻译，Shift 加 Enter 保留换行", async () => {
+    const wrapper = mountDialog();
+    const input = wrapper.get(".translation-source textarea");
+    await input.setValue("build");
+
+    await input.trigger("keydown", { key:"Enter", shiftKey:true });
+    expect(backend.translateText).not.toHaveBeenCalled();
+    await input.trigger("keydown", { key:"Enter" });
+    await flushPromises();
+    expect(backend.translateText).toHaveBeenCalledWith("build", "en-to-zh");
+    expect(wrapper.get(".translation-dialog>footer").text()).toContain("Shift + Enter 换行");
   });
 
   it("显示 DeepSeek 配置错误入口，并在关闭后清空临时内容", async () => {

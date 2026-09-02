@@ -52,7 +52,7 @@ router.beforeEach(async (to) => {
 });
 
 router.afterEach((to) => {
-  document.title = `${String(to.meta.title)} · AI 个人工作台`;
+  document.title = `${String(to.meta.title)} · 星枢`;
 });
 
 export default router;

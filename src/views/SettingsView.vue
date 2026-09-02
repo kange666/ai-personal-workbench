@@ -6,6 +6,7 @@ import { useRoute } from "vue-router";
 import ThemeSwitch from "../components/ThemeSwitch.vue";
 import NavIcon from "../components/NavIcon.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, orderedNavigationItems, saveHiddenNavigationPaths, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
+import { confirmAction } from "../utils/confirm";
 import {
   clearDeepSeekKey,
   clearApifoxToken,
@@ -105,7 +106,7 @@ function backupKind(value:string) { return ({ daily:"每日自动", manual:"手�
 function backupSize(value:number) { return value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1,Math.round(value / 1024))} KB`; }
 async function createBackup() { loading.value=true; error.value=""; message.value=""; try { const backup=await createDatabaseBackup(); backupStatus.value=await getBackupStatus(); message.value=`备份已创建：${backup.fileName}`; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function exportBackup() { loading.value=true; error.value=""; message.value=""; try { const backup=await exportDatabaseBackup(); message.value=`备份已导出到：${backup.path}`; await revealLocalFile(backup.path); } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
-async function restoreBackup(path:string) { if (!window.confirm("恢复会用所选备份替换当前本地数据。系统会先自动创建一份“恢复前保护”备份，是否继续？")) return; loading.value=true; error.value=""; message.value=""; try { backupStatus.value=await restoreDatabaseBackup(path); message.value="恢复完成，页面即将重新载入。"; window.setTimeout(()=>window.location.reload(),800); } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
+async function restoreBackup(path:string) { if (!await confirmAction({ title:"恢复本地数据", message:"恢复会用所选备份替换当前本地数据。系统会先自动创建一份“恢复前保护”备份，是否继续？", confirmText:"恢复备份", tone:"danger" })) return; loading.value=true; error.value=""; message.value=""; try { backupStatus.value=await restoreDatabaseBackup(path); message.value="恢复完成，页面即将重新载入。"; window.setTimeout(()=>window.location.reload(),800); } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function locateBackup(path:string) { try { await revealLocalFile(path); } catch(cause) { error.value=String(cause); } }
 async function prepareSignedUpdate() {
   updateHint.value = "";
@@ -186,7 +187,7 @@ async function installAvailableUpdate() {
   try {
     const update = pendingUpdate.value || await prepareSignedUpdate();
     if (!update) { message.value="当前已经是最新版本。"; return; }
-    if (!window.confirm(`即将更新到 V${update.version}。工作台会先备份本地数据，安装时自动关闭并重新启动，是否继续？`)) return;
+    if (!await confirmAction({ title:`更新到 V${update.version}`, message:`工作台会先备份本地数据，安装时自动关闭并重新启动。是否继续？`, confirmText:"更新并重启", tone:"warning" })) return;
     updatePhase.value="backing-up";
     await createDatabaseBackup();
     updateDownloaded.value=0;
@@ -236,7 +237,7 @@ async function testTapd() { loading.value=true; error.value=""; message.value=""
 async function clearTapd() { loading.value=true; error.value=""; message.value=""; try { await clearTapdCredentials(); await refresh(); message.value="已删除 Windows 凭据库中的 TAPD 凭据。"; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function saveEmail() { loading.value=true; error.value=""; message.value=""; try { await saveQqEmailConfig(qqEmail.value,qqAuthCode.value); qqEmail.value=""; qqAuthCode.value=""; await refresh(); message.value="QQ 邮箱和 SMTP 授权码已保存到 Windows 凭据库，请发送测试邮件完成验证。"; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function testEmail() { loading.value=true; error.value=""; message.value=""; try { message.value=await testQqEmail(); await refresh(); } catch(cause) { error.value=String(cause); await refresh(); } finally { loading.value=false; } }
-async function clearEmail() { if (!window.confirm("确定删除 QQ 邮箱通知配置吗？已发送记录不会删除。")) return; loading.value=true; error.value=""; message.value=""; try { await deleteQqEmailConfig(); qqEmail.value=""; qqAuthCode.value=""; await refresh(); message.value="已删除 Windows 凭据库中的 QQ 邮件配置。"; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
+async function clearEmail() { if (!await confirmAction({ title:"删除邮箱通知配置", message:"确定删除 QQ 邮箱通知配置吗？已发送记录不会删除。", confirmText:"删除配置", tone:"danger" })) return; loading.value=true; error.value=""; message.value=""; try { await deleteQqEmailConfig(); qqEmail.value=""; qqAuthCode.value=""; await refresh(); message.value="已删除 Windows 凭据库中的 QQ 邮件配置。"; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function enableVip() {
   loading.value=true; error.value=""; message.value="";
   try { vipStatus.value=await activateVip(vipCode.value); vipCode.value=""; message.value="VIP 功能已启用，内容工坊和视频中心已显示。"; }

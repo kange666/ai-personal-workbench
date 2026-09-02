@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
-import { isTauriRuntime, translateText, type TranslationDirection } from "../services/backend";
+import { isTauriRuntime, translateText, type TranslationCandidate, type TranslationDirection } from "../services/backend";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 
 const CHARACTER_LIMIT = 5000;
 const sourceText = ref("");
-const translatedText = ref("");
+const translations = ref<TranslationCandidate[]>([]);
 const manualDirection = ref<TranslationDirection | null>(null);
 const loading = ref(false);
 const error = ref("");
@@ -27,7 +27,7 @@ const needsDeepSeekSetup = computed(() => error.value.includes("尚未配置 Dee
 function clearResult() {
   requestSequence += 1;
   loading.value = false;
-  translatedText.value = "";
+  translations.value = [];
   error.value = "";
   copyMessage.value = "";
 }
@@ -73,7 +73,7 @@ async function translate() {
   loading.value = true;
   try {
     const result = await translateText(sourceText.value.trim(), direction.value);
-    if (requestId === requestSequence) translatedText.value = result;
+    if (requestId === requestSequence) translations.value = result;
   } catch (cause) {
     if (requestId === requestSequence) error.value = String(cause);
   } finally {
@@ -81,11 +81,17 @@ async function translate() {
   }
 }
 
-async function copyTranslation() {
-  if (!translatedText.value) return;
+function handleSourceKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  void translate();
+}
+
+async function copyTranslation(candidate = translations.value[0]) {
+  if (!candidate) return;
   try {
-    await navigator.clipboard.writeText(translatedText.value);
-    copyMessage.value = "已复制";
+    await navigator.clipboard.writeText(candidate.text);
+    copyMessage.value = `已复制：${candidate.label}`;
   } catch (cause) {
     error.value = `复制失败：${String(cause)}`;
   }
@@ -120,13 +126,22 @@ watch(() => props.open, (open) => {
 
         <label class="translation-field translation-source">
           <span><b>原文</b><small :class="{ over:characterCount > CHARACTER_LIMIT }">{{ characterCount }} / {{ CHARACTER_LIMIT }}</small></span>
-          <textarea v-model="sourceText" rows="5" placeholder="输入需要翻译的中文或英文…" @keydown.ctrl.enter.prevent="translate"></textarea>
+          <textarea v-model="sourceText" rows="5" placeholder="输入需要翻译的中文或英文…" @keydown="handleSourceKeydown"></textarea>
         </label>
 
-        <label class="translation-field translation-result">
-          <span><b>译文</b><small>{{ loading ? '正在翻译…' : translatedText ? `${targetLanguage}结果` : '等待翻译' }}</small></span>
-          <textarea :value="translatedText" rows="5" readonly :placeholder="loading ? 'DeepSeek 正在翻译…' : '译文会显示在这里'"></textarea>
-        </label>
+        <section class="translation-field translation-result">
+          <span><b>译文候选</b><small>{{ loading ? '正在翻译…' : translations.length ? `${translations.length} 个${targetLanguage}结果` : '等待翻译' }}</small></span>
+          <div class="translation-results" :class="{ empty:!translations.length }">
+            <p v-if="loading" class="translation-result-placeholder">DeepSeek 正在匹配不同语境的译法…</p>
+            <p v-else-if="!translations.length" class="translation-result-placeholder">候选译文会显示在这里</p>
+            <template v-else>
+              <article v-for="(candidate,index) in translations" :key="`${candidate.label}:${candidate.text}`" class="translation-candidate">
+                <header><span><i>{{ index + 1 }}</i><b>{{ candidate.label }}</b></span><button class="text-button" @click="copyTranslation(candidate)">复制</button></header>
+                <p>{{ candidate.text }}</p>
+              </article>
+            </template>
+          </div>
+        </section>
 
         <p v-if="error" class="form-error translation-error">
           <span>{{ error }}</span>
@@ -135,10 +150,10 @@ watch(() => props.open, (open) => {
       </div>
 
       <footer>
-        <span>{{ copyMessage || 'Ctrl + Enter 快速翻译' }}</span>
+        <span>{{ copyMessage || 'Enter 翻译 · Shift + Enter 换行' }}</span>
         <div>
           <button class="button secondary" :disabled="loading || !sourceText" @click="reset">清空</button>
-          <button class="button secondary" :disabled="!translatedText" @click="copyTranslation">复制译文</button>
+          <button class="button secondary" :disabled="!translations.length" @click="copyTranslation()">复制首选</button>
           <button class="button primary" :disabled="loading || !sourceText.trim()" @click="translate">{{ loading ? '翻译中…' : '翻译' }}</button>
         </div>
       </footer>

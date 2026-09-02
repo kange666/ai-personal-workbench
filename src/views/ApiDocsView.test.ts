@@ -4,13 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import ApiDocsView from "./ApiDocsView.vue";
 
 const mocks = vi.hoisted(() => {
-  const detailResult=(id:string) => ({ id,sourceId:"source-1",operationId:id==="ep-2" ? "deleteUser":"getUser",method:id==="ep-2" ? "DELETE":"GET",path:"/users/{id}",title:id==="ep-2" ? "删除用户":"查询用户",description:"按编号查询",tags:[id==="ep-2" ? "用户/管理":"用户"],deprecated:id==="ep-2",updatedAt:"",projectProfileId:"project-1",projectName:"示例项目",repositoryPath:"F:/project",documentTitle:"示例服务",openapiVersion:"3.1.0",lastSyncedAt:"2026-08-31T08:00:00Z",document:{parameters:[{name:"id",in:"path",required:true,schema:{type:"string"}}],responses:{200:{description:"成功"}}} });
+  const detailResult=(id:string) => ({ id,sourceId:"source-1",operationId:id==="ep-2" ? "deleteUser":"getUser",method:id==="ep-2" ? "DELETE":"GET",path:"/users/{id}",title:id==="ep-2" ? "删除用户":"查询用户",description:"按编号查询",tags:[id==="ep-2" ? "用户/管理":"用户"],deprecated:id==="ep-2",updatedAt:"",externalProjectId:"1001",apifoxProjectName:"客户接口",documentTitle:"示例服务",openapiVersion:"3.1.0",lastSyncedAt:"2026-08-31T08:00:00Z",document:{parameters:[{name:"id",in:"path",required:true,schema:{type:"string"}}],responses:{200:{description:"成功"}}} });
   return {
     detailResult,
     detail:vi.fn(async (id:string)=>detailResult(id)),
     render: vi.fn(async () => "# 查询用户\n\n`GET /users/{id}`"),
     renderCode: vi.fn(async () => "/**\n *  查询用户\n */\nexport function _getUser(params) {}"),
-    saveSources: vi.fn(async (value) => value.projectProfileIds.map((projectProfileId:string,index:number)=>({id:index ? "source-2":"source-1",projectProfileId,projectName:index ? "第二项目":"示例项目",repositoryPath:index ? "F:/second":"F:/project",externalProjectId:value.externalProjectId,apifoxProjectName:value.apifoxProjectName,documentTitle:"示例服务",openapiVersion:"3.1.0",syncStatus:"ready",endpointCount:2,lastSyncedAt:"2026-08-31T08:00:00Z",lastError:"",createdAt:"",updatedAt:""}))),
+    saveSource: vi.fn(async (value) => ({id:value.id || "source-2",externalProjectId:value.externalProjectId,apifoxProjectName:value.apifoxProjectName,documentTitle:"",openapiVersion:"",syncStatus:"never",endpointCount:0,lastError:"",createdAt:"",updatedAt:""})),
     preview: vi.fn(async (id:string) => ({endpointId:id,url:"https://api.example.com/users/1",method:id==="ep-2" ? "DELETE":"GET",contentType:id==="ep-2" ? "application/json":"",headers:{Authorization:"[已配置，发送时安全注入]"},requestData:{"path.id":"1"},body:id==="ep-2" ? {name:"自动"}:null,requiresConfirmation:id==="ep-2",warning:id==="ep-2" ? "该请求可能修改数据":"请核对请求"})),
     execute: vi.fn(async () => ({url:"https://api.example.com/users/1",method:"GET",status:200,statusText:"OK",success:true,elapsedMs:18,contentType:"application/json",requestData:{"path.id":"1"},responseData:{code:200,data:{id:"1"}},truncated:false})),
     saveTemplate: vi.fn(async (value)=>value),
@@ -21,8 +21,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("../services/backend", () => ({
   isTauriRuntime: () => true,
   getApifoxCredentialStatus: async () => ({ configured:true,source:"Windows 凭据库" }),
-  listProjectProfiles: async () => [{ id:"project-1",displayName:"示例项目",repositoryPath:"F:/project",tapdWorkspaceId:"",aliases:[],category:"",createdAt:"",updatedAt:"" },{ id:"project-2",displayName:"第二项目",repositoryPath:"F:/second",tapdWorkspaceId:"",aliases:[],category:"",createdAt:"",updatedAt:"" }],
-  listApiSources: async () => [{ id:"source-1",projectProfileId:"project-1",projectName:"示例项目",repositoryPath:"F:/project",externalProjectId:"1001",apifoxProjectName:"客户接口",documentTitle:"示例服务",openapiVersion:"3.1.0",syncStatus:"ready",endpointCount:2,lastSyncedAt:"2026-08-31T08:00:00Z",lastError:"",createdAt:"",updatedAt:"" }],
+  listApiSources: async () => [{ id:"source-1",externalProjectId:"1001",apifoxProjectName:"客户接口",documentTitle:"示例服务",openapiVersion:"3.1.0",syncStatus:"ready",endpointCount:2,lastSyncedAt:"2026-08-31T08:00:00Z",lastError:"",createdAt:"",updatedAt:"" }],
   listApiEndpoints: async () => [
     { id:"ep-1",sourceId:"source-1",operationId:"getUser",method:"GET",path:"/users/{id}",title:"查询用户",description:"按编号查询",tags:["用户"],deprecated:false,updatedAt:"" },
     { id:"ep-2",sourceId:"source-1",operationId:"deleteUser",method:"DELETE",path:"/users/{id}",title:"删除用户",description:"",tags:["用户/管理"],deprecated:true,updatedAt:"" },
@@ -37,7 +36,7 @@ vi.mock("../services/backend", () => ({
   saveApiCodeTemplate: mocks.saveTemplate,
   getApiTestConfig: async () => ({sourceId:"source-1",baseUrl:"https://api.example.com",tokenHeader:"Authorization",tokenConfigured:true}),
   saveApiTestConfig: mocks.saveTestConfig, clearApiTestToken: vi.fn(),
-  saveApiSources: mocks.saveSources, removeApiSource: vi.fn(), syncApiSource: vi.fn(), syncAllApiSources: vi.fn(),
+  saveApiSource: mocks.saveSource, removeApiSource: vi.fn(), syncApiSource: vi.fn(), syncAllApiSources: vi.fn(),
 }));
 
 describe("ApiDocsView", () => {
@@ -45,7 +44,7 @@ describe("ApiDocsView", () => {
     mocks.render.mockClear();
     mocks.renderCode.mockClear();
     mocks.detail.mockReset();mocks.detail.mockImplementation(async (id:string)=>mocks.detailResult(id));
-    mocks.saveSources.mockClear();
+    mocks.saveSource.mockClear();
     mocks.preview.mockClear();
     mocks.execute.mockClear();
     mocks.saveTemplate.mockClear();
@@ -53,13 +52,16 @@ describe("ApiDocsView", () => {
     Object.defineProperty(navigator,"clipboard",{ configurable:true,value:{ writeText:vi.fn(async()=>undefined) } });
   });
 
-  it("按项目展示树形接口、可收起项目栏并复制接口内容", async () => {
+  it("按 Apifox 项目展示树形接口、可收起项目栏并复制接口内容", async () => {
     const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView},{path:"/settings",component:{template:"<div />"}}]});
     await router.push("/api-docs"); await router.isReady();
     const wrapper=mount(ApiDocsView,{global:{plugins:[router]}});
     await flushPromises();
 
-    expect(wrapper.text()).toContain("示例项目");
+    expect(wrapper.find(".api-source-panel").text()).toContain("Apifox 项目");
+    expect(wrapper.find(".api-source-list").text()).toContain("客户接口");
+    expect(wrapper.find(".api-source-list").text()).toContain("项目 ID：1001");
+    expect(wrapper.text()).toContain("新增 Apifox 项目");
     expect(wrapper.text()).toContain("查询用户");
     expect(wrapper.find(".api-tree-group").text()).toContain("用户");
     expect(wrapper.text()).not.toContain("全部方法");
@@ -126,24 +128,25 @@ describe("ApiDocsView", () => {
     expect(mocks.execute).toHaveBeenCalledWith({endpointId:"ep-2",url:"https://api.example.com/users/1",body:null,confirmed:true});
   });
 
-  it("一个项目设置抽屉可同时保存多个规范项目、测试配置和代码模板", async () => {
+  it("可以不关联规范项目直接新增 Apifox 项目并保存统一配置", async () => {
     const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView},{path:"/settings",component:{template:"<div />"}}]});
     await router.push("/api-docs");await router.isReady();
     const wrapper=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
-    await wrapper.findAll("button").find(button=>button.text()==="项目设置")!.trigger("click");await flushPromises();
+    await wrapper.findAll("button").find(button=>button.text().includes("新增 Apifox 项目"))!.trigger("click");await flushPromises();
+    expect(wrapper.find(".api-project-settings-editor").classes()).toContain("api-project-settings-editor");
     expect(wrapper.text()).toContain("Apifox 项目");
     expect(wrapper.text()).toContain("接口测试");
     expect(wrapper.text()).toContain("复制代码模板");
+    expect(wrapper.find(".api-profile-picker").exists()).toBe(false);
     await wrapper.get('.api-project-settings-editor input[placeholder="例如 client 接口项目"]').setValue("统一接口项目");
-    const projectCheckboxes=wrapper.findAll('.api-profile-picker input[type="checkbox"]');
-    await projectCheckboxes[1].setValue(true);
+    await wrapper.get('.api-project-settings-editor input[placeholder*="基本设置中复制"]').setValue("2002");
     await wrapper.get(".api-project-settings-editor select").setValue("axios");
     await wrapper.get('.api-project-settings-editor input[placeholder="例如 _ 或 api"]').setValue("api");
-    await wrapper.findAll("button").find(button=>button.text()==="保存项目设置")!.trigger("click");await flushPromises();
-    expect(mocks.saveSources).toHaveBeenCalledWith({projectProfileIds:["project-1","project-2"],externalProjectId:"1001",apifoxProjectName:"统一接口项目"});
-    expect(mocks.saveTestConfig).toHaveBeenCalledTimes(2);
-    expect(mocks.saveTemplate).toHaveBeenCalledTimes(2);
-    expect(mocks.saveTemplate).toHaveBeenCalledWith(expect.objectContaining({sourceId:"source-1",client:"axios",functionPrefix:"api"}));
+    await wrapper.findAll("button").find(button=>button.text()==="新增项目")!.trigger("click");await flushPromises();
+    expect(mocks.saveSource).toHaveBeenCalledWith({id:"",externalProjectId:"2002",apifoxProjectName:"统一接口项目"});
+    expect(mocks.saveTestConfig).toHaveBeenCalledTimes(1);
+    expect(mocks.saveTemplate).toHaveBeenCalledTimes(1);
+    expect(mocks.saveTemplate).toHaveBeenCalledWith(expect.objectContaining({sourceId:"source-2",client:"axios",functionPrefix:"api"}));
   });
 
   it("切换接口时只在详情面板显示加载状态", async () => {

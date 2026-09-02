@@ -1,7 +1,7 @@
 [package]
 name = "ai-personal-workbench"
-version = "1.8.9"
-description = "AI 个人工作台本地桌面程序"
+version = "1.9.0"
+description = "ASTRION 星枢工作台本地桌面程序"
 authors = ["Local User"]
 edition = "2021"
 

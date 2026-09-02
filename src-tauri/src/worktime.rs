@@ -160,10 +160,10 @@ fn activity_events(
                SELECT strftime('%Y-%m-%dT%H:%M:%S',tr.finished_at,'localtime'),tr.project,'test',tr.menu_name||' '||tr.mode
                FROM test_runs tr WHERE tr.finished_at IS NOT NULL AND date(tr.finished_at,'localtime') BETWEEN ?1 AND ?2
                UNION ALL
-               SELECT strftime('%Y-%m-%dT%H:%M:%S',r.updated_at,'localtime'),'AI个人工作台','report',r.title
+               SELECT strftime('%Y-%m-%dT%H:%M:%S',r.updated_at,'localtime'),'星枢工作台','report',r.title
                FROM reports r WHERE date(r.updated_at,'localtime') BETWEEN ?1 AND ?2
                UNION ALL
-               SELECT strftime('%Y-%m-%dT%H:%M:%S',k.updated_at,'localtime'),COALESCE(NULLIF(k.project,''),'AI个人工作台'),'knowledge',k.title
+               SELECT strftime('%Y-%m-%dT%H:%M:%S',k.updated_at,'localtime'),COALESCE(NULLIF(k.project,''),'星枢工作台'),'knowledge',k.title
                FROM knowledge_items k WHERE date(k.updated_at,'localtime') BETWEEN ?1 AND ?2
              ) WHERE local_time IS NOT NULL ORDER BY local_time",
         )

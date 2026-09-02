@@ -9,7 +9,7 @@ const emit = defineEmits<{ close: []; save: [draft: TaskDraft]; update: [id: str
 
 const blank = (): TaskDraft => ({
   title: "",
-  project: "AI 个人工作台",
+  project: "星枢工作台",
   scope: "day",
   priority: "P1",
   plannedDate: "2026-08-03",

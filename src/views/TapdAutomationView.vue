@@ -7,6 +7,7 @@ import {
   type RepositoryAsset, type TapdCodexJob, type TapdProjectAutomationInput,
   type TapdAutomationPreview, type TapdProjectConfig, type TapdStatus, type TapdWorkItem,
 } from "../services/backend";
+import { confirmAction } from "../utils/confirm";
 
 const status = ref<TapdStatus>({ configured:false, source:"未配置", authMode:"token", workspaceId:"", workspaceName:"", owner:"", itemCount:0, warnings:[], autoFixEnabled:false, autoFixRepositoryPath:"", automationPaused:false, projects:[] });
 const items = ref<TapdWorkItem[]>([]);
@@ -89,7 +90,7 @@ async function saveRule(project: TapdProjectConfig) {
   try {
     const preview=await previewTapdProjectAutomation(draft);
     previews[project.workspaceId]=preview;
-    if (draft.autoEnabled && preview.pendingCount>0 && !window.confirm(`当前规则会让 ${preview.pendingCount} 条现有缺陷在下次同步时进入队列。确认保存吗？`)) return;
+    if (draft.autoEnabled && preview.pendingCount>0 && !await confirmAction({ title:"启用自动处理规则", message:`当前规则会让 ${preview.pendingCount} 条现有缺陷在下次同步时进入队列。确认保存吗？`, confirmText:"保存规则", tone:"warning" })) return;
     const saved=await saveTapdProjectAutomation(draft);
     applyDraft(saved,true);
     status.value.projects=status.value.projects.map((entry) => entry.workspaceId===saved.workspaceId ? saved : entry);

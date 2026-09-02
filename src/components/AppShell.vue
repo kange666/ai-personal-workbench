@@ -19,10 +19,12 @@ import NotificationDrawer from "./NotificationDrawer.vue";
 import QuickCapture from "./QuickCapture.vue";
 import TranslationDialog from "./TranslationDialog.vue";
 import CockpitScreensaver from "./CockpitScreensaver.vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
 import { estimateTestRunProgress } from "../utils/testRunProgress";
 import { cockpitIdleState } from "../utils/cockpit";
 import { buildJenkinsActiveOperations } from "../utils/jenkinsActiveOperations";
+import { confirmAction } from "../utils/confirm";
 
 const store = useWorkbenchStore();
 const router = useRouter();
@@ -251,18 +253,19 @@ function resetCockpitIdle() {
   cockpitLastActivityAt=Date.now();
   cockpitIdleWarningSeconds.value=0;
 }
+function openCockpit() {
+  cockpitIdleWarningSeconds.value=0;
+  healthOpen.value=false;
+  quotaOpen.value=false;
+  notificationOpen.value=false;
+  notificationToast.value=null;
+  cockpitOpen.value=true;
+}
 function evaluateCockpitIdle() {
   if (cockpitOpen.value || document.visibilityState === "hidden") return;
   const state=cockpitIdleState(cockpitLastActivityAt);
   cockpitIdleWarningSeconds.value=state.warningSeconds;
-  if (state.open) {
-    cockpitIdleWarningSeconds.value=0;
-    healthOpen.value=false;
-    quotaOpen.value=false;
-    notificationOpen.value=false;
-    notificationToast.value=null;
-    cockpitOpen.value=true;
-  }
+  if (state.open) openCockpit();
 }
 function handleCockpitActivity() {
   if (!cockpitOpen.value) resetCockpitIdle();
@@ -514,7 +517,7 @@ async function toggleEmailNotification() {
   }
   if (emailStatus.value.state === "error") {
     const detail=emailStatus.value.lastError || "邮件发送失败，请检查网络或 SMTP 授权码。";
-    if (window.confirm(`${detail}\n\n是否立即重试失败邮件？`)) {
+    if (await confirmAction({ title:"重试失败邮件", message:`${detail}\n\n是否立即重试失败邮件？`, confirmText:"立即重试", tone:"warning" })) {
       emailLoading.value=true;
       try { emailStatus.value=await retryFailedEmails(); }
       catch (cause) { window.alert(String(cause)); }
@@ -660,7 +663,15 @@ onBeforeUnmount(() => {
 <template>
   <div class="app-shell">
     <aside class="icon-sidebar">
-      <RouterLink class="app-mark" to="/"><img :src="appLogo" alt="AI 个人工作台"></RouterLink>
+      <div class="app-brand-slot">
+        <RouterLink class="app-brand" to="/" title="星枢工作台 · ASTRION">
+          <span class="app-mark"><img :src="appLogo" alt="星枢工作台"></span>
+          <span class="app-brand-name">星枢</span>
+        </RouterLink>
+        <button class="cockpit-entry" type="button" title="进入数据驾驶舱" aria-label="进入数据驾驶舱" @click="openCockpit">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5a1 1 0 0 0-1 1v3M16 4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3M16 20h3a1 1 0 0 0 1-1v-3"/><circle cx="12" cy="12" r="2.25"/><path d="M12 7.5v2M12 14.5v2M7.5 12h2M14.5 12h2"/></svg>
+        </button>
+      </div>
       <nav><RouterLink v-for="item in visibleNavItems" :key="item.path" :to="item.path" :title="item.label"><NavIcon :name="item.icon" /><em>{{ item.label }}</em><b v-if="item.vip" class="vip-badge">VIP</b></RouterLink></nav>
       <div class="side-footer"><RouterLink class="settings-link" to="/settings" title="设置"><NavIcon name="settings" /><em>设置</em></RouterLink></div>
     </aside>
@@ -677,8 +688,8 @@ onBeforeUnmount(() => {
         </section>
       </div>
       <div class="top-quota" @focusout="closeQuotaOnBlur">
-        <button class="top-quota-trigger" :class="{loading:quotaLoading, stale:quota.freshness==='stale'}" title="查看 Codex 剩余用量" @click="quotaOpen=!quotaOpen">
-          <i class="header-icon-box"><HeaderIcon name="quota" /></i><span><small>剩余用量</small><b>{{ remainingText }}</b></span><em>⌄</em>
+        <button class="top-quota-trigger" :class="{loading:quotaLoading, stale:quota.freshness==='stale'}" :aria-expanded="quotaOpen" title="查看 Codex 剩余用量" @click="quotaOpen=!quotaOpen">
+          <i class="header-icon-box"><HeaderIcon name="quota" /></i><span><small>剩余用量</small><b>{{ remainingText }}</b></span><em class="disclosure-icon" aria-hidden="true"></em>
         </button>
         <section v-if="quotaOpen" class="quota-popover panel">
           <header><div><b>Codex 剩余用量</b><small>{{ quotaFreshnessText }} · 读取本地 Codex 原始额度事件</small></div><button class="icon-button" title="关闭" @click="quotaOpen=false">×</button></header>
@@ -775,6 +786,7 @@ onBeforeUnmount(() => {
     <NotificationDrawer :notification="selectedNotification" @close="selectedNotification=null" @reviewed="handleNotificationReviewed" />
     <QuickCapture :open="quickCaptureOpen" @close="quickCaptureOpen=false" />
     <TranslationDialog :open="translationOpen" @close="translationOpen=false" />
+    <ConfirmDialog />
     <Transition name="cockpit-overlay">
       <CockpitScreensaver v-if="cockpitOpen" :quota="quota" :notifications="notifications" :running-projects="runningProjects" :test-runs="allTestRuns" :tapd-jobs="allTapdJobs" @close="closeCockpit" @navigate="navigateFromCockpit" />
     </Transition>
@@ -786,6 +798,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.app-brand-slot{height:40px;margin:0 8px;display:flex;align-items:center;gap:4px;min-width:0}.app-brand-slot .app-brand{margin:0;min-width:0;flex:1}.cockpit-entry{width:28px;height:28px;flex:0 0 28px;padding:0;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);opacity:.34;display:grid;place-items:center;cursor:pointer;transition:opacity .16s ease,color .16s ease,border-color .16s ease,background .16s ease}.cockpit-entry svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.45;stroke-linecap:round;stroke-linejoin:round}.app-brand-slot:hover .cockpit-entry{opacity:.58}.cockpit-entry:hover,.cockpit-entry:focus-visible{opacity:1;color:var(--primary);border-color:color-mix(in srgb,var(--primary) 32%,var(--line));background:color-mix(in srgb,var(--primary) 7%,transparent);outline:0}.cockpit-entry:active{transform:translateY(1px)}
 .cockpit-idle-warning{position:fixed;right:24px;bottom:24px;z-index:490;width:360px;min-height:76px;padding:13px 14px;border:1px solid color-mix(in srgb,var(--primary) 46%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--surface) 94%,transparent);box-shadow:0 18px 45px rgba(0,0,0,.34);backdrop-filter:blur(12px);display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:center;gap:10px}.cockpit-idle-warning>i{width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 0 4px var(--primary-soft);animation:cockpit-warning-pulse 1.2s ease-in-out infinite}.cockpit-idle-warning>span{min-width:0;display:flex;flex-direction:column;gap:5px}.cockpit-idle-warning small{color:var(--muted);font-size:9px}.cockpit-idle-warning button{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);padding:0 10px}.cockpit-idle-warning button:hover{border-color:var(--primary);color:var(--primary)}
 :global(.cockpit-overlay-enter-active){transition:opacity .6s ease,transform .6s cubic-bezier(.2,.7,.2,1)}:global(.cockpit-overlay-leave-active){transition:opacity .2s ease,transform .2s ease}:global(.cockpit-overlay-enter-from),:global(.cockpit-overlay-leave-to){opacity:0;transform:scale(1.008)}.cockpit-warning-enter-active,.cockpit-warning-leave-active{transition:opacity .2s ease,transform .2s ease}.cockpit-warning-enter-from,.cockpit-warning-leave-to{opacity:0;transform:translateY(8px)}
 @keyframes cockpit-warning-pulse{0%,100%{opacity:.5}50%{opacity:1}}@media(prefers-reduced-motion:reduce){.cockpit-idle-warning>i{animation:none}:global(.cockpit-overlay-enter-active),:global(.cockpit-overlay-leave-active),.cockpit-warning-enter-active,.cockpit-warning-leave-active{transition:none}}

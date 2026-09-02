@@ -15,12 +15,12 @@ describe("cockpitIdleState", () => {
 });
 
 describe("recentDateKeys", () => {
-  it("活跃热力图严格生成包含当天的三十天", () => {
-    const dates = recentDateKeys(30, new Date(2026, 8, 1, 12));
-    expect(dates).toHaveLength(30);
-    expect(dates[0]).toBe("2026-08-03");
+  it("活跃热力图严格生成包含当天的九十天", () => {
+    const dates = recentDateKeys(90, new Date(2026, 8, 1, 12));
+    expect(dates).toHaveLength(90);
+    expect(dates[0]).toBe("2026-06-04");
     expect(dates.at(-1)).toBe("2026-09-01");
-    expect(new Set(dates).size).toBe(30);
+    expect(new Set(dates).size).toBe(90);
   });
 });
 

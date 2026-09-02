@@ -10,6 +10,7 @@ import {
   type TapdStatus, type TapdWorkItem,
 } from "../services/backend";
 import { compactDetailTitle } from "../utils/detailTitle";
+import { confirmAction } from "../utils/confirm";
 
 const route = useRoute();
 const status = ref<TapdStatus>({ configured:false, source:"未配置", authMode:"token", workspaceId:"", workspaceName:"", owner:"", itemCount:0, warnings:[], autoFixEnabled:false, autoFixRepositoryPath:"", automationPaused:false, projects:[] });
@@ -92,7 +93,7 @@ async function persistProject() {
   } catch(cause) { error.value=String(cause); } finally { loading.value=false; }
 }
 async function deleteProject(project: TapdProjectConfig) {
-  if (!window.confirm(`确认移除“${project.workspaceName}”的工作台配置？本地历史缺陷不会删除。`)) return;
+  if (!await confirmAction({ title:"移除 TAPD 项目配置", message:`确认移除“${project.workspaceName}”的工作台配置？本地历史缺陷不会删除。`, confirmText:"移除配置", tone:"danger" })) return;
   loading.value=true; error.value="";
   try { await removeTapdProject(project.workspaceId); selectedWorkspaceId.value="all"; projectEditorOpen.value=false; await load(); message.value=`已移除“${project.workspaceName}”配置。`; }
   catch(cause) { error.value=String(cause); } finally { loading.value=false; }
@@ -150,11 +151,11 @@ async function reviewResult(decision: "accepted" | "changes_requested") {
   if (decision==="accepted") {
     if (acceptanceBlocked.value) { error.value=selectedJob.value.testSummary.startsWith("项目测试失败") ? "项目测试未通过，请先继续修改。" : "请先运行并通过项目测试。"; return; }
     if (!selectedJob.value.testRequired) {
-      allowUntested=window.confirm("该项目没有配置自动测试命令。是否明确接受“未运行自动测试”的风险并继续？");
+      allowUntested=await confirmAction({ title:"确认未测试风险", message:"该项目没有配置自动测试命令。是否明确接受“未运行自动测试”的风险并继续？", confirmText:"接受并继续", tone:"warning" });
       if (!allowUntested) return;
     }
     const completionStatus=projectMap.value.get(selected.value?.workspaceId || "")?.completionStatus || "已解决";
-    if (!window.confirm(`确认后会把该 TAPD 缺陷更新为“${completionStatus}”并完成本地归档，是否继续？`)) return;
+    if (!await confirmAction({ title:"完成并归档缺陷", message:`确认后会把该 TAPD 缺陷更新为“${completionStatus}”并完成本地归档，是否继续？`, confirmText:"完成并归档", tone:"warning" })) return;
   }
   loading.value=true; error.value="";
   try {

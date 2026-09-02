@@ -21,7 +21,7 @@ export function localDateIso(date: Date) {
   return date.toLocaleDateString("sv-SE");
 }
 
-/** 返回包含结束日在内的连续日期，驾驶舱活跃热力图固定使用 30 天。 */
+/** 返回包含结束日在内的连续日期，驾驶舱活跃热力图当前固定使用 90 天。 */
 export function recentDateKeys(days: number, endDate = new Date()) {
   return Array.from({ length: days }, (_, index) => {
     const date = new Date(endDate);

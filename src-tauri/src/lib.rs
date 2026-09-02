@@ -81,7 +81,7 @@ fn tray_palette(percent: Option<u8>) -> ([u8; 3], [u8; 3], [u8; 3]) {
     match percent {
         Some(value) if value <= 10 => ([244, 111, 120], [199, 62, 79], [255, 156, 160]),
         Some(value) if value <= 25 => ([230, 159, 73], [191, 104, 45], [247, 191, 112]),
-        Some(_) => ([135, 116, 255], [91, 74, 214], [167, 151, 255]),
+        Some(_) => ([116, 91, 255], [68, 47, 184], [174, 160, 255]),
         None => ([91, 99, 121], [57, 63, 80], [130, 139, 164]),
     }
 }
@@ -107,11 +107,11 @@ fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
         for x in 0..SIZE {
             let x = x as i32;
             let y = y as i32;
-            if !inside_rounded_square(x, y, 1, 13) {
+            if !inside_rounded_square(x, y, 0, 11) {
                 continue;
             }
             let offset = (y as usize * SIZE + x as usize) * 4;
-            let is_border = !inside_rounded_square(x, y, 3, 11);
+            let is_border = !inside_rounded_square(x, y, 2, 9);
             let color = if is_border {
                 border
             } else {
@@ -129,40 +129,62 @@ fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
     let text = percent
         .map(|value| value.min(100).to_string())
         .unwrap_or_else(|| "--".to_string());
-    let scale = match text.len() {
-        1 => 7,
-        2 => 5,
-        _ => 3,
+    let (scale_x, scale_y, gap) = match text.len() {
+        1 => (8, 8, 0),
+        2 => (5, 7, 1),
+        _ => (3, 7, 2),
     };
-    let gap = match text.len() {
-        1 => 0,
-        2 => 3,
-        _ => 2,
-    };
-    let text_width = text.len() as i32 * 5 * scale + (text.len().saturating_sub(1) as i32 * gap);
+    let text_width = text.len() as i32 * 5 * scale_x + (text.len().saturating_sub(1) as i32 * gap);
     let start_x = (SIZE as i32 - text_width) / 2;
-    let start_y = (SIZE as i32 - 7 * scale) / 2;
-    for (shadow_offset, color) in [(1, [34, 28, 70, 170]), (0, [255, 255, 255, 255])] {
-        for (index, character) in text.chars().enumerate() {
-            let rows = glyph(character);
-            let glyph_x = start_x + index as i32 * (5 * scale + gap);
-            for (row, bits) in rows.iter().enumerate() {
-                for column in 0..5 {
-                    if bits & (1 << (4 - column)) == 0 {
-                        continue;
-                    }
-                    for offset_y in 0..scale {
-                        for offset_x in 0..scale {
-                            let x = glyph_x + column * scale + offset_x + shadow_offset;
-                            let y = start_y + row as i32 * scale + offset_y + shadow_offset;
-                            if x < 0 || y < 0 || x >= SIZE as i32 || y >= SIZE as i32 {
-                                continue;
-                            }
-                            let offset = (y as usize * SIZE + x as usize) * 4;
-                            rgba[offset..offset + 4].copy_from_slice(&color);
+    let start_y = (SIZE as i32 - 7 * scale_y) / 2;
+    let mut text_mask = vec![false; SIZE * SIZE];
+    for (index, character) in text.chars().enumerate() {
+        let rows = glyph(character);
+        let glyph_x = start_x + index as i32 * (5 * scale_x + gap);
+        for (row, bits) in rows.iter().enumerate() {
+            for column in 0_i32..5 {
+                if bits & (1 << (4 - column)) == 0 {
+                    continue;
+                }
+                for offset_y in 0..scale_y {
+                    for offset_x in 0..scale_x {
+                        let x = glyph_x + column * scale_x + offset_x;
+                        let y = start_y + row as i32 * scale_y + offset_y;
+                        if x >= 0 && y >= 0 && x < SIZE as i32 && y < SIZE as i32 {
+                            text_mask[y as usize * SIZE + x as usize] = true;
                         }
                     }
                 }
+            }
+        }
+    }
+
+    const OUTLINE: i32 = 2;
+    for y in 0..SIZE as i32 {
+        for x in 0..SIZE as i32 {
+            let mask_offset = y as usize * SIZE + x as usize;
+            let color = if text_mask[mask_offset] {
+                Some([255, 255, 255, 255])
+            } else {
+                let near_text = (-OUTLINE..=OUTLINE).any(|offset_y| {
+                    (-OUTLINE..=OUTLINE).any(|offset_x| {
+                        if offset_x * offset_x + offset_y * offset_y > OUTLINE * OUTLINE {
+                            return false;
+                        }
+                        let nearby_x = x + offset_x;
+                        let nearby_y = y + offset_y;
+                        nearby_x >= 0
+                            && nearby_y >= 0
+                            && nearby_x < SIZE as i32
+                            && nearby_y < SIZE as i32
+                            && text_mask[nearby_y as usize * SIZE + nearby_x as usize]
+                    })
+                });
+                near_text.then_some([24, 18, 52, 255])
+            };
+            if let Some(color) = color {
+                let offset = mask_offset * 4;
+                rgba[offset..offset + 4].copy_from_slice(&color);
             }
         }
     }
@@ -469,7 +491,6 @@ pub fn run() {
             apifox::clear_apifox_token,
             apifox::list_api_sources,
             apifox::save_api_source,
-            apifox::save_api_sources,
             apifox::remove_api_source,
             apifox::sync_api_source,
             apifox::sync_all_api_sources,
@@ -507,6 +528,7 @@ pub fn run() {
             jenkins::list_jenkins_jobs,
             jenkins::list_jenkins_job_branches,
             jenkins::set_jenkins_job_favorite,
+            jenkins::set_jenkins_job_display_name,
             jenkins::trigger_jenkins_publish,
             jenkins::list_jenkins_publish_records,
             jenkins::get_jenkins_publish_status,
@@ -622,7 +644,7 @@ pub fn run() {
             worktime::save_work_time_settings,
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build AI Personal Workbench");
+        .expect("failed to build ASTRION");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             let state = app_handle.state::<git::ProjectProcessState>();
@@ -651,7 +673,7 @@ mod tray_tests {
             .chunks_exact(4)
             .filter(|pixel| pixel[3] == 255)
             .count();
-        assert!(opaque_pixels > 3_400, "托盘背景应接近填满 64px 画布");
+        assert!(opaque_pixels > 3_850, "托盘背景应接近填满 64px 画布");
     }
 
     #[test]
@@ -664,7 +686,18 @@ mod tray_tests {
             .chunks_exact(4)
             .filter(|pixel| *pixel == [255, 255, 255, 255])
             .count();
-        assert!(white_pixels > 500, "单个数字应占据足够大的可视面积");
+        assert!(white_pixels > 1_000, "单个数字应占据足够大的可视面积");
+    }
+
+    #[test]
+    fn three_digit_quota_remains_tall_and_readable() {
+        let full = quota_tray_icon(Some(100));
+        let white_pixels = full
+            .rgba()
+            .chunks_exact(4)
+            .filter(|pixel| *pixel == [255, 255, 255, 255])
+            .count();
+        assert!(white_pixels > 700, "三位数不能缩成难以识别的小字");
     }
 
     #[test]

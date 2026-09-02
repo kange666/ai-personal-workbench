@@ -1,13 +1,13 @@
-# AI 个人工作台
+# 星枢工作台 · ASTRION
 
-面向 Windows 的本地优先桌面工作台，采用已确认的 B「深色指挥中心」布局，并可切换为 C 的暖色主题。正式数据保存在本机 SQLite 数据库，不需要部署服务器。
+一个整合项目、知识、自动化和工作状态的个人数字空间。星枢工作台面向 Windows，采用本地优先的深色指挥中心布局，并可切换暖色主题；正式数据保存在本机 SQLite 数据库，不需要部署服务器。
 
 ## 下载使用
 
-- 项目介绍与下载：[AI 个人工作台下载页](https://kange666.github.io/ai-personal-workbench-download/)
+- 项目介绍与下载：[星枢工作台下载页](https://kange666.github.io/ai-personal-workbench-download/)
 - 源码仓库：[kange666/ai-personal-workbench](https://github.com/kange666/ai-personal-workbench)
 - 正式版本：[GitHub Releases](https://github.com/kange666/ai-personal-workbench-download/releases)
-- 开发热更新：先执行 `scripts/create-hidden-dev-shortcut.ps1` 生成本机快捷方式，再双击 `AI-Workbench-Dev.lnk`；需要查看编译日志时使用 `启动开发版.cmd`
+- 开发热更新：先执行 `scripts/create-hidden-dev-shortcut.ps1` 生成本机快捷方式，再双击 `ASTRION-Dev.lnk`；需要查看编译日志时使用 `启动开发版.cmd`
 
 安装版适合长期使用；便携版可直接运行。两者读取同一份本机工作台数据。
 
@@ -57,7 +57,7 @@
 powershell -ExecutionPolicy Bypass -File .\scripts\create-hidden-dev-shortcut.ps1
 ```
 
-之后双击根目录的 `AI-Workbench-Dev.lnk`。它会隐藏终端、自动加载 MSVC 环境并启动桌面开发版；需要排查编译错误时再使用 `启动开发版.cmd`：
+之后双击根目录的 `ASTRION-Dev.lnk`。它会隐藏终端、自动加载 MSVC 环境并启动桌面开发版；需要排查编译错误时再使用 `启动开发版.cmd`：
 
 - 修改 Vue、TypeScript 或 CSS 后，桌面窗口自动热更新。
 - 修改 Rust 后，Tauri 自动增量编译并重启。
