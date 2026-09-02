@@ -131,6 +131,17 @@ const heatCells = computed(() => {
   const maximum = Math.max(...values.map(item => item.value), 0);
   return values.map(item => ({ ...item, level:activityHeatLevel(item.value, maximum) }));
 });
+const heatMonthMarkers = computed(() => {
+  const markers:Array<{ key:string; label:string; left:number }> = [];
+  let previousMonth = "";
+  heatDates.value.forEach((date,index) => {
+    const month = date.slice(0,7);
+    if (month === previousMonth) return;
+    markers.push({ key:month, label:`${Number(date.slice(5,7))}月`, left:Math.floor(index / 7) / 13 * 100 });
+    previousMonth = month;
+  });
+  return markers;
+});
 
 const pulsePoints = computed(() => {
   const byDate = new Map(heatActivity.value.map(item => [item.date,item]));
@@ -157,17 +168,14 @@ const pulseSeries = computed(() => {
     { key:"commit", label:"提交", values:pulsePoints.value.map(item => item.gitCommits), dash:"2 5" },
     { key:"test", label:"测试", values:pulsePoints.value.map(item => item.testRuns), dash:"10 4 2 4" },
   ];
-  const maximum = Math.max(...values.flatMap(item => item.values), 1);
-  return values.map((item,index) => ({ ...item, index, path:linePath(item.values,maximum), maximum }));
+  return values.map((item,index) => {
+    const maximum = Math.max(...item.values, 1);
+    return { ...item, index, path:linePath(item.values,maximum), maximum };
+  });
 });
 
 const projectRanking = computed(() => workSummary.value.byProject.slice(0,5));
 const projectMaxMinutes = computed(() => Math.max(...projectRanking.value.map(item => item.minutes), 1));
-const outcomePoints = computed(() => pulsePoints.value.map(item => ({ date:item.date, hours:Number((item.workMinutes / 60).toFixed(1)), outcomes:item.gitCommits + item.testsPassed + Number(Boolean(item.dailyReportId)) })));
-const outcomeDimensions = { width:320, height:145, left:22, right:12, top:12, bottom:24 };
-const outcomeMax = computed(() => Math.max(...outcomePoints.value.flatMap(item => [item.hours,item.outcomes]), 1));
-const outcomeWorkPath = computed(() => linePath(outcomePoints.value.map(item => item.hours),outcomeMax.value,outcomeDimensions));
-const outcomeResultPath = computed(() => linePath(outcomePoints.value.map(item => item.outcomes),outcomeMax.value,outcomeDimensions));
 
 function quotaLabel(item: CodexQuotaWindow) {
   if (item.windowMinutes >= 10_080) return "7d";
@@ -181,6 +189,64 @@ function messageTime(value:string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit"}).format(date);
 }
+function activityTime(value:string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(date);
+}
+function notificationTitleParts(item:WorkbenchNotification) {
+  const title = item.title.replace(/^Codex 任务已完成：/,"").trim();
+  const matched = title.match(/^([^：:]{1,14})[：:]\s*(.+)$/);
+  return matched ? { project:matched[1], title:matched[2] } : { project:"", title };
+}
+
+type ActivityTone = "default" | "success" | "warning" | "report";
+interface LiveActivity {
+  id:string;
+  label:string;
+  summary:string;
+  at:string;
+  icon:string;
+  tone:ActivityTone;
+  route:string;
+}
+function notificationActivity(item:WorkbenchNotification):LiveActivity {
+  const title = notificationTitleParts(item).title;
+  const isWarning = item.kind === "tapd_item" || /失败|异常|风险|超时/.test(`${item.title}${item.body}`);
+  const isTest = /测试/.test(`${item.title}${item.body}`);
+  const isReport = /报告|日报|周报|月报/.test(`${item.title}${item.body}`);
+  const isCommit = /提交|commit/i.test(`${item.title}${item.body}`);
+  return {
+    id:`notice:${item.id}`,
+    label:isWarning ? "风险预警" : isTest ? "测试通过" : isReport ? "报告生成" : isCommit ? "代码提交" : item.kind === "jenkins_publish" ? "发布完成" : "对话完成",
+    summary:title || item.body,
+    at:item.createdAt,
+    icon:isWarning ? "warning" : isTest ? "test" : isReport ? "report" : isCommit || item.kind === "jenkins_publish" ? "deploy" : "chat",
+    tone:isWarning ? "warning" : isTest ? "success" : isReport ? "report" : "default",
+    route:item.route || "/inbox",
+  };
+}
+const liveActivities = computed<LiveActivity[]>(() => {
+  const activities:LiveActivity[] = props.notifications.slice(0,8).map(notificationActivity);
+  for (const run of props.testRuns.filter(item => !["queued","running"].includes(item.status))) {
+    const success = run.status === "passed";
+    activities.push({
+      id:`test:${run.id}`,
+      label:success ? "测试通过" : "测试异常",
+      summary:`${run.project} · ${run.menuName}，${run.passedCount}/${run.totalCount} 项通过`,
+      at:run.finishedAt || run.startedAt,
+      icon:success ? "test" : "warning",
+      tone:success ? "success" : "warning",
+      route:`/testing?run=${encodeURIComponent(run.id)}`,
+    });
+  }
+  for (const report of reports.value.slice(0,8)) {
+    activities.push({ id:`report:${report.id}`, label:"报告生成", summary:report.title, at:report.updatedAt, icon:"report", tone:"report", route:"/reports" });
+  }
+  return activities
+    .filter(item => !Number.isNaN(new Date(item.at).getTime()))
+    .sort((left,right) => new Date(right.at).getTime() - new Date(left.at).getTime())
+    .slice(0,5);
+});
 
 const activeTest = computed(() => props.testRuns.find(run => run.status === "queued" || run.status === "running"));
 const activeTapd = computed(() => props.tapdJobs.find(job => job.status === "queued" || job.status === "running"));
@@ -258,44 +324,44 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
       <div class="cockpit-main">
         <div class="cockpit-analytics">
           <article class="cockpit-panel pulse-panel">
-            <header><h2>工作脉搏</h2><div class="pulse-meta"><small>近 7 天实际活动</small><nav><span v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`"><i></i>{{ item.label }}</span></nav></div></header>
+            <header><h2>工作脉搏</h2><div class="pulse-meta"><small>相对趋势 · 悬浮查看实际值</small><nav><span v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`"><i></i>{{ item.label }}</span></nav></div></header>
             <div class="pulse-chart" @mouseleave="pulseHoverIndex=null">
               <svg :viewBox="`0 0 ${chart.width} ${chart.height}`" preserveAspectRatio="none" aria-label="近七天工作脉搏">
                 <g class="cockpit-grid"><line v-for="index in 5" :key="index" :x1="chart.left" :x2="chart.width-chart.right" :y1="chart.top+(index-1)*(chart.height-chart.top-chart.bottom)/4" :y2="chart.top+(index-1)*(chart.height-chart.top-chart.bottom)/4" /></g>
                 <path v-for="item in pulseSeries" :key="item.key" class="pulse-line" :class="`series-${item.index}`" :d="item.path" :stroke-dasharray="item.dash" />
                 <g v-for="(point,index) in pulsePoints" :key="point.date" class="pulse-hit" @mouseenter="pulseHoverIndex=index">
                   <rect :x="chartX(index,pulsePoints.length)-30" :y="chart.top" width="60" :height="chart.height-chart.top-chart.bottom" />
-                  <circle v-if="pulseHoverIndex===index" :cx="chartX(index,pulsePoints.length)" :cy="chartY(point.conversationCount,pulseSeries[0]?.maximum || 1)" r="4" />
+                  <template v-if="pulseHoverIndex===index"><circle v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`" :cx="chartX(index,pulsePoints.length)" :cy="chartY(item.values[index],item.maximum)" r="3.5" /></template>
                 </g>
               </svg>
               <div class="pulse-axis"><span v-for="point in pulsePoints" :key="point.date">{{ point.date.slice(5) }}</span></div>
-              <div v-if="pulseHoverIndex!==null" class="pulse-tooltip" :style="{left:`${chartX(pulseHoverIndex,pulsePoints.length)/chart.width*100}%`}"><b>{{ pulsePoints[pulseHoverIndex].date }}</b><span>工时 {{ cockpitHours(pulsePoints[pulseHoverIndex].workMinutes) }}</span><span>对话 {{ pulsePoints[pulseHoverIndex].conversationCount }}</span><span>提交 {{ pulsePoints[pulseHoverIndex].gitCommits }}</span><span>测试 {{ pulsePoints[pulseHoverIndex].testRuns }}</span></div>
+              <div v-if="pulseHoverIndex!==null" class="pulse-tooltip" :class="{'edge-left':pulseHoverIndex===0,'edge-right':pulseHoverIndex===pulsePoints.length-1}" :style="{left:`${chartX(pulseHoverIndex,pulsePoints.length)/chart.width*100}%`}"><b>{{ pulsePoints[pulseHoverIndex].date }}</b><span>工时 {{ cockpitHours(pulsePoints[pulseHoverIndex].workMinutes) }}</span><span>对话 {{ pulsePoints[pulseHoverIndex].conversationCount }}</span><span>提交 {{ pulsePoints[pulseHoverIndex].gitCommits }}</span><span>测试 {{ pulsePoints[pulseHoverIndex].testRuns }}</span></div>
             </div>
           </article>
 
           <div class="cockpit-lower-grid">
             <article class="cockpit-panel ranking-panel"><header><h2>项目投入排行</h2><small>按所选周期工时</small></header><div><p v-for="(item,index) in projectRanking" :key="item.name"><em>{{ index+1 }}</em><span><b>{{ item.name }}</b><i><u :style="{width:`${item.minutes/projectMaxMinutes*100}%`}"></u></i></span><strong>{{ cockpitHours(item.minutes) }}</strong></p><small v-if="!projectRanking.length" class="cockpit-empty">暂无项目投入记录</small></div></article>
-            <article class="cockpit-panel heat-panel"><header><h2>近 90 天活跃热力</h2><small>对话、Git、测试、报告与工时</small></header><div class="heat-grid"><i v-for="item in heatCells" :key="item.date" :class="`level-${item.level}`" :title="`${item.date} · 活跃信号 ${Math.round(item.value)}`"></i></div><footer><span>低活跃</span><i v-for="level in 5" :key="level" :class="`level-${level-1}`"></i><span>高活跃</span></footer></article>
-            <article class="cockpit-panel outcome-panel"><header><h2>投入与成果</h2><small>近 7 天</small></header><svg :viewBox="`0 0 ${outcomeDimensions.width} ${outcomeDimensions.height}`" preserveAspectRatio="none" aria-label="投入与成果趋势"><g class="cockpit-grid"><line v-for="index in 4" :key="index" :x1="outcomeDimensions.left" :x2="outcomeDimensions.width-outcomeDimensions.right" :y1="outcomeDimensions.top+(index-1)*(outcomeDimensions.height-outcomeDimensions.top-outcomeDimensions.bottom)/3" :y2="outcomeDimensions.top+(index-1)*(outcomeDimensions.height-outcomeDimensions.top-outcomeDimensions.bottom)/3" /></g><path class="outcome-work" :d="outcomeWorkPath"/><path class="outcome-result" :d="outcomeResultPath"/></svg><footer><span><i></i>工时</span><span><i></i>完成成果</span></footer></article>
+            <article class="cockpit-panel heat-panel"><header><h2>近 90 天活跃热力</h2><small>对话、Git、测试、报告与工时</small></header><div class="heat-map"><div class="heat-months"><span v-for="item in heatMonthMarkers" :key="item.key" :style="{left:`${item.left}%`}">{{ item.label }}</span></div><div class="heat-grid"><i v-for="item in heatCells" :key="item.date" :class="`level-${item.level}`" :title="`${item.date} · 活跃信号 ${Math.round(item.value)}`"></i></div></div><footer><span>低活跃</span><i v-for="level in 5" :key="level" :class="`level-${level-1}`"></i><span>高活跃</span></footer></article>
+            <article class="cockpit-panel activity-panel"><header><h2>实时动态</h2><button @click="navigate('/work-records')">查看更多 →</button></header><div class="activity-list" :class="{empty:!liveActivities.length}"><button v-for="item in liveActivities" :key="item.id" :class="`tone-${item.tone}`" @click="navigate(item.route)"><i><CockpitIcon :name="item.icon" /></i><b>{{ item.label }}</b><span>{{ item.summary }}</span><time>{{ activityTime(item.at) }}</time></button><small v-if="!liveActivities.length" class="cockpit-empty">当前没有可展示的动态</small></div></article>
           </div>
 
           <article class="cockpit-panel timeline-panel">
             <header><h2>24 小时工作轨迹</h2><span><i></i>真实本地活动区间</span></header>
             <div class="timeline-chart">
               <div class="timeline-labels"><span>Codex</span><span>Git</span><span>测试</span><span>报告</span></div>
-              <div class="timeline-tracks"><div v-for="lane in ['codex','git','test','report']" :key="lane" class="timeline-track"><i v-for="item in timelineBars.filter(bar=>bar.lane===lane)" :key="item.id" :style="{left:`${item.left}%`,width:`${item.width}%`}" :title="item.label"></i></div><span class="current-time" :style="{left:`${currentTimePercent}%`}"><b>{{ currentTimeText }}</b><i></i></span></div>
+              <div class="timeline-tracks"><div v-for="lane in ['codex','git','test','report']" :key="lane" class="timeline-track"><i v-for="item in timelineBars.filter(bar=>bar.lane===lane)" :key="item.id" :class="item.lane" :style="{left:`${item.left}%`,width:`${item.width}%`}" :title="item.label"></i></div><span class="current-time" :style="{left:`${currentTimePercent}%`}"><b>{{ currentTimeText }}</b><i></i></span></div>
               <div class="timeline-hours"><span v-for="hour in [0,4,8,12,16,20,24]" :key="hour">{{ String(hour).padStart(2,'0') }}:00</span></div>
             </div>
           </article>
         </div>
 
         <aside class="cockpit-live-rail">
-          <article class="cockpit-panel messages-panel"><header><h2>消息通知 <b>{{ latestNotifications.length }}</b></h2><button @click="navigate('/inbox')">查看全部 →</button></header><div><button v-for="item in latestNotifications" :key="item.id" @click="navigate(item.route || '/inbox')"><i :class="{warning:notificationIcon(item)==='warning'}"><CockpitIcon :name="notificationIcon(item)" /></i><span><b>{{ item.title.replace(/^Codex 任务已完成：/,'') }}</b><small>{{ item.body }}</small></span><time>{{ messageTime(item.createdAt) }}</time></button><p v-if="!latestNotifications.length" class="cockpit-empty">暂无新消息</p></div></article>
+          <article class="cockpit-panel messages-panel"><header><h2>消息通知 <b>{{ latestNotifications.length }}</b></h2><button @click="navigate('/inbox')">查看全部 →</button></header><div><button v-for="item in latestNotifications" :key="item.id" @click="navigate(item.route || '/inbox')"><i :class="{warning:notificationIcon(item)==='warning'}"><CockpitIcon :name="notificationIcon(item)" /></i><span><b><em v-if="notificationTitleParts(item).project">{{ notificationTitleParts(item).project }}</em>{{ notificationTitleParts(item).title }}</b><small>{{ item.body }}</small></span><time>{{ messageTime(item.createdAt) }}</time></button><p v-if="!latestNotifications.length" class="cockpit-empty">暂无新消息</p></div></article>
           <article class="cockpit-panel running-panel"><header><h2>正在运行 <b>{{ runningCount }}</b></h2><small>每 3 秒刷新</small></header><div>
             <button v-if="activeProject" @click="navigate(`/projects?project=${encodeURIComponent(activeProject.projectPath)}`)"><i></i><span><b>项目 · {{ activeProject.projectName }}</b><small>{{ activeProject.status==='starting'?'正在启动':'运行中' }}</small><u><em></em></u></span></button>
             <button v-if="activeTest" @click="navigate(`/testing?run=${encodeURIComponent(activeTest.id)}`)"><i></i><span><b>测试 · {{ activeTest.menuName }}</b><small>{{ activeTestProgress ? `${activeTestProgress.percent}% · ${activeTestProgress.etaText}` : '执行中' }}</small><u class="determinate"><em :style="{width:`${activeTestProgress?.percent || 0}%`}"></em></u></span></button>
             <button v-if="activeTapd" @click="navigate('/tapd-automation')"><i></i><span><b>自动处理 · TAPD #{{ activeTapd.itemId }}</b><small>{{ activeTapd.status==='queued'?'等待处理':'分析中' }}</small><u><em></em></u></span></button>
-            <p v-if="!runningCount" class="running-empty">当前没有运行中的任务</p>
+            <p v-if="!runningCount" class="running-empty"><i></i><b>系统空闲</b><small>等待新的项目、测试或自动处理任务</small></p>
           </div></article>
         </aside>
       </div>
@@ -451,7 +517,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
 .pulse-panel > header > div::before,
 .ranking-panel > header::before,
 .heat-panel > header::before,
-.outcome-panel > header::before {
+.activity-panel > header::before {
   content: "";
   width: 2px;
   height: 13px;
@@ -463,7 +529,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
 .pulse-panel > header > div,
 .ranking-panel > header,
 .heat-panel > header,
-.outcome-panel > header { align-items: center; }
+.activity-panel > header { align-items: center; }
 .cockpit-grid line { stroke: rgba(86, 132, 163, 0.18); }
 .pulse-line { filter: drop-shadow(0 0 5px rgba(112, 191, 255, 0.25)); }
 .ranking-panel p { grid-template-columns: 22px minmax(0, 1fr) 45px; gap: 9px; }
@@ -617,7 +683,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
 .pulse-panel > header > div::before,
 .ranking-panel > header::before,
 .heat-panel > header::before,
-.outcome-panel > header::before { content: none; }
+.activity-panel > header::before { content: none; }
 .cockpit-panel > header { justify-content: flex-start; }
 .cockpit-panel > header > h2 {
   display: flex;
@@ -647,12 +713,159 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
   margin-left: auto;
   text-align: right;
 }
+.cockpit-panel > header > small {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .pulse-panel > header > .pulse-meta {
   display: flex;
   align-items: center;
   gap: 16px;
 }
+
+/* 图表各指标独立归一化，仅比较走势；悬浮时仍展示真实数值。 */
+.pulse-panel nav,
+.pulse-axis { font-size: 10px; }
+.pulse-panel header small { font-size: 11px; }
+.pulse-hit circle { stroke-width: 1.8; }
+.pulse-hit circle.series-1 { opacity: 0.76; }
+.pulse-hit circle.series-2 { opacity: 0.58; }
+.pulse-hit circle.series-3 { opacity: 0.42; }
+.pulse-tooltip { z-index: 3; width: 134px; }
+.pulse-tooltip.edge-left { transform: translateX(0); }
+.pulse-tooltip.edge-right { transform: translateX(-100%); }
+.pulse-tooltip span { color: #96adbd; font-size: 10px; }
+
+/* 90 天按周纵向排列，月份标记用于快速定位。 */
+.heat-panel { display: grid; grid-template-rows: 42px minmax(0, 1fr) 18px; }
+.heat-map { display: grid; grid-template-rows: 15px minmax(0, 1fr); min-height: 0; }
+.heat-months { position: relative; height: 15px; color: #7895aa; font-size: 9px; }
+.heat-months span { position: absolute; top: 0; white-space: nowrap; transform: translateX(2px); }
+.heat-grid {
+  height: auto;
+  min-height: 0;
+  grid-template-columns: repeat(13, 1fr);
+  grid-template-rows: repeat(7, 1fr);
+  grid-auto-flow: column;
+  gap: 3px;
+}
+.heat-panel footer { height: 18px; margin-top: 0; font-size: 9px; }
+
+/* 实时动态使用紧凑事件流，颜色只承担成功、风险和普通信息三类语义。 */
+.ranking-panel,
+.heat-panel,
+.activity-panel { padding: 0 12px 10px; }
+.ranking-panel > header,
+.heat-panel > header,
+.activity-panel > header { padding-left: 0; padding-right: 0; }
+.activity-panel { display: grid; grid-template-rows: 42px minmax(0, 1fr); }
+.activity-panel header button {
+  border: 0;
+  background: transparent;
+  color: #83bfe9;
+  font-size: 10px;
+  cursor: pointer;
+}
+.activity-list { min-height: 0; overflow: hidden; display: grid; grid-template-rows: repeat(5, minmax(0, 1fr)); }
+.activity-list.empty { grid-template-rows: 1fr; place-items: center; }
+.activity-list > button {
+  position: relative;
+  width: 100%;
+  min-height: 0;
+  padding: 4px 2px;
+  border: 0;
+  border-top: 1px solid rgba(89, 137, 171, 0.18);
+  background: transparent;
+  color: inherit;
+  display: grid;
+  grid-template-columns: 24px 64px minmax(0, 1fr) 52px;
+  gap: 7px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+}
+.activity-list > button:hover { background: rgba(61, 131, 180, 0.075); }
+.activity-list > button:first-child::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 -35%;
+  width: 24%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(112, 191, 255, 0.05), transparent);
+  animation: cockpit-activity-scan 5s ease-in-out infinite;
+}
+.activity-list button > i {
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(112, 191, 255, 0.38);
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: #79c4ff;
+  font-size: 13px;
+  font-style: normal;
+}
+.activity-list button > b,
+.activity-list button > span,
+.activity-list button > time { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.activity-list button > b { color: #8bcbf7; font-size: 10px; font-weight: 620; }
+.activity-list button > span { color: #9ab0bf; font-size: 10px; }
+.activity-list button > time { color: #7892a5; font-size: 9px; text-align: right; font-variant-numeric: tabular-nums; }
+.activity-list .tone-success > i,
+.activity-list .tone-success > b { color: var(--c-live); border-color: rgba(84, 221, 189, 0.38); }
+.activity-list .tone-warning > i,
+.activity-list .tone-warning > b { color: var(--c-warning); border-color: rgba(226, 174, 73, 0.46); }
+.activity-list .tone-report > i,
+.activity-list .tone-report > b { color: #9ebfe8; border-color: rgba(126, 169, 218, 0.4); }
+
+/* 次要信息保持可读；项目名前缀改成标签，减少通知标题的重复占位。 */
+.ranking-panel p b,
+.ranking-panel strong { font-size: 11px; }
+.messages-panel button small,
+.messages-panel time,
+.running-panel button small { color: #8ca4b5; font-size: 10px; }
+.messages-panel button b > em {
+  display: inline-block;
+  max-width: 88px;
+  margin-right: 7px;
+  padding: 1px 5px;
+  overflow: hidden;
+  border: 1px solid rgba(112, 191, 255, 0.23);
+  border-radius: 4px;
+  color: #88bde2;
+  background: rgba(65, 137, 187, 0.07);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 14px;
+  vertical-align: -3px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.running-empty { display: grid; justify-items: center; gap: 7px; }
+.running-empty > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c-live);
+  box-shadow: 0 0 11px rgba(84, 221, 189, 0.58);
+  animation: cockpit-breathe 2.4s ease-in-out infinite;
+}
+.running-empty > b { color: #91aaba; font-size: 11px; font-weight: 590; }
+.running-empty > small { color: #607989; font-size: 9px; }
+
+/* 工作轨迹使用清晰短条，避免点事件被大面积光晕模糊。 */
+.timeline-labels span,
+.timeline-hours { font-size: 9px; }
+.timeline-track > i {
+  height: 5px;
+  min-width: 5px;
+  border-radius: 2px;
+  box-shadow: 0 0 3px rgba(112, 191, 255, 0.22);
+}
+.timeline-track > i.report { width: 6px !important; }
 @keyframes cockpit-breathe{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.08)}}@keyframes cockpit-number-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}@keyframes cockpit-line-flow{to{stroke-dashoffset:-120}}@keyframes cockpit-progress{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}@keyframes cockpit-current-pulse{0%,100%{opacity:.58}50%{opacity:1}}
-@media(max-width:1280px){.cockpit-screen{padding-left:10px;padding-right:10px}.cockpit-kpis article{padding:10px}.cockpit-kpis article>i{display:grid;width:32px;height:32px;flex-basis:32px;font-size:16px}.cockpit-kpis b{font-size:23px}.cockpit-main{grid-template-columns:minmax(0,1fr) 370px}.cockpit-title small{display:none}.cockpit-periods button{min-width:62px}}
+@keyframes cockpit-activity-scan { 0%,55% { transform: translateX(0); opacity: 0; } 65% { opacity: 1; } 100% { transform: translateX(560%); opacity: 0; } }
+@media(max-width:1280px){.cockpit-screen{padding-left:10px;padding-right:10px}.cockpit-kpis article{padding:10px}.cockpit-kpis article>i{display:grid;width:32px;height:32px;flex-basis:32px;font-size:16px}.cockpit-kpis b{font-size:23px}.cockpit-main{grid-template-columns:minmax(0,1fr) 370px}.cockpit-title small{display:none}.cockpit-periods button{min-width:62px}.activity-list>button{padding:2px;grid-template-columns:18px 54px minmax(0,1fr) 42px;gap:5px}.activity-list button>i{width:17px;height:17px;font-size:10px}.activity-list button>b,.activity-list button>span{font-size:9px}.activity-list button>time{font-size:8px}}
 @media(prefers-reduced-motion:reduce){.cockpit-screen *{animation:none!important;transition:none!important}}
 </style>
