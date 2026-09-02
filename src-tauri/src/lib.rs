@@ -129,38 +129,26 @@ fn app_version() -> &'static str {
 
 fn glyph(value: char) -> [u8; 7] {
     match value {
-        '0' => [
-            0b11111, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b11111,
-        ],
-        '1' => [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-        '2' => [
-            0b11111, 0b00001, 0b00001, 0b11111, 0b10000, 0b10000, 0b11111,
-        ],
-        '3' => [
-            0b11111, 0b00001, 0b00001, 0b01111, 0b00001, 0b00001, 0b11111,
-        ],
-        '4' => [
-            0b10001, 0b10001, 0b10001, 0b11111, 0b00001, 0b00001, 0b00001,
-        ],
-        '5' => [
-            0b11111, 0b10000, 0b10000, 0b11111, 0b00001, 0b00001, 0b11111,
-        ],
-        '6' => [
-            0b11111, 0b10000, 0b10000, 0b11111, 0b10001, 0b10001, 0b11111,
-        ],
-        '7' => [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-        '8' => [
-            0b11111, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b11111,
-        ],
-        '9' => [
-            0b11111, 0b10001, 0b10001, 0b11111, 0b00001, 0b00001, 0b11111,
-        ],
-        '-' => [0, 0, 0, 0b11111, 0, 0, 0],
+        '0' => [0b1111, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b1111],
+        '1' => [0b0010, 0b0110, 0b0010, 0b0010, 0b0010, 0b0010, 0b0111],
+        '2' => [0b1111, 0b0001, 0b0001, 0b1111, 0b1000, 0b1000, 0b1111],
+        '3' => [0b1111, 0b0001, 0b0001, 0b0111, 0b0001, 0b0001, 0b1111],
+        '4' => [0b1001, 0b1001, 0b1001, 0b1111, 0b0001, 0b0001, 0b0001],
+        '5' => [0b1111, 0b1000, 0b1000, 0b1111, 0b0001, 0b0001, 0b1111],
+        '6' => [0b1111, 0b1000, 0b1000, 0b1111, 0b1001, 0b1001, 0b1111],
+        '7' => [0b1111, 0b0001, 0b0010, 0b0100, 0b1000, 0b1000, 0b1000],
+        '8' => [0b1111, 0b1001, 0b1001, 0b1111, 0b1001, 0b1001, 0b1111],
+        '9' => [0b1111, 0b1001, 0b1001, 0b1111, 0b0001, 0b0001, 0b1111],
+        '-' => [0, 0, 0, 0b1111, 0, 0, 0],
         _ => [0; 7],
+    }
+}
+
+fn tray_text_metrics(length: usize) -> (i32, i32, i32) {
+    match length {
+        0 | 1 => (6, 7, 0),
+        2 => (4, 6, 8),
+        _ => (3, 5, 4),
     }
 }
 
@@ -189,7 +177,7 @@ fn inside_rounded_square(x: i32, y: i32, inset: i32, radius: i32) -> bool {
 fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> {
     const SIZE: usize = 64;
     let mut rgba = vec![0_u8; SIZE * SIZE * 4];
-    let (top, bottom, border) = tray_palette(percent);
+    let (top, bottom, _border) = tray_palette(percent);
     for y in 0..SIZE {
         for x in 0..SIZE {
             let x = x as i32;
@@ -211,21 +199,17 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
                     if !inside_rounded_square(x, y, 0, 11) {
                         continue;
                     }
-                    if !inside_rounded_square(x, y, 2, 9) {
-                        border
-                    } else {
-                        let ratio = y as u16;
-                        let light_top = [255_u8, 255, 255];
-                        let light_bottom = [232_u8, 231, 242];
-                        [
-                            ((light_top[0] as u16 * (63 - ratio) + light_bottom[0] as u16 * ratio)
-                                / 63) as u8,
-                            ((light_top[1] as u16 * (63 - ratio) + light_bottom[1] as u16 * ratio)
-                                / 63) as u8,
-                            ((light_top[2] as u16 * (63 - ratio) + light_bottom[2] as u16 * ratio)
-                                / 63) as u8,
-                        ]
-                    }
+                    let ratio = y as u16;
+                    let light_top = [255_u8, 255, 255];
+                    let light_bottom = [232_u8, 231, 242];
+                    [
+                        ((light_top[0] as u16 * (63 - ratio) + light_bottom[0] as u16 * ratio) / 63)
+                            as u8,
+                        ((light_top[1] as u16 * (63 - ratio) + light_bottom[1] as u16 * ratio) / 63)
+                            as u8,
+                        ((light_top[2] as u16 * (63 - ratio) + light_bottom[2] as u16 * ratio) / 63)
+                            as u8,
+                    ]
                 }
                 TrayIconStyle::C => {
                     let dx = x as f64 - 31.5;
@@ -234,13 +218,13 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
                     if distance > 31.5 {
                         continue;
                     }
-                    if (24.0..=30.0).contains(&distance) {
+                    if (23.0..=30.0).contains(&distance) {
                         let angle = (dx.atan2(-dy) + std::f64::consts::TAU) % std::f64::consts::TAU;
                         let progress = percent.unwrap_or(0).min(100) as f64 / 100.0;
                         if angle / std::f64::consts::TAU <= progress {
                             top
                         } else {
-                            [66, 69, 83]
+                            [82, 86, 103]
                         }
                     } else {
                         [24, 27, 38]
@@ -250,21 +234,17 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
                     if !inside_rounded_square(x, y, 0, 11) {
                         continue;
                     }
-                    if !inside_rounded_square(x, y, 2, 9) {
-                        [43, 55, 69]
-                    } else {
-                        let ratio = y as u16;
-                        let dark_top = [21_u8, 29, 42];
-                        let dark_bottom = [7_u8, 12, 21];
-                        [
-                            ((dark_top[0] as u16 * (63 - ratio) + dark_bottom[0] as u16 * ratio)
-                                / 63) as u8,
-                            ((dark_top[1] as u16 * (63 - ratio) + dark_bottom[1] as u16 * ratio)
-                                / 63) as u8,
-                            ((dark_top[2] as u16 * (63 - ratio) + dark_bottom[2] as u16 * ratio)
-                                / 63) as u8,
-                        ]
-                    }
+                    let ratio = y as u16;
+                    let dark_top = [21_u8, 29, 42];
+                    let dark_bottom = [7_u8, 12, 21];
+                    [
+                        ((dark_top[0] as u16 * (63 - ratio) + dark_bottom[0] as u16 * ratio) / 63)
+                            as u8,
+                        ((dark_top[1] as u16 * (63 - ratio) + dark_bottom[1] as u16 * ratio) / 63)
+                            as u8,
+                        ((dark_top[2] as u16 * (63 - ratio) + dark_bottom[2] as u16 * ratio) / 63)
+                            as u8,
+                    ]
                 }
             };
             rgba[offset..offset + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
@@ -274,21 +254,19 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
     let text = percent
         .map(|value| value.min(100).to_string())
         .unwrap_or_else(|| "--".to_string());
-    let (scale_x, scale_y, gap) = match text.len() {
-        1 => (8, 8, 0),
-        2 => (5, 7, 1),
-        _ => (3, 7, 2),
-    };
-    let text_width = text.len() as i32 * 5 * scale_x + (text.len().saturating_sub(1) as i32 * gap);
+    const GLYPH_WIDTH: i32 = 4;
+    let (scale_x, scale_y, gap) = tray_text_metrics(text.len());
+    let text_width =
+        text.len() as i32 * GLYPH_WIDTH * scale_x + (text.len().saturating_sub(1) as i32 * gap);
     let start_x = (SIZE as i32 - text_width) / 2;
     let start_y = (SIZE as i32 - 7 * scale_y) / 2;
     let mut text_mask = vec![false; SIZE * SIZE];
     for (index, character) in text.chars().enumerate() {
         let rows = glyph(character);
-        let glyph_x = start_x + index as i32 * (5 * scale_x + gap);
+        let glyph_x = start_x + index as i32 * (GLYPH_WIDTH * scale_x + gap);
         for (row, bits) in rows.iter().enumerate() {
-            for column in 0_i32..5 {
-                if bits & (1 << (4 - column)) == 0 {
+            for column in 0_i32..GLYPH_WIDTH {
+                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
                     continue;
                 }
                 for offset_y in 0..scale_y {
@@ -317,47 +295,9 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
     for y in 0..SIZE as i32 {
         for x in 0..SIZE as i32 {
             let mask_offset = y as usize * SIZE + x as usize;
-            let color = if text_mask[mask_offset] {
-                Some(digit_color)
-            } else if matches!(style, TrayIconStyle::C | TrayIconStyle::F) {
-                let radius = if style == TrayIconStyle::F { 2 } else { 1 };
-                let near_text = (-radius..=radius).any(|offset_y| {
-                    (-radius..=radius).any(|offset_x| {
-                        if offset_x * offset_x + offset_y * offset_y > radius * radius {
-                            return false;
-                        }
-                        let nearby_x = x + offset_x;
-                        let nearby_y = y + offset_y;
-                        nearby_x >= 0
-                            && nearby_y >= 0
-                            && nearby_x < SIZE as i32
-                            && nearby_y < SIZE as i32
-                            && text_mask[nearby_y as usize * SIZE + nearby_x as usize]
-                    })
-                });
-                if near_text {
-                    let offset = mask_offset * 4;
-                    if rgba[offset + 3] == 0 {
-                        None
-                    } else if style == TrayIconStyle::C {
-                        Some([8, 10, 17, 255])
-                    } else {
-                        Some([
-                            ((rgba[offset] as u16 * 2 + digit_color[0] as u16) / 3) as u8,
-                            ((rgba[offset + 1] as u16 * 2 + digit_color[1] as u16) / 3) as u8,
-                            ((rgba[offset + 2] as u16 * 2 + digit_color[2] as u16) / 3) as u8,
-                            255,
-                        ])
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some(color) = color {
+            if text_mask[mask_offset] {
                 let offset = mask_offset * 4;
-                rgba[offset..offset + 4].copy_from_slice(&color);
+                rgba[offset..offset + 4].copy_from_slice(&digit_color);
             }
         }
     }
@@ -872,7 +812,28 @@ mod tray_tests {
             .chunks_exact(4)
             .filter(|pixel| *pixel == [255, 255, 255, 255])
             .count();
-        assert!(white_pixels > 700, "三位数不能缩成难以识别的小字");
+        assert!(white_pixels > 450, "三位数不能缩成难以识别的小字");
+    }
+
+    #[test]
+    fn two_digit_quota_has_visible_spacing_at_tray_scale() {
+        let (scale_x, scale_y, gap) = tray_text_metrics(2);
+        assert_eq!((scale_x, scale_y), (4, 6));
+        assert!(gap >= 8, "两位数字之间至少保留约 2 个托盘像素");
+        let width = 2 * 4 * scale_x + gap;
+        assert!(width <= 40, "两位数字不能占满托盘图标");
+    }
+
+    #[test]
+    fn circular_style_keeps_progress_ring_visible() {
+        let icon = quota_tray_icon(Some(54), TrayIconStyle::C);
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * 64 + x) * 4;
+            &icon.rgba()[offset..offset + 4]
+        };
+        assert_ne!(pixel(32, 3), pixel(3, 32), "环形进度与剩余轨道应可区分");
+        assert_eq!(pixel(32, 3)[3], 255);
+        assert_eq!(pixel(3, 32)[3], 255);
     }
 
     #[test]
