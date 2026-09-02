@@ -22,6 +22,7 @@ import {
   getBackupStatus,
   getEmailNotificationStatus,
   getTapdStatus,
+  getTrayIconStyle,
   getUpdaterProxy,
   getVipStatus,
   getWorkTimeSettings,
@@ -32,6 +33,7 @@ import {
   saveApifoxToken,
   saveQqEmailConfig,
   saveTapdCredentials,
+  setTrayIconStyle,
   saveWorkTimeSettings,
   testDeepSeek,
   testQqEmail,
@@ -41,6 +43,7 @@ import {
   type BackupStatus,
   type EmailNotificationStatus,
   type TapdStatus,
+  type TrayIconStyle,
   type UpdateStatus,
   type VipStatus,
 } from "../services/backend";
@@ -75,6 +78,14 @@ const updateTotal = ref(0);
 const updateHint = ref("");
 const menuOrder = ref(loadNavigationOrder());
 const hiddenMenuPaths = ref(loadHiddenNavigationPaths());
+const trayIconStyle = ref<TrayIconStyle>("B");
+const trayStyleSaving = ref(false);
+const trayStyleOptions: Array<{ value: TrayIconStyle; label: string }> = [
+  { value: "A", label: "紫色实底" },
+  { value: "B", label: "白底紫字" },
+  { value: "C", label: "圆环进度" },
+  { value: "F", label: "深色荧光" },
+];
 let updateSlowTimer: number | undefined;
 const updateProgress = computed(() => updateTotal.value > 0 ? Math.min(100, Math.round(updateDownloaded.value / updateTotal.value * 100)) : 0);
 const updateBusy = computed(() => ["checking", "backing-up", "downloading", "installing"].includes(updatePhase.value));
@@ -87,7 +98,7 @@ function emailStateText() {
 
 async function refresh() {
   if (!isTauriRuntime()) return;
-  [status.value, apifoxStatus.value, tapdStatus.value, emailStatus.value, vipStatus.value, backupStatus.value, updateStatus.value] = await Promise.all([
+  [status.value, apifoxStatus.value, tapdStatus.value, emailStatus.value, vipStatus.value, backupStatus.value, updateStatus.value, trayIconStyle.value] = await Promise.all([
     getAiStatus(),
     getApifoxCredentialStatus(),
     getTapdStatus(),
@@ -95,6 +106,7 @@ async function refresh() {
     getVipStatus(),
     getBackupStatus(),
     checkForUpdates(),
+    getTrayIconStyle(),
   ]);
   tapdAuthMode.value = tapdStatus.value.authMode;
   tapdOwner.value = tapdStatus.value.owner;
@@ -232,6 +244,7 @@ async function saveApifox() { loading.value=true;error.value="";message.value=""
 async function clearApifox() { loading.value=true;error.value="";message.value="";try{await clearApifoxToken();await refresh();message.value="已删除 Windows 凭据库中的 Apifox 令牌；本地接口缓存仍然保留。";}catch(cause){error.value=String(cause);}finally{loading.value=false;} }
 async function toggleAutostart() { if (!isTauriRuntime()) return; if (autostartEnabled.value) await disable(); else await enable(); autostartEnabled.value = await isEnabled(); }
 async function saveWorkGap() { loading.value = true; error.value = ""; message.value = ""; try { const value = await saveWorkTimeSettings(workGapMinutes.value); workGapMinutes.value = value.gapMinutes; message.value = "工时估算间隔已保存，下一次打开工时明细时自动重新估算。"; } catch (cause) { error.value=String(cause); } finally { loading.value=false; } }
+async function changeTrayIconStyle(style:TrayIconStyle) { if (style===trayIconStyle.value || trayStyleSaving.value) return; trayStyleSaving.value=true; error.value=""; message.value=""; try { trayIconStyle.value=await setTrayIconStyle(style); message.value=`托盘数字已切换为 ${style} 方案。`; } catch(cause) { error.value=String(cause); } finally { trayStyleSaving.value=false; } }
 async function saveTapd() { loading.value=true; error.value=""; message.value=""; try { await saveTapdCredentials(tapdAuthMode.value,tapdUser.value,tapdPassword.value,tapdAccessToken.value,tapdOwner.value); tapdUser.value=""; tapdPassword.value=""; tapdAccessToken.value=""; await refresh(); message.value=`TAPD ${tapdAuthMode.value==='token'?'个人访问令牌':'OpenAPI 账号'}已安全保存到 Windows 凭据库。`; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function testTapd() { loading.value=true; error.value=""; message.value=""; try { message.value=await testTapdConnection(); await refresh(); } catch(cause) { error.value=String(cause); await refresh(); } finally { loading.value=false; } }
 async function clearTapd() { loading.value=true; error.value=""; message.value=""; try { await clearTapdCredentials(); await refresh(); message.value="已删除 Windows 凭据库中的 TAPD 凭据。"; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
@@ -281,7 +294,13 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
       <header class="settings-section-title"><div><h2>常用设置</h2><p>调整显示、工时、会员功能与本地数据。</p></div></header>
       <div class="settings-overview-grid">
         <article class="panel settings-card compact-setting-card appearance-settings">
-          <div><h2>外观</h2><p>保持 B 指挥中心布局，仅切换颜色。</p></div><ThemeSwitch />
+          <div class="appearance-settings-header"><div><h2>外观</h2><p>切换主题颜色和 Windows 托盘数字样式。</p></div><ThemeSwitch /></div>
+          <div class="tray-style-setting">
+            <span><b>托盘数字风格</b><small>默认 B；切换后立即生效</small></span>
+            <div class="tray-style-options" role="radiogroup" aria-label="托盘数字风格">
+              <button v-for="option in trayStyleOptions" :key="option.value" type="button" role="radio" :aria-checked="trayIconStyle===option.value" :title="`${option.value} 方案：${option.label}`" :disabled="trayStyleSaving" :class="['tray-style-option',`style-${option.value.toLowerCase()}`,{active:trayIconStyle===option.value}]" @click="changeTrayIconStyle(option.value)"><i>57</i><span>{{ option.value }}</span></button>
+            </div>
+          </div>
         </article>
         <article class="panel settings-card worktime-settings">
           <div><h2>工时估算间隔</h2><p>相邻本地活动不超过该间隔时归为同一工作区间，默认 45 分钟。</p></div>

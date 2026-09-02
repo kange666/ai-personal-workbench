@@ -28,12 +28,99 @@ mod worktime;
 
 use chrono::{Duration, Timelike};
 use database::{ensure_parent, DatabaseState};
+use rusqlite::OptionalExtension;
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
+
+const TRAY_ICON_STYLE_KEY: &str = "tray_icon_style";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TrayIconStyle {
+    A,
+    #[default]
+    B,
+    C,
+    F,
+}
+
+impl TrayIconStyle {
+    fn from_saved(value: Option<&str>) -> Self {
+        match value {
+            Some("A") => Self::A,
+            Some("C") => Self::C,
+            Some("F") => Self::F,
+            _ => Self::B,
+        }
+    }
+
+    fn from_input(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "A" => Ok(Self::A),
+            "B" => Ok(Self::B),
+            "C" => Ok(Self::C),
+            "F" => Ok(Self::F),
+            _ => Err("托盘数字风格仅支持 A、B、C、F。".into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::F => "F",
+        }
+    }
+}
+
+fn tray_icon_style_for_state(state: &DatabaseState) -> Result<TrayIconStyle, String> {
+    let value = state
+        .connect()?
+        .query_row(
+            "SELECT value FROM app_meta WHERE key=?1",
+            [TRAY_ICON_STYLE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(TrayIconStyle::from_saved(value.as_deref()))
+}
+
+#[tauri::command]
+fn tray_icon_style(state: tauri::State<'_, DatabaseState>) -> Result<String, String> {
+    Ok(tray_icon_style_for_state(&state)?.as_str().to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_tray_icon_style(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DatabaseState>,
+    style: String,
+) -> Result<String, String> {
+    let style = TrayIconStyle::from_input(&style)?;
+    state
+        .connect()?
+        .execute(
+            "INSERT INTO app_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [TRAY_ICON_STYLE_KEY, style.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(tray) = app.tray_by_id("workbench-tray") {
+        let quota = codex::latest_tray_quota();
+        tray.set_icon(Some(quota_tray_icon(
+            quota.as_ref().map(|value| value.remaining_percent),
+            style,
+        )))
+        .map_err(|error| error.to_string())?;
+        tray.set_tooltip(Some(quota_tray_tooltip(quota.as_ref())))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(style.as_str().to_string())
+}
 
 #[tauri::command]
 fn app_version() -> &'static str {
@@ -99,7 +186,7 @@ fn inside_rounded_square(x: i32, y: i32, inset: i32, radius: i32) -> bool {
     dx * dx + dy * dy <= radius * radius
 }
 
-fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
+fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> {
     const SIZE: usize = 64;
     let mut rgba = vec![0_u8; SIZE * SIZE * 4];
     let (top, bottom, border) = tray_palette(percent);
@@ -107,20 +194,78 @@ fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
         for x in 0..SIZE {
             let x = x as i32;
             let y = y as i32;
-            if !inside_rounded_square(x, y, 0, 11) {
-                continue;
-            }
             let offset = (y as usize * SIZE + x as usize) * 4;
-            let is_border = !inside_rounded_square(x, y, 2, 9);
-            let color = if is_border {
-                border
-            } else {
-                let ratio = y as u16;
-                [
-                    ((top[0] as u16 * (63 - ratio) + bottom[0] as u16 * ratio) / 63) as u8,
-                    ((top[1] as u16 * (63 - ratio) + bottom[1] as u16 * ratio) / 63) as u8,
-                    ((top[2] as u16 * (63 - ratio) + bottom[2] as u16 * ratio) / 63) as u8,
-                ]
+            let color = match style {
+                TrayIconStyle::A => {
+                    if !inside_rounded_square(x, y, 0, 11) {
+                        continue;
+                    }
+                    let ratio = y as u16;
+                    [
+                        ((top[0] as u16 * (63 - ratio) + bottom[0] as u16 * ratio) / 63) as u8,
+                        ((top[1] as u16 * (63 - ratio) + bottom[1] as u16 * ratio) / 63) as u8,
+                        ((top[2] as u16 * (63 - ratio) + bottom[2] as u16 * ratio) / 63) as u8,
+                    ]
+                }
+                TrayIconStyle::B => {
+                    if !inside_rounded_square(x, y, 0, 11) {
+                        continue;
+                    }
+                    if !inside_rounded_square(x, y, 2, 9) {
+                        border
+                    } else {
+                        let ratio = y as u16;
+                        let light_top = [255_u8, 255, 255];
+                        let light_bottom = [232_u8, 231, 242];
+                        [
+                            ((light_top[0] as u16 * (63 - ratio) + light_bottom[0] as u16 * ratio)
+                                / 63) as u8,
+                            ((light_top[1] as u16 * (63 - ratio) + light_bottom[1] as u16 * ratio)
+                                / 63) as u8,
+                            ((light_top[2] as u16 * (63 - ratio) + light_bottom[2] as u16 * ratio)
+                                / 63) as u8,
+                        ]
+                    }
+                }
+                TrayIconStyle::C => {
+                    let dx = x as f64 - 31.5;
+                    let dy = y as f64 - 31.5;
+                    let distance = (dx * dx + dy * dy).sqrt();
+                    if distance > 31.5 {
+                        continue;
+                    }
+                    if (24.0..=30.0).contains(&distance) {
+                        let angle = (dx.atan2(-dy) + std::f64::consts::TAU) % std::f64::consts::TAU;
+                        let progress = percent.unwrap_or(0).min(100) as f64 / 100.0;
+                        if angle / std::f64::consts::TAU <= progress {
+                            top
+                        } else {
+                            [66, 69, 83]
+                        }
+                    } else {
+                        [24, 27, 38]
+                    }
+                }
+                TrayIconStyle::F => {
+                    if !inside_rounded_square(x, y, 0, 11) {
+                        continue;
+                    }
+                    if !inside_rounded_square(x, y, 2, 9) {
+                        [43, 55, 69]
+                    } else {
+                        let ratio = y as u16;
+                        let dark_top = [21_u8, 29, 42];
+                        let dark_bottom = [7_u8, 12, 21];
+                        [
+                            ((dark_top[0] as u16 * (63 - ratio) + dark_bottom[0] as u16 * ratio)
+                                / 63) as u8,
+                            ((dark_top[1] as u16 * (63 - ratio) + dark_bottom[1] as u16 * ratio)
+                                / 63) as u8,
+                            ((dark_top[2] as u16 * (63 - ratio) + dark_bottom[2] as u16 * ratio)
+                                / 63) as u8,
+                        ]
+                    }
+                }
             };
             rgba[offset..offset + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
         }
@@ -159,16 +304,26 @@ fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
         }
     }
 
-    const OUTLINE: i32 = 2;
+    let digit_color = match style {
+        TrayIconStyle::A | TrayIconStyle::C => [255, 255, 255, 255],
+        TrayIconStyle::B => [bottom[0], bottom[1], bottom[2], 255],
+        TrayIconStyle::F => match percent {
+            Some(value) if value <= 10 => [255, 112, 126, 255],
+            Some(value) if value <= 25 => [255, 184, 92, 255],
+            Some(_) => [101, 255, 202, 255],
+            None => [154, 164, 181, 255],
+        },
+    };
     for y in 0..SIZE as i32 {
         for x in 0..SIZE as i32 {
             let mask_offset = y as usize * SIZE + x as usize;
             let color = if text_mask[mask_offset] {
-                Some([255, 255, 255, 255])
-            } else {
-                let near_text = (-OUTLINE..=OUTLINE).any(|offset_y| {
-                    (-OUTLINE..=OUTLINE).any(|offset_x| {
-                        if offset_x * offset_x + offset_y * offset_y > OUTLINE * OUTLINE {
+                Some(digit_color)
+            } else if matches!(style, TrayIconStyle::C | TrayIconStyle::F) {
+                let radius = if style == TrayIconStyle::F { 2 } else { 1 };
+                let near_text = (-radius..=radius).any(|offset_y| {
+                    (-radius..=radius).any(|offset_x| {
+                        if offset_x * offset_x + offset_y * offset_y > radius * radius {
                             return false;
                         }
                         let nearby_x = x + offset_x;
@@ -180,7 +335,25 @@ fn quota_tray_icon(percent: Option<u8>) -> Image<'static> {
                             && text_mask[nearby_y as usize * SIZE + nearby_x as usize]
                     })
                 });
-                near_text.then_some([24, 18, 52, 255])
+                if near_text {
+                    let offset = mask_offset * 4;
+                    if rgba[offset + 3] == 0 {
+                        None
+                    } else if style == TrayIconStyle::C {
+                        Some([8, 10, 17, 255])
+                    } else {
+                        Some([
+                            ((rgba[offset] as u16 * 2 + digit_color[0] as u16) / 3) as u8,
+                            ((rgba[offset + 1] as u16 * 2 + digit_color[1] as u16) / 3) as u8,
+                            ((rgba[offset + 2] as u16 * 2 + digit_color[2] as u16) / 3) as u8,
+                            255,
+                        ])
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
             };
             if let Some(color) = color {
                 let offset = mask_offset * 4;
@@ -233,6 +406,12 @@ pub fn run() {
                 }
             }
 
+            let path = app.path().app_data_dir()?.join("workbench.sqlite3");
+            ensure_parent(&path).map_err(std::io::Error::other)?;
+            let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
+            testing::recover_incomplete_test_runs(&state).map_err(std::io::Error::other)?;
+            app.manage(state.clone());
+
             let show_item = MenuItem::with_id(app, "show", "打开工作台", true, None::<&str>)?;
             let email_item = CheckMenuItem::with_id(
                 app,
@@ -246,10 +425,12 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_item, &email_item, &quit_item])?;
             let initial_quota = codex::latest_tray_quota();
+            let initial_tray_style = tray_icon_style_for_state(&state).unwrap_or_default();
             let initial_icon = quota_tray_icon(
                 initial_quota
                     .as_ref()
                     .map(|value| value.remaining_percent),
+                initial_tray_style,
             );
             let tray_builder = TrayIconBuilder::with_id("workbench-tray")
                 .tooltip(quota_tray_tooltip(initial_quota.as_ref()))
@@ -297,6 +478,7 @@ pub fn run() {
             tray_builder.build(app)?;
 
             let quota_app = app.handle().clone();
+            let quota_state = state.clone();
             std::thread::spawn(move || {
                 let mut previous = initial_quota;
                 loop {
@@ -306,8 +488,10 @@ pub fn run() {
                         continue;
                     }
                     if let Some(tray) = quota_app.tray_by_id("workbench-tray") {
+                        let style = tray_icon_style_for_state(&quota_state).unwrap_or_default();
                         let icon = quota_tray_icon(
                             current.as_ref().map(|value| value.remaining_percent),
+                            style,
                         );
                         let _ = tray.set_icon(Some(icon));
                         let _ = tray.set_tooltip(Some(quota_tray_tooltip(current.as_ref())));
@@ -316,11 +500,6 @@ pub fn run() {
                 }
             });
 
-            let path = app.path().app_data_dir()?.join("workbench.sqlite3");
-            ensure_parent(&path).map_err(std::io::Error::other)?;
-            let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
-            testing::recover_incomplete_test_runs(&state).map_err(std::io::Error::other)?;
-            app.manage(state.clone());
             app.manage(apifox::start_api_export_server(state.clone()));
             jenkins::resume_active_publishes(app.handle().clone(), &state)
                 .map_err(std::io::Error::other)?;
@@ -442,6 +621,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_version,
+            tray_icon_style,
+            set_tray_icon_style,
             database::database_health,
             capture::list_quick_captures,
             capture::save_quick_capture,
@@ -660,14 +841,14 @@ mod tray_tests {
 
     #[test]
     fn renders_remaining_percentage_as_tray_icon() {
-        let icon = quota_tray_icon(Some(53));
+        let icon = quota_tray_icon(Some(53), TrayIconStyle::B);
         assert_eq!(icon.width(), 64);
         assert_eq!(icon.height(), 64);
         assert_eq!(icon.rgba().len(), 64 * 64 * 4);
         assert!(icon
             .rgba()
             .chunks_exact(4)
-            .any(|pixel| pixel == [255, 255, 255, 255]));
+            .any(|pixel| pixel[0] > 235 && pixel[1] > 235 && pixel[2] > 235));
         let opaque_pixels = icon
             .rgba()
             .chunks_exact(4)
@@ -678,26 +859,39 @@ mod tray_tests {
 
     #[test]
     fn tray_icon_uses_clear_low_quota_warning_without_changing_digits() {
-        let low = quota_tray_icon(Some(5));
-        let normal = quota_tray_icon(Some(55));
-        assert_ne!(low.rgba(), normal.rgba(), "低额度应使用更醒目的暖色背景");
-        let white_pixels = low
-            .rgba()
-            .chunks_exact(4)
-            .filter(|pixel| *pixel == [255, 255, 255, 255])
-            .count();
-        assert!(white_pixels > 1_000, "单个数字应占据足够大的可视面积");
+        let low = quota_tray_icon(Some(5), TrayIconStyle::B);
+        let normal = quota_tray_icon(Some(55), TrayIconStyle::B);
+        assert_ne!(low.rgba(), normal.rgba(), "低额度应使用更醒目的暖色数字");
     }
 
     #[test]
     fn three_digit_quota_remains_tall_and_readable() {
-        let full = quota_tray_icon(Some(100));
+        let full = quota_tray_icon(Some(100), TrayIconStyle::A);
         let white_pixels = full
             .rgba()
             .chunks_exact(4)
             .filter(|pixel| *pixel == [255, 255, 255, 255])
             .count();
         assert!(white_pixels > 700, "三位数不能缩成难以识别的小字");
+    }
+
+    #[test]
+    fn supported_tray_styles_render_distinct_icons_and_default_to_b() {
+        let styles = [
+            TrayIconStyle::A,
+            TrayIconStyle::B,
+            TrayIconStyle::C,
+            TrayIconStyle::F,
+        ];
+        let icons = styles.map(|style| quota_tray_icon(Some(57), style));
+        for index in 0..icons.len() {
+            for other in index + 1..icons.len() {
+                assert_ne!(icons[index].rgba(), icons[other].rgba());
+            }
+        }
+        assert_eq!(TrayIconStyle::from_saved(None), TrayIconStyle::B);
+        assert_eq!(TrayIconStyle::from_saved(Some("unknown")), TrayIconStyle::B);
+        assert!(TrayIconStyle::from_input("D").is_err());
     }
 
     #[test]

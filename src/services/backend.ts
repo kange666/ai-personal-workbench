@@ -41,6 +41,8 @@ export interface BackupStatus {
   backups: BackupEntry[];
 }
 
+export type TrayIconStyle = "A" | "B" | "C" | "F";
+
 export interface UpdateStatus {
   currentVersion: string;
   latestVersion: string;
@@ -1325,6 +1327,14 @@ export interface TestRecommendation {
 
 export async function getBackupStatus(): Promise<BackupStatus> {
   return invoke<BackupStatus>("backup_status");
+}
+
+export async function getTrayIconStyle(): Promise<TrayIconStyle> {
+  return invoke<TrayIconStyle>("tray_icon_style");
+}
+
+export async function setTrayIconStyle(style: TrayIconStyle): Promise<TrayIconStyle> {
+  return invoke<TrayIconStyle>("set_tray_icon_style", { style });
 }
 
 export async function createDatabaseBackup(): Promise<BackupEntry> {

@@ -258,7 +258,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
       <div class="cockpit-main">
         <div class="cockpit-analytics">
           <article class="cockpit-panel pulse-panel">
-            <header><div><h2>工作脉搏</h2><small>近 7 天实际活动</small></div><nav><span v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`"><i></i>{{ item.label }}</span></nav></header>
+            <header><h2>工作脉搏</h2><div class="pulse-meta"><small>近 7 天实际活动</small><nav><span v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`"><i></i>{{ item.label }}</span></nav></div></header>
             <div class="pulse-chart" @mouseleave="pulseHoverIndex=null">
               <svg :viewBox="`0 0 ${chart.width} ${chart.height}`" preserveAspectRatio="none" aria-label="近七天工作脉搏">
                 <g class="cockpit-grid"><line v-for="index in 5" :key="index" :x1="chart.left" :x2="chart.width-chart.right" :y1="chart.top+(index-1)*(chart.height-chart.top-chart.bottom)/4" :y2="chart.top+(index-1)*(chart.height-chart.top-chart.bottom)/4" /></g>
@@ -278,6 +278,15 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
             <article class="cockpit-panel heat-panel"><header><h2>近 90 天活跃热力</h2><small>对话、Git、测试、报告与工时</small></header><div class="heat-grid"><i v-for="item in heatCells" :key="item.date" :class="`level-${item.level}`" :title="`${item.date} · 活跃信号 ${Math.round(item.value)}`"></i></div><footer><span>低活跃</span><i v-for="level in 5" :key="level" :class="`level-${level-1}`"></i><span>高活跃</span></footer></article>
             <article class="cockpit-panel outcome-panel"><header><h2>投入与成果</h2><small>近 7 天</small></header><svg :viewBox="`0 0 ${outcomeDimensions.width} ${outcomeDimensions.height}`" preserveAspectRatio="none" aria-label="投入与成果趋势"><g class="cockpit-grid"><line v-for="index in 4" :key="index" :x1="outcomeDimensions.left" :x2="outcomeDimensions.width-outcomeDimensions.right" :y1="outcomeDimensions.top+(index-1)*(outcomeDimensions.height-outcomeDimensions.top-outcomeDimensions.bottom)/3" :y2="outcomeDimensions.top+(index-1)*(outcomeDimensions.height-outcomeDimensions.top-outcomeDimensions.bottom)/3" /></g><path class="outcome-work" :d="outcomeWorkPath"/><path class="outcome-result" :d="outcomeResultPath"/></svg><footer><span><i></i>工时</span><span><i></i>完成成果</span></footer></article>
           </div>
+
+          <article class="cockpit-panel timeline-panel">
+            <header><h2>24 小时工作轨迹</h2><span><i></i>真实本地活动区间</span></header>
+            <div class="timeline-chart">
+              <div class="timeline-labels"><span>Codex</span><span>Git</span><span>测试</span><span>报告</span></div>
+              <div class="timeline-tracks"><div v-for="lane in ['codex','git','test','report']" :key="lane" class="timeline-track"><i v-for="item in timelineBars.filter(bar=>bar.lane===lane)" :key="item.id" :style="{left:`${item.left}%`,width:`${item.width}%`}" :title="item.label"></i></div><span class="current-time" :style="{left:`${currentTimePercent}%`}"><b>{{ currentTimeText }}</b><i></i></span></div>
+              <div class="timeline-hours"><span v-for="hour in [0,4,8,12,16,20,24]" :key="hour">{{ String(hour).padStart(2,'0') }}:00</span></div>
+            </div>
+          </article>
         </div>
 
         <aside class="cockpit-live-rail">
@@ -290,17 +299,6 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
           </div></article>
         </aside>
       </div>
-
-      <article class="cockpit-panel timeline-panel">
-        <header><h2>24 小时工作轨迹</h2><span><i></i>真实本地活动区间</span></header>
-        <div class="timeline-chart">
-          <div class="timeline-labels"><span>Codex</span><span>Git</span><span>测试</span><span>报告</span></div>
-          <div class="timeline-tracks"><div v-for="lane in ['codex','git','test','report']" :key="lane" class="timeline-track"><i v-for="item in timelineBars.filter(bar=>bar.lane===lane)" :key="item.id" :style="{left:`${item.left}%`,width:`${item.width}%`}" :title="item.label"></i></div><span class="current-time" :style="{left:`${currentTimePercent}%`}"><b>{{ currentTimeText }}</b><i></i></span></div>
-          <div class="timeline-hours"><span v-for="hour in [0,4,8,12,16,20,24]" :key="hour">{{ String(hour).padStart(2,'0') }}:00</span></div>
-        </div>
-      </article>
-
-      <p v-if="loading" class="cockpit-status">正在刷新本地数据…</p><p v-else-if="errorMessage" class="cockpit-status warning">{{ errorMessage }}</p><p v-else class="cockpit-exit-hint">按 <kbd>Esc</kbd> 返回工作台 · 示例布局使用真实本地数据</p>
   </section>
 </template>
 
@@ -324,7 +322,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
   --c-warning: #e2ae49;
   gap: 12px;
   padding: 16px 20px 10px;
-  grid-template-rows: 48px 92px minmax(376px, 1fr) 104px 26px;
+  grid-template-rows: 48px 92px minmax(0, 1fr);
   background:
     radial-gradient(ellipse at 78% -18%, rgba(48, 122, 178, 0.15), transparent 42%),
     radial-gradient(ellipse at 8% 80%, rgba(30, 89, 128, 0.08), transparent 38%),
@@ -437,6 +435,10 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
 .cockpit-kpis em { color: #bad9ed; font-size: 13px; }
 .cockpit-main,
 .cockpit-lower-grid { gap: 12px; }
+.cockpit-analytics {
+  grid-template-rows: minmax(190px, 1fr) clamp(160px, 23vh, 235px) clamp(130px, 14vh, 150px);
+  gap: 12px;
+}
 .cockpit-panel { position: relative; }
 .cockpit-panel > header { padding: 10px 14px; }
 .cockpit-panel h2 {
@@ -496,7 +498,10 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
   background: #68c1d3;
   box-shadow: 0 0 7px rgba(104, 193, 211, 0.28);
 }
-.cockpit-live-rail { gap: 12px; }
+.cockpit-live-rail {
+  grid-template-rows: minmax(240px, 1fr) clamp(210px, 32vh, 316px);
+  gap: 12px;
+}
 .cockpit-live-rail .cockpit-panel {
   border-color: var(--c-line-strong);
   background:
@@ -593,11 +598,60 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
   color: #657d8e;
   letter-spacing: 0.4px;
 }
-.timeline-panel { opacity: 0.86; }
+.timeline-panel {
+  min-height: 0;
+  padding-bottom: 8px;
+  opacity: 0.9;
+}
 .timeline-panel h2 { font-size: 13px; }
+.timeline-panel > header { height: 36px; min-height: 36px; padding: 5px 7px; }
+.timeline-chart {
+  height: calc(100% - 36px);
+  min-height: 78px;
+  grid-template-rows: minmax(54px, 1fr) 20px;
+}
+.timeline-track > i { top: 7px; height: 6px; }
 .timeline-tracks { background-size: auto; }
-.cockpit-exit-hint,
-.cockpit-status { color: #617b8d; }
+
+/* 所有卡片标题使用同一结构：标题靠左，说明和操作靠右。 */
+.pulse-panel > header > div::before,
+.ranking-panel > header::before,
+.heat-panel > header::before,
+.outcome-panel > header::before { content: none; }
+.cockpit-panel > header { justify-content: flex-start; }
+.cockpit-panel > header > h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  color: #e2f1fb;
+  font-size: 15px;
+  font-weight: 620;
+  line-height: 20px;
+  letter-spacing: 0.45px;
+  text-align: left;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.cockpit-panel > header > h2::before {
+  content: "";
+  width: 2px;
+  height: 14px;
+  flex: 0 0 2px;
+  border-radius: 2px;
+  background: #70bfff;
+  box-shadow: 0 0 9px rgba(112, 191, 255, 0.32);
+}
+.cockpit-panel > header > :not(h2) {
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+}
+.pulse-panel > header > .pulse-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
 @keyframes cockpit-breathe{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.08)}}@keyframes cockpit-number-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}@keyframes cockpit-line-flow{to{stroke-dashoffset:-120}}@keyframes cockpit-progress{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}@keyframes cockpit-current-pulse{0%,100%{opacity:.58}50%{opacity:1}}
 @media(max-width:1280px){.cockpit-screen{padding-left:10px;padding-right:10px}.cockpit-kpis article{padding:10px}.cockpit-kpis article>i{display:grid;width:32px;height:32px;flex-basis:32px;font-size:16px}.cockpit-kpis b{font-size:23px}.cockpit-main{grid-template-columns:minmax(0,1fr) 370px}.cockpit-title small{display:none}.cockpit-periods button{min-width:62px}}
 @media(prefers-reduced-motion:reduce){.cockpit-screen *{animation:none!important;transition:none!important}}

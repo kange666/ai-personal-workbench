@@ -44,6 +44,12 @@ describe("CockpitScreensaver",()=>{
     expect(wrapper.find(".running-panel").text()).toContain("测试 · 接口回归");
     expect(wrapper.find(".running-panel").text()).toContain("自动处理 · TAPD #415");
     expect(wrapper.text()).not.toContain("视频");
+    expect(wrapper.find(".cockpit-analytics > .timeline-panel").exists()).toBe(true);
+    expect(wrapper.find(".cockpit-screen > .timeline-panel").exists()).toBe(false);
+    expect(wrapper.find(".cockpit-status").exists()).toBe(false);
+    expect(wrapper.find(".cockpit-exit-hint").exists()).toBe(false);
+    expect(wrapper.findAll(".cockpit-panel > header > h2")).toHaveLength(7);
+    expect(wrapper.find(".pulse-panel > header > .pulse-meta").text()).toContain("近 7 天实际活动");
     wrapper.unmount();vi.useRealTimers();
   });
 

@@ -1,0 +1,203 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="920" viewBox="0 0 1280 920">
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0e15"/>
+      <stop offset="1" stop-color="#151929"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9a86ff"/>
+      <stop offset="1" stop-color="#6647e8"/>
+    </linearGradient>
+    <linearGradient id="violetDeep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7458ff"/>
+      <stop offset="1" stop-color="#34266f"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#53e5ff"/>
+      <stop offset="1" stop-color="#6c6cff"/>
+    </linearGradient>
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity=".35"/>
+    </filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      text{font-family:"Microsoft YaHei UI","Segoe UI",sans-serif;fill:#eef1fb}
+      .card{fill:#171c27;stroke:#30384a;stroke-width:1}
+      .title{font-size:23px;font-weight:800}
+      .desc{font-size:14px;fill:#9ca6ba}
+      .hint{font-size:13px;fill:#7f8aa0}
+      .size{font-size:12px;fill:#8590a5}
+      .digit{font-family:"Arial Black","Segoe UI Black",sans-serif;font-weight:900;text-anchor:middle;dominant-baseline:central}
+      .taskbar{fill:#24262d;stroke:#343741}
+    </style>
+  </defs>
+
+  <rect width="1280" height="920" fill="url(#page)"/>
+  <text x="54" y="66" font-size="34" font-weight="900">托盘额度图标 · 清晰度方案</text>
+  <text x="54" y="99" font-size="15" fill="#9ca6ba">统一用 57% 演示；每版同时展示 64px 设计稿、32px 预览和 Windows 托盘 20px 实际尺寸。</text>
+  <rect x="54" y="120" width="1172" height="1" fill="#2a3140"/>
+
+  <!-- A -->
+  <g transform="translate(54 150)">
+    <rect class="card" width="370" height="330" rx="18"/>
+    <text class="title" x="24" y="39">A. 实心数字牌</text>
+    <rect x="263" y="18" width="83" height="27" rx="13" fill="#2d2851"/>
+    <text x="304.5" y="36" font-size="12" font-weight="800" fill="#a998ff" text-anchor="middle">推荐</text>
+    <text class="desc" x="24" y="66">去掉内描边，数字占满画布</text>
+    <g transform="translate(28 91)" filter="url(#shadow)">
+      <rect width="104" height="104" rx="23" fill="url(#violet)"/>
+      <text class="digit" x="52" y="54" font-size="58">57</text>
+    </g>
+    <text class="size" x="80" y="217" text-anchor="middle">64px 设计稿</text>
+    <g transform="translate(171 106)">
+      <rect width="64" height="64" rx="14" fill="url(#violet)"/>
+      <text class="digit" x="32" y="33" font-size="35">57</text>
+    </g>
+    <text class="size" x="203" y="217" text-anchor="middle">32px</text>
+    <rect class="taskbar" x="24" y="242" width="322" height="62" rx="10"/>
+    <circle cx="49" cy="273" r="3" fill="#737a88"/><circle cx="63" cy="273" r="3" fill="#737a88"/>
+    <g transform="translate(286 263)">
+      <rect width="20" height="20" rx="4" fill="#8068ff"/>
+      <text class="digit" x="10" y="10.5" font-size="12.5">57</text>
+    </g>
+    <text class="hint" x="318" y="278">实际</text>
+  </g>
+
+  <!-- B -->
+  <g transform="translate(455 150)">
+    <rect class="card" width="370" height="330" rx="18"/>
+    <text class="title" x="24" y="39">B. 白底反差牌</text>
+    <text class="desc" x="24" y="66">白底深字，深色任务栏最醒目</text>
+    <g transform="translate(28 91)" filter="url(#shadow)">
+      <rect width="104" height="104" rx="23" fill="#f5f3ff" stroke="#9b87ff" stroke-width="5"/>
+      <text class="digit" x="52" y="54" font-size="56" style="fill:#5039c9">57</text>
+    </g>
+    <text class="size" x="80" y="217" text-anchor="middle">64px 设计稿</text>
+    <g transform="translate(171 106)">
+      <rect width="64" height="64" rx="14" fill="#f5f3ff" stroke="#9b87ff" stroke-width="3"/>
+      <text class="digit" x="32" y="33" font-size="34" style="fill:#5039c9">57</text>
+    </g>
+    <text class="size" x="203" y="217" text-anchor="middle">32px</text>
+    <rect class="taskbar" x="24" y="242" width="322" height="62" rx="10"/>
+    <circle cx="49" cy="273" r="3" fill="#737a88"/><circle cx="63" cy="273" r="3" fill="#737a88"/>
+    <g transform="translate(286 263)">
+      <rect width="20" height="20" rx="4" fill="#fff" stroke="#9b87ff"/>
+      <text class="digit" x="10" y="10.5" font-size="12" style="fill:#4933be">57</text>
+    </g>
+    <text class="hint" x="318" y="278">实际</text>
+  </g>
+
+  <!-- C -->
+  <g transform="translate(856 150)">
+    <rect class="card" width="370" height="330" rx="18"/>
+    <text class="title" x="24" y="39">C. 圆形进度环</text>
+    <text class="desc" x="24" y="66">外环表达余量，数字保持居中</text>
+    <g transform="translate(28 91)" filter="url(#shadow)">
+      <circle cx="52" cy="52" r="49" fill="#111522" stroke="#343b4d" stroke-width="6"/>
+      <circle cx="52" cy="52" r="45" fill="none" stroke="url(#cyan)" stroke-width="9" stroke-linecap="round" stroke-dasharray="161 283" transform="rotate(-90 52 52)"/>
+      <text class="digit" x="52" y="54" font-size="38">57</text>
+    </g>
+    <text class="size" x="80" y="217" text-anchor="middle">64px 设计稿</text>
+    <g transform="translate(171 106)">
+      <circle cx="32" cy="32" r="30" fill="#111522" stroke="#343b4d" stroke-width="3"/>
+      <circle cx="32" cy="32" r="27" fill="none" stroke="#7e6cff" stroke-width="5" stroke-linecap="round" stroke-dasharray="97 170" transform="rotate(-90 32 32)"/>
+      <text class="digit" x="32" y="33" font-size="23">57</text>
+    </g>
+    <text class="size" x="203" y="217" text-anchor="middle">32px</text>
+    <rect class="taskbar" x="24" y="242" width="322" height="62" rx="10"/>
+    <circle cx="49" cy="273" r="3" fill="#737a88"/><circle cx="63" cy="273" r="3" fill="#737a88"/>
+    <g transform="translate(286 263)">
+      <circle cx="10" cy="10" r="9" fill="#111522" stroke="#7e6cff" stroke-width="2"/>
+      <text class="digit" x="10" y="10.5" font-size="8.5">57</text>
+    </g>
+    <text class="hint" x="318" y="278">实际</text>
+  </g>
+
+  <!-- D -->
+  <g transform="translate(54 516)">
+    <rect class="card" width="370" height="330" rx="18"/>
+    <text class="title" x="24" y="39">D. 双格数字块</text>
+    <text class="desc" x="24" y="66">两个数字分格，缩小后不粘连</text>
+    <g transform="translate(28 91)" filter="url(#shadow)">
+      <rect width="104" height="104" rx="23" fill="#111522" stroke="#7e6cff" stroke-width="4"/>
+      <rect x="10" y="17" width="39" height="70" rx="10" fill="#7258f2"/>
+      <rect x="55" y="17" width="39" height="70" rx="10" fill="#41328f"/>
+      <text class="digit" x="29.5" y="53" font-size="42">5</text>
+      <text class="digit" x="74.5" y="53" font-size="42">7</text>
+    </g>
+    <text class="size" x="80" y="217" text-anchor="middle">64px 设计稿</text>
+    <g transform="translate(171 106)">
+      <rect width="64" height="64" rx="14" fill="#111522" stroke="#7e6cff" stroke-width="2"/>
+      <rect x="7" y="11" width="23" height="42" rx="6" fill="#7258f2"/>
+      <rect x="34" y="11" width="23" height="42" rx="6" fill="#41328f"/>
+      <text class="digit" x="18.5" y="32" font-size="25">5</text>
+      <text class="digit" x="45.5" y="32" font-size="25">7</text>
+    </g>
+    <text class="size" x="203" y="217" text-anchor="middle">32px</text>
+    <rect class="taskbar" x="24" y="242" width="322" height="62" rx="10"/>
+    <circle cx="49" cy="273" r="3" fill="#737a88"/><circle cx="63" cy="273" r="3" fill="#737a88"/>
+    <g transform="translate(286 263)">
+      <rect width="20" height="20" rx="4" fill="#111522" stroke="#7e6cff"/>
+      <rect x="2.5" y="4" width="6.5" height="12" rx="2" fill="#7258f2"/><rect x="11" y="4" width="6.5" height="12" rx="2" fill="#41328f"/>
+      <text class="digit" x="5.75" y="10" font-size="8">5</text><text class="digit" x="14.25" y="10" font-size="8">7</text>
+    </g>
+    <text class="hint" x="318" y="278">实际</text>
+  </g>
+
+  <!-- E -->
+  <g transform="translate(455 516)">
+    <rect class="card" width="370" height="330" rx="18"/>
+    <text class="title" x="24" y="39">E. 数字 + 余量条</text>
+    <text class="desc" x="24" y="66">大数字为主，下方短条表达余量</text>
+    <g transform="translate(28 91)" filter="url(#shadow)">
+      <rect width="104" height="104" rx="23" fill="url(#violetDeep)" stroke="#a896ff" stroke-width="3"/>
+      <text class="digit" x="52" y="46" font-size="50">57</text>
+      <rect x="16" y="79" width="72" height="8" rx="4" fill="#211a45"/>
+      <rect x="16" y="79" width="41" height="8" rx="4" fill="#63e5cc"/>
+    </g>
+    <text class="size" x="80" y="217" text-anchor="middle">64px 设计稿</text>
+    <g transform="translate(171 106)">
+      <rect width="64" height="64" rx="14" fill="url(#violetDeep)" stroke="#a896ff" stroke-width="2"/>
+      <text class="digit" x="32" y="27" font-size="30">57</text>
+      <rect x="10" y="49" width="44" height="5" rx="2.5" fill="#211a45"/><rect x="10" y="49" width="25" height="5" rx="2.5" fill="#63e5cc"/>
+    </g>
+    <text class="size" x="203" y="217" text-anchor="middle">32px</text>
+    <rect class="taskbar" x="24" y="242" width="322" height="62" rx="10"/>
+    <circle cx="49" cy="273" r="3" fill="#737a88"/><circle cx="63" cy="273" r="3" fill="#737a88"/>
+    <g transform="translate(286 263)">
+      <rect width="20" height="20" rx="4" fill="#5139b7"/>
+      <text class="digit" x="10" y="8.5" font-size="10.5">57</text>
+      <rect x="3" y="16" width="14" height="2" rx="1" fill="#211a45"/><rect x="3" y="16" width="8" height="2" rx="1" fill="#63e5cc"/>
+    </g>
+    <text class="hint" x="318" y="278">实际</text>
+  </g>
+
+  <!-- F -->
+  <g transform="translate(856 516)">
+    <rect class="card" width="370" height="330" rx="18"/>
+    <text class="title" x="24" y="39">F. 荧光纯数字</text>
+    <text class="desc" x="24" y="66">无边框、无装饰，数字发光突出</text>
+    <g transform="translate(28 91)" filter="url(#shadow)">
+      <rect width="104" height="104" rx="23" fill="#0c111a"/>
+      <text class="digit" x="52" y="54" font-size="58" style="fill:#65ffd1" stroke="#1c5b50" stroke-width="2" paint-order="stroke" filter="url(#glow)">57</text>
+    </g>
+    <text class="size" x="80" y="217" text-anchor="middle">64px 设计稿</text>
+    <g transform="translate(171 106)">
+      <rect width="64" height="64" rx="14" fill="#0c111a"/>
+      <text class="digit" x="32" y="33" font-size="35" style="fill:#65ffd1">57</text>
+    </g>
+    <text class="size" x="203" y="217" text-anchor="middle">32px</text>
+    <rect class="taskbar" x="24" y="242" width="322" height="62" rx="10"/>
+    <circle cx="49" cy="273" r="3" fill="#737a88"/><circle cx="63" cy="273" r="3" fill="#737a88"/>
+    <g transform="translate(286 263)">
+      <rect width="20" height="20" rx="4" fill="#0c111a"/>
+      <text class="digit" x="10" y="10.5" font-size="12.5" style="fill:#65ffd1">57</text>
+    </g>
+    <text class="hint" x="318" y="278">实际</text>
+  </g>
+
+  <text x="54" y="889" font-size="14" fill="#8e98aa">判断标准：20px 下数字是否一眼可读、深浅任务栏是否都有反差、100% 三位数是否仍能放下。</text>
+</svg>
