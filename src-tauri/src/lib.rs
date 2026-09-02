@@ -29,6 +29,7 @@ mod worktime;
 use chrono::{Duration, Timelike};
 use database::{ensure_parent, DatabaseState};
 use rusqlite::OptionalExtension;
+use std::{path::PathBuf, sync::OnceLock};
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem},
@@ -37,6 +38,8 @@ use tauri::{
 };
 
 const TRAY_ICON_STYLE_KEY: &str = "tray_icon_style";
+const TRAY_ICON_SIZE: usize = 64;
+static TRAY_FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TrayIconStyle {
@@ -152,6 +155,117 @@ fn tray_text_metrics(length: usize) -> (i32, i32, i32) {
     }
 }
 
+fn tray_font() -> Option<&'static fontdue::Font> {
+    TRAY_FONT
+        .get_or_init(|| {
+            let windows_dir = std::env::var_os("WINDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+            let fonts_dir = windows_dir.join("Fonts");
+            // Windows 11 的任务栏优先使用 Segoe UI Variable；旧系统依次回退到
+            // Segoe UI Semibold 和 Segoe UI，避免字体缺失导致托盘图标消失。
+            ["SegUIVar.ttf", "seguisb.ttf", "segoeui.ttf"]
+                .into_iter()
+                .find_map(|file_name| {
+                    let bytes = std::fs::read(fonts_dir.join(file_name)).ok()?;
+                    fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()
+                })
+        })
+        .as_ref()
+}
+
+fn tray_font_size(length: usize) -> f32 {
+    match length {
+        0 | 1 => 56.0,
+        2 => 50.0,
+        _ => 35.0,
+    }
+}
+
+fn system_font_text_mask(text: &str) -> Option<Vec<u8>> {
+    let font = tray_font()?;
+    let font_size = tray_font_size(text.chars().count());
+    let glyphs = text
+        .chars()
+        .map(|character| font.rasterize(character, font_size))
+        .collect::<Vec<_>>();
+    let cell_width = glyphs
+        .iter()
+        .map(|(metrics, _)| metrics.width)
+        .max()
+        .unwrap_or(0);
+    let max_height = glyphs
+        .iter()
+        .map(|(metrics, _)| metrics.height)
+        .max()
+        .unwrap_or(0);
+    if cell_width == 0 || max_height == 0 {
+        return None;
+    }
+
+    let letter_spacing = if glyphs.len() == 2 { 3 } else { 1 };
+    let text_width = glyphs.len() * cell_width + glyphs.len().saturating_sub(1) * letter_spacing;
+    if text_width > TRAY_ICON_SIZE {
+        return None;
+    }
+
+    let start_x = (TRAY_ICON_SIZE - text_width) / 2;
+    let start_y = (TRAY_ICON_SIZE - max_height) / 2;
+    let mut mask = vec![0_u8; TRAY_ICON_SIZE * TRAY_ICON_SIZE];
+    for (index, (metrics, bitmap)) in glyphs.into_iter().enumerate() {
+        let glyph_x =
+            start_x + index * (cell_width + letter_spacing) + (cell_width - metrics.width) / 2;
+        let glyph_y = start_y + (max_height - metrics.height) / 2;
+        for y in 0..metrics.height {
+            for x in 0..metrics.width {
+                let alpha = bitmap[y * metrics.width + x];
+                let offset = (glyph_y + y) * TRAY_ICON_SIZE + glyph_x + x;
+                mask[offset] = mask[offset].max(alpha);
+            }
+        }
+    }
+    Some(mask)
+}
+
+fn bitmap_text_mask(text: &str) -> Vec<u8> {
+    let (scale_x, scale_y, gap) = tray_text_metrics(text.len());
+    const GLYPH_WIDTH: i32 = 4;
+    let text_width =
+        text.len() as i32 * GLYPH_WIDTH * scale_x + (text.len().saturating_sub(1) as i32 * gap);
+    let start_x = (TRAY_ICON_SIZE as i32 - text_width) / 2;
+    let start_y = (TRAY_ICON_SIZE as i32 - 7 * scale_y) / 2;
+    let mut mask = vec![0_u8; TRAY_ICON_SIZE * TRAY_ICON_SIZE];
+    for (index, character) in text.chars().enumerate() {
+        let rows = glyph(character);
+        let glyph_x = start_x + index as i32 * (GLYPH_WIDTH * scale_x + gap);
+        for (row, bits) in rows.iter().enumerate() {
+            for column in 0_i32..GLYPH_WIDTH {
+                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
+                    continue;
+                }
+                for offset_y in 0..scale_y {
+                    for offset_x in 0..scale_x {
+                        let x = glyph_x + column * scale_x + offset_x;
+                        let y = start_y + row as i32 * scale_y + offset_y;
+                        if x >= 0
+                            && y >= 0
+                            && x < TRAY_ICON_SIZE as i32
+                            && y < TRAY_ICON_SIZE as i32
+                        {
+                            mask[y as usize * TRAY_ICON_SIZE + x as usize] = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
+fn tray_text_mask(text: &str) -> Vec<u8> {
+    system_font_text_mask(text).unwrap_or_else(|| bitmap_text_mask(text))
+}
+
 fn tray_palette(percent: Option<u8>) -> ([u8; 3], [u8; 3], [u8; 3]) {
     match percent {
         Some(value) if value <= 10 => ([244, 111, 120], [199, 62, 79], [255, 156, 160]),
@@ -175,14 +289,13 @@ fn inside_rounded_square(x: i32, y: i32, inset: i32, radius: i32) -> bool {
 }
 
 fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> {
-    const SIZE: usize = 64;
-    let mut rgba = vec![0_u8; SIZE * SIZE * 4];
+    let mut rgba = vec![0_u8; TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4];
     let (top, bottom, _border) = tray_palette(percent);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
+    for y in 0..TRAY_ICON_SIZE {
+        for x in 0..TRAY_ICON_SIZE {
             let x = x as i32;
             let y = y as i32;
-            let offset = (y as usize * SIZE + x as usize) * 4;
+            let offset = (y as usize * TRAY_ICON_SIZE + x as usize) * 4;
             let color = match style {
                 TrayIconStyle::A => {
                     if !inside_rounded_square(x, y, 0, 11) {
@@ -215,19 +328,17 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
                     let dx = x as f64 - 31.5;
                     let dy = y as f64 - 31.5;
                     let distance = (dx * dx + dy * dy).sqrt();
-                    if distance > 31.5 {
+                    // C 方案在系统托盘中只保留高对比度圆环；透明圆心避免数字和底色
+                    // 挤占有限像素，约 12px 的原始环宽缩放后仍接近 3px。
+                    if !(18.0..=30.5).contains(&distance) {
                         continue;
                     }
-                    if (23.0..=30.0).contains(&distance) {
-                        let angle = (dx.atan2(-dy) + std::f64::consts::TAU) % std::f64::consts::TAU;
-                        let progress = percent.unwrap_or(0).min(100) as f64 / 100.0;
-                        if angle / std::f64::consts::TAU <= progress {
-                            top
-                        } else {
-                            [82, 86, 103]
-                        }
+                    let angle = (dx.atan2(-dy) + std::f64::consts::TAU) % std::f64::consts::TAU;
+                    let progress = percent.unwrap_or(0).min(100) as f64 / 100.0;
+                    if angle / std::f64::consts::TAU <= progress {
+                        top
                     } else {
-                        [24, 27, 38]
+                        [102, 107, 128]
                     }
                 }
                 TrayIconStyle::F => {
@@ -251,36 +362,14 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
         }
     }
 
+    if style == TrayIconStyle::C {
+        return Image::new_owned(rgba, TRAY_ICON_SIZE as u32, TRAY_ICON_SIZE as u32);
+    }
+
     let text = percent
         .map(|value| value.min(100).to_string())
         .unwrap_or_else(|| "--".to_string());
-    const GLYPH_WIDTH: i32 = 4;
-    let (scale_x, scale_y, gap) = tray_text_metrics(text.len());
-    let text_width =
-        text.len() as i32 * GLYPH_WIDTH * scale_x + (text.len().saturating_sub(1) as i32 * gap);
-    let start_x = (SIZE as i32 - text_width) / 2;
-    let start_y = (SIZE as i32 - 7 * scale_y) / 2;
-    let mut text_mask = vec![false; SIZE * SIZE];
-    for (index, character) in text.chars().enumerate() {
-        let rows = glyph(character);
-        let glyph_x = start_x + index as i32 * (GLYPH_WIDTH * scale_x + gap);
-        for (row, bits) in rows.iter().enumerate() {
-            for column in 0_i32..GLYPH_WIDTH {
-                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
-                    continue;
-                }
-                for offset_y in 0..scale_y {
-                    for offset_x in 0..scale_x {
-                        let x = glyph_x + column * scale_x + offset_x;
-                        let y = start_y + row as i32 * scale_y + offset_y;
-                        if x >= 0 && y >= 0 && x < SIZE as i32 && y < SIZE as i32 {
-                            text_mask[y as usize * SIZE + x as usize] = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let text_mask = tray_text_mask(&text);
 
     let digit_color = match style {
         TrayIconStyle::A | TrayIconStyle::C => [255, 255, 255, 255],
@@ -292,16 +381,22 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
             None => [154, 164, 181, 255],
         },
     };
-    for y in 0..SIZE as i32 {
-        for x in 0..SIZE as i32 {
-            let mask_offset = y as usize * SIZE + x as usize;
-            if text_mask[mask_offset] {
+    for y in 0..TRAY_ICON_SIZE as i32 {
+        for x in 0..TRAY_ICON_SIZE as i32 {
+            let mask_offset = y as usize * TRAY_ICON_SIZE + x as usize;
+            let alpha = text_mask[mask_offset] as u16;
+            if alpha > 0 {
                 let offset = mask_offset * 4;
-                rgba[offset..offset + 4].copy_from_slice(&digit_color);
+                for channel in 0..3 {
+                    rgba[offset + channel] = ((rgba[offset + channel] as u16 * (255 - alpha)
+                        + digit_color[channel] as u16 * alpha)
+                        / 255) as u8;
+                }
+                rgba[offset + 3] = 255;
             }
         }
     }
-    Image::new_owned(rgba, SIZE as u32, SIZE as u32)
+    Image::new_owned(rgba, TRAY_ICON_SIZE as u32, TRAY_ICON_SIZE as u32)
 }
 
 fn quota_tray_tooltip(quota: Option<&codex::TrayQuota>) -> String {
@@ -806,22 +901,48 @@ mod tray_tests {
 
     #[test]
     fn three_digit_quota_remains_tall_and_readable() {
-        let full = quota_tray_icon(Some(100), TrayIconStyle::A);
-        let white_pixels = full
-            .rgba()
-            .chunks_exact(4)
-            .filter(|pixel| *pixel == [255, 255, 255, 255])
-            .count();
-        assert!(white_pixels > 450, "三位数不能缩成难以识别的小字");
+        let mask = tray_text_mask("100");
+        let visible_pixels = mask.iter().filter(|alpha| **alpha >= 32).count();
+        let rows = (0..TRAY_ICON_SIZE)
+            .filter(|y| {
+                mask[y * TRAY_ICON_SIZE..(y + 1) * TRAY_ICON_SIZE]
+                    .iter()
+                    .any(|alpha| *alpha >= 32)
+            })
+            .collect::<Vec<_>>();
+        let height = rows.last().unwrap() - rows.first().unwrap() + 1;
+        assert!(visible_pixels > 250, "三位数必须保留足够的可见笔画");
+        assert!(height >= 24, "三位数不能缩成难以识别的小字");
     }
 
     #[test]
     fn two_digit_quota_has_visible_spacing_at_tray_scale() {
-        let (scale_x, scale_y, gap) = tray_text_metrics(2);
-        assert_eq!((scale_x, scale_y), (4, 6));
-        assert!(gap >= 8, "两位数字之间至少保留约 2 个托盘像素");
-        let width = 2 * 4 * scale_x + gap;
-        assert!(width <= 40, "两位数字不能占满托盘图标");
+        let mask = tray_text_mask("11");
+        let active_columns = (0..TRAY_ICON_SIZE)
+            .map(|x| (0..TRAY_ICON_SIZE).any(|y| mask[y * TRAY_ICON_SIZE + x] >= 32))
+            .collect::<Vec<_>>();
+        let first = active_columns.iter().position(|active| *active).unwrap();
+        let last = active_columns.iter().rposition(|active| *active).unwrap();
+        let widest_internal_gap = active_columns[first..=last]
+            .split(|active| *active)
+            .map(|gap| gap.len())
+            .max()
+            .unwrap_or(0);
+        assert!(widest_internal_gap >= 3, "两位数字之间应保留清晰间距");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn loads_windows_system_font_for_tray_digits() {
+        assert!(
+            tray_font().is_some(),
+            "Windows 应优先使用 Segoe UI 系统字体"
+        );
+        let mask = tray_text_mask("53");
+        assert!(
+            mask.iter().any(|alpha| (1..255).contains(alpha)),
+            "系统字体应包含抗锯齿灰度边缘"
+        );
     }
 
     #[test]
@@ -834,6 +955,16 @@ mod tray_tests {
         assert_ne!(pixel(32, 3), pixel(3, 32), "环形进度与剩余轨道应可区分");
         assert_eq!(pixel(32, 3)[3], 255);
         assert_eq!(pixel(3, 32)[3], 255);
+        assert_eq!(pixel(32, 32)[3], 0, "C 方案圆心应透明且不显示数字");
+        for y in 0..TRAY_ICON_SIZE {
+            for x in 0..TRAY_ICON_SIZE {
+                let dx = x as f64 - 31.5;
+                let dy = y as f64 - 31.5;
+                if (dx * dx + dy * dy).sqrt() < 18.0 {
+                    assert_eq!(pixel(x, y)[3], 0, "C 方案圆环内部不能出现数字或底色");
+                }
+            }
+        }
     }
 
     #[test]
