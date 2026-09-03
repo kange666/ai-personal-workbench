@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-personal-workbench"
-version = "1.9.3"
+version = "1.9.4"
 dependencies = [
  "base64 0.22.1",
  "chrono",
