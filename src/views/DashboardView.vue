@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import ActivityTrendChart from "../components/ActivityTrendChart.vue";
+import BrandWordmark from "../components/BrandWordmark.vue";
+import { APP_BRAND } from "../utils/brand";
 import WorkTimeDrawer from "../components/WorkTimeDrawer.vue";
 import { getDailyActivity, getDailyCheckin, getHistoryCoverage, getTokenTrend, getWorkSummary, isTauriRuntime, listInboxItems, listReports, listTestRuns, saveDailyCheckin, type DailyActivity, type DailyCheckin, type HistoryCoverage, type InboxItem, type ReportRecord, type TestRun, type TokenTrendPoint, type WorkSummary } from "../services/backend";
 
@@ -87,7 +89,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="view dashboard-view">
-    <header class="page-header"><div><h1>星枢工作台</h1><p>ASTRION · 一个整合项目、知识、自动化和工作状态的个人数字空间</p></div><div><button class="button secondary" @click="openSearch">⌕ 搜索</button><button class="button primary" @click="openQuickCapture">＋ 快速记录</button></div></header>
+    <header class="page-header dashboard-brand-header">
+      <div class="dashboard-brand-intro">
+        <h1 :aria-label="APP_BRAND.name"><BrandWordmark variant="hero" /></h1>
+        <p>一个整合项目、知识、自动化和工作状态的个人数字空间</p>
+      </div>
+      <div class="dashboard-brand-actions"><button class="button secondary" @click="openSearch">⌕ 搜索</button><button class="button primary" @click="openQuickCapture">＋ 快速记录</button></div>
+    </header>
     <section class="welcome-strip action-overview"><div><b>{{ actionItems.length ? `当前有 ${actionItems.length} 项需要行动` : '当前没有阻塞事项' }}</b><p>{{ blockerCount ? `${blockerCount} 项高优先级 · 优先确认失败、缺陷和项目风险` : `今天已自动捕捉 ${todaySignals} 条工作信号` }}</p></div><div><RouterLink class="button primary link-button" to="/inbox">打开待处理收件箱</RouterLink><button class="button secondary" @click="toggleFocus">{{ focusing ? `暂停 ${focusText}` : '开始专注' }}</button></div></section>
     <section class="metric-grid"><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:todayIso,end:todayIso,title:'今日工时明细'}"><span>今日工时</span><b>{{ compactHours(todayWork.totalMinutes) }}</b><p>{{ todayWork.hasManualCorrections ? '手工修正优先' : '估算工时' }} · 查看明细</p></article><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:weekWork.startDate,end:weekWork.endDate,title:'本周工时明细'}"><span>本周工时</span><b>{{ compactHours(weekWork.totalMinutes) }}</b><p>{{ weekWork.byProject.length }} 个项目 · 查看分布</p></article><article class="clickable-card" tabindex="0" @click="router.push('/work-records')"><span>今日活动</span><b>{{ todaySignals }}<small> 条</small></b><p>{{ todayActivity?.conversationCount || 0 }} 个 Codex 对话 · {{ todayActivity?.gitCommits || 0 }} 次提交</p></article><article class="clickable-card" tabindex="0" @click="router.push('/tokens')"><span>今日 Token</span><b>{{ compactToken(todayToken) }}</b><p>只反映 AI 使用量</p></article></section>
     <section class="dashboard-notifications panel dashboard-actions">
@@ -111,6 +119,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.dashboard-brand-header{height:auto;min-height:84px;gap:20px;align-items:center;padding:2px 0 18px}
+.dashboard-brand-intro{min-width:0;flex:1}
+.dashboard-brand-header h1{margin:0 0 10px;line-height:1}
+.dashboard-brand-intro p{font-size:11px;line-height:1.65;letter-spacing:.04em;max-width:48em}
+.dashboard-brand-actions{flex:0 0 auto}
 .dashboard-task-panel{overflow:hidden}.week-task-progress{height:3px;background:var(--surface-2)}.week-task-progress i{display:block;height:100%;background:var(--success)}.dashboard-task-columns{display:grid;grid-template-columns:1fr 1fr;height:180px}.dashboard-task-columns>section{min-width:0;border-right:1px solid var(--line);overflow:hidden}.dashboard-task-columns>section:last-child{border-right:0}.dashboard-task-columns h3{height:28px;margin:0;padding:8px 14px 0;color:var(--muted);font-size:10px}.dashboard-task-columns p{padding:12px 14px;color:var(--muted)}
 .dashboard-result-columns{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 16px 14px}.dashboard-result-columns>a{min-height:130px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:10px;color:inherit;text-decoration:none;display:flex;flex-direction:column;gap:6px}.dashboard-result-columns b{color:var(--primary)}.dashboard-result-columns span{font-size:10px;line-height:1.45}.dashboard-result-columns em{font-style:normal;color:var(--muted);font-size:10px}.dashboard-risk{cursor:pointer}.dashboard-risk.test>i{background:var(--primary)}
 .dashboard-notifications{margin-bottom:12px;overflow:hidden}.dashboard-notifications .panel-head{height:54px}.dashboard-notification-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--line)}.dashboard-notification-list>button{min-width:0;min-height:76px;border:0;border-right:1px solid var(--line);background:transparent;color:inherit;padding:11px 14px;display:grid;grid-template-columns:8px minmax(0,1fr);gap:9px;text-align:left;position:relative}.dashboard-notification-list>button:last-child{border-right:0}.dashboard-notification-list>button:hover{background:var(--primary-soft)}.dashboard-notification-list>button>i{width:7px;height:7px;margin-top:5px;border-radius:50%;background:var(--line)}.dashboard-notification-list>button.unread>i{background:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}.dashboard-notification-list span{min-width:0;display:flex;flex-direction:column;gap:6px}.dashboard-notification-list b,.dashboard-notification-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dashboard-notification-list small{color:var(--muted)}.dashboard-notification-list em{position:absolute;right:12px;bottom:8px;color:var(--muted);font-size:9px;font-style:normal}.dashboard-notification-list>.panel-empty{grid-column:1/4;margin:0;padding:22px 16px}

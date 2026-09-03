@@ -2732,6 +2732,61 @@ pub fn open_repository_runtime_url(url: String) -> Result<(), String> {
     }
 }
 
+fn vscode_executable_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("Programs/Microsoft VS Code/Code.exe"));
+    }
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(root) = std::env::var_os(variable) {
+            candidates.push(PathBuf::from(root).join("Microsoft VS Code/Code.exe"));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path).filter(|entry| entry.is_absolute()) {
+            candidates.push(directory.join("Code.exe"));
+            // 自定义安装目录通常只把 bin/code.cmd 加入 PATH；直接启动其上级 Code.exe，避免 CMD 窗口。
+            if directory.join("code.cmd").is_file() {
+                if let Some(root) = directory.parent() {
+                    candidates.push(root.join("Code.exe"));
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn vscode_open_command(editor: &Path, project: &Path) -> Result<Command, String> {
+    if !project.is_absolute() || !project.is_dir() {
+        return Err("项目目录不存在或不可访问，请检查项目路径。".to_string());
+    }
+    let mut command = Command::new(editor);
+    // 项目路径使用独立参数传递，支持中文、空格和特殊字符，不经过 shell 拼接。
+    command.arg("--new-window").arg(project);
+    command.env_remove("ELECTRON_RUN_AS_NODE");
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
+}
+
+#[tauri::command]
+pub fn open_repository_in_editor(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<(), String> {
+    ensure_managed_repository(&state, &path)?;
+    let editor = vscode_executable_candidates()
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            "未找到 VS Code。请安装 VS Code，或将其 bin 目录加入 PATH 后重启工作台。".to_string()
+        })?;
+    vscode_open_command(&editor, Path::new(&path))?
+        .spawn()
+        .map_err(|error| format!("无法打开 VS Code：{error}"))?;
+    Ok(())
+}
+
 fn runtime_line_failed(line: &str) -> bool {
     let lower = line.to_lowercase();
     [
@@ -4277,8 +4332,8 @@ mod tests {
         sensitive_path, spawn_project_start_command, terminate_managed_process,
         valid_conventional_commit_message, validate_ai_indexed_commit_groups, validated_branch,
         validated_changed_file, validated_local_runtime_url, validated_stage_files,
-        workbench_stash_reference, GitScanConfiguration, ManagedProjectProcess,
-        RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
+        vscode_open_command, workbench_stash_reference, GitScanConfiguration,
+        ManagedProjectProcess, RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
         RUNTIME_SNAPSHOT_FALLBACK_INTERVAL,
     };
     use chrono::Utc;
@@ -5018,6 +5073,25 @@ mod tests {
     }
 
     #[test]
+    fn vscode_open_uses_a_single_literal_project_argument() {
+        let directory = std::env::temp_dir()
+            .join(format!("workbench-editor-{}", uuid::Uuid::new_v4()))
+            .join("中文 项目 & test");
+        std::fs::create_dir_all(&directory).unwrap();
+        let command = vscode_open_command(std::path::Path::new("Code.exe"), &directory).unwrap();
+        let args = command.get_args().collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![std::ffi::OsStr::new("--new-window"), directory.as_os_str()]
+        );
+        assert!(
+            vscode_open_command(std::path::Path::new("Code.exe"), &directory.join("missing"))
+                .is_err()
+        );
+        std::fs::remove_dir_all(directory.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn git_safety_helpers_use_local_branch_and_restore_staging() {
         let directory =
             std::env::temp_dir().join(format!("workbench-git-ops-{}", uuid::Uuid::new_v4()));
@@ -5044,9 +5118,15 @@ mod tests {
         assert_eq!(validated_branch(&repository, "feature").unwrap(), "feature");
         assert!(validated_branch(&repository, "--invalid").is_err());
 
+        assert!(ensure_clean_worktree(&repository).is_ok());
+        std::fs::write(directory.join("untracked.txt"), "new\n").unwrap();
+        assert!(ensure_clean_worktree(&repository).is_err());
+        std::fs::remove_file(directory.join("untracked.txt")).unwrap();
+
         std::fs::write(directory.join("main.txt"), "changed\n").unwrap();
         assert!(ensure_clean_worktree(&repository).is_err());
         run(&["add", "--", "main.txt"]);
+        assert!(ensure_clean_worktree(&repository).is_err());
         assert!(!run(&["diff", "--cached", "--name-only"]).is_empty());
         run(&["restore", "--staged", "--", "main.txt"]);
         assert!(run(&["diff", "--cached", "--name-only"]).is_empty());

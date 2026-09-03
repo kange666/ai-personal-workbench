@@ -41,7 +41,7 @@ export interface BackupStatus {
   backups: BackupEntry[];
 }
 
-export type TrayIconStyle = "A" | "B" | "C" | "F";
+export type TrayIconStyle = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H";
 
 export interface UpdateStatus {
   currentVersion: string;
@@ -902,6 +902,12 @@ export interface TranslationCandidate {
   text: string;
 }
 
+export interface ErrorTranslation {
+  meaning: string;
+  possibleCauses: string[];
+  solutions: string[];
+}
+
 export interface KnowledgeAnswer {
   answer: string;
   sources: Array<{ id: string; title: string; sourceType: string; sourceId?: string }>;
@@ -1350,7 +1356,8 @@ export async function restoreDatabaseBackup(path: string): Promise<BackupStatus>
 }
 
 export async function checkForUpdates(): Promise<UpdateStatus> {
-  return invoke<UpdateStatus>("check_for_updates");
+  // 版本检查是后台联网请求，不计入业务页面的全屏加载等待。
+  return tauriInvoke<UpdateStatus>("check_for_updates");
 }
 
 export async function getUpdaterProxy(): Promise<string | null> {
@@ -1625,6 +1632,10 @@ export async function listRunningRepositoryProjects(): Promise<RunningProjectPro
 
 export async function openRepositoryRuntimeUrl(url: string): Promise<void> {
   await invoke("open_repository_runtime_url", { url });
+}
+
+export async function openRepositoryInEditor(path: string): Promise<void> {
+  await invoke("open_repository_in_editor", { path });
 }
 
 export async function getJenkinsConnectionStatus(): Promise<JenkinsConnectionStatus> {
@@ -1945,6 +1956,10 @@ export async function testDeepSeek(): Promise<string> {
 
 export async function translateText(text: string, direction: TranslationDirection): Promise<TranslationCandidate[]> {
   return invoke<TranslationCandidate[]>("translate_text", { text, direction });
+}
+
+export async function translateError(text: string): Promise<ErrorTranslation> {
+  return invoke<ErrorTranslation>("translate_error", { text });
 }
 
 export async function refineReportWithAi(id: string): Promise<string> {

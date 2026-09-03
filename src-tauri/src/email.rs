@@ -340,8 +340,8 @@ fn mail_content(delivery: &DeliveryMessage) -> (String, String) {
         .collect::<Vec<_>>()
         .join("\n");
     let body = format!(
-        "Codex 任务已完成\n\n项目：{}\n任务：{}\n完成时间：{}\n会话ID：{}\n\n完成摘要：\n{}\n\nCodex输出：\n{}\n\n完整信息请在星枢工作台的消息中心查看。",
-        if delivery.project.trim().is_empty() { "星枢工作台" } else { delivery.project.trim() },
+        "Codex 任务已完成\n\n项目：{}\n任务：{}\n完成时间：{}\n会话ID：{}\n\n完成摘要：\n{}\n\nCodex输出：\n{}\n\n完整信息请在星枢 ASTRION 的消息中心查看。",
+        if delivery.project.trim().is_empty() { "星枢 ASTRION" } else { delivery.project.trim() },
         task,
         beijing_time(&delivery.completed_at),
         if delivery.source_id.is_empty() { "未记录" } else { &delivery.source_id },
@@ -563,7 +563,7 @@ pub async fn test_qq_email(
         let credential = credential()?;
         smtp_send(
             &credential,
-            "[星枢] QQ 邮件通知测试",
+            "[星枢 ASTRION] QQ 邮件通知测试",
             &format!(
                 "QQ 邮件通知连接测试成功。\n\n发件人/收件人：{}\nSMTP：smtp.qq.com:465（SSL/TLS）\n测试时间：{}\n\n验证通过后，可在工作台顶部开启 Codex 完成邮件通知。",
                 masked_email(&credential.email),
@@ -664,6 +664,7 @@ mod tests {
         let (subject, body) = mail_content(&delivery);
         assert_eq!(subject, "[Codex任务完成] 修复测试中心文本溢出");
         assert!(body.contains("项目：星枢工作台"));
+        assert!(body.contains("完整信息请在星枢 ASTRION 的消息中心查看。"));
         assert!(body.contains("任务：修复测试中心文本溢出"));
         assert!(body.contains("完成时间：2026-08-07 18:26"));
         assert!(body.contains("会话ID：session-1"));

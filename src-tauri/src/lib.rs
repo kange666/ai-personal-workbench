@@ -24,6 +24,8 @@ mod toolchain;
 mod videos;
 mod vip;
 mod wellbeing;
+#[cfg(windows)]
+mod windows_shell;
 mod worktime;
 
 use chrono::{Duration, Timelike};
@@ -47,7 +49,11 @@ enum TrayIconStyle {
     #[default]
     B,
     C,
+    D,
+    E,
     F,
+    G,
+    H,
 }
 
 impl TrayIconStyle {
@@ -55,7 +61,11 @@ impl TrayIconStyle {
         match value {
             Some("A") => Self::A,
             Some("C") => Self::C,
+            Some("D") => Self::D,
+            Some("E") => Self::E,
             Some("F") => Self::F,
+            Some("G") => Self::G,
+            Some("H") => Self::H,
             _ => Self::B,
         }
     }
@@ -65,8 +75,12 @@ impl TrayIconStyle {
             "A" => Ok(Self::A),
             "B" => Ok(Self::B),
             "C" => Ok(Self::C),
+            "D" => Ok(Self::D),
+            "E" => Ok(Self::E),
             "F" => Ok(Self::F),
-            _ => Err("托盘数字风格仅支持 A、B、C、F。".into()),
+            "G" => Ok(Self::G),
+            "H" => Ok(Self::H),
+            _ => Err("不支持的托盘风格。".into()),
         }
     }
 
@@ -75,7 +89,11 @@ impl TrayIconStyle {
             Self::A => "A",
             Self::B => "B",
             Self::C => "C",
+            Self::D => "D",
+            Self::E => "E",
             Self::F => "F",
+            Self::G => "G",
+            Self::H => "H",
         }
     }
 }
@@ -182,13 +200,33 @@ fn tray_font_size(length: usize) -> f32 {
     }
 }
 
-fn system_font_text_mask(text: &str) -> Option<Vec<u8>> {
+fn system_font_text_mask(text: &str, large: bool) -> Option<Vec<u8>> {
     let font = tray_font()?;
-    let font_size = tray_font_size(text.chars().count());
-    let glyphs = text
-        .chars()
-        .map(|character| font.rasterize(character, font_size))
-        .collect::<Vec<_>>();
+    let mut font_size = tray_font_size(text.chars().count()) * if large { 1.4 } else { 1.0 };
+    let letter_spacing = if text.chars().count() == 2 { 3 } else { 1 };
+    // 纯数字利用透明画布放大；按实际字形测量收缩，保证 100 和 -- 也不裁切。
+    let glyphs = loop {
+        let glyphs = text
+            .chars()
+            .map(|character| font.rasterize(character, font_size))
+            .collect::<Vec<_>>();
+        let width = glyphs
+            .iter()
+            .map(|(metrics, _)| metrics.width)
+            .max()
+            .unwrap_or(0)
+            * glyphs.len()
+            + glyphs.len().saturating_sub(1) * letter_spacing;
+        let height = glyphs
+            .iter()
+            .map(|(metrics, _)| metrics.height)
+            .max()
+            .unwrap_or(0);
+        if !large || (width <= 60 && height <= 58) {
+            break glyphs;
+        }
+        font_size -= 1.0;
+    };
     let cell_width = glyphs
         .iter()
         .map(|(metrics, _)| metrics.width)
@@ -203,9 +241,8 @@ fn system_font_text_mask(text: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    let letter_spacing = if glyphs.len() == 2 { 3 } else { 1 };
     let text_width = glyphs.len() * cell_width + glyphs.len().saturating_sub(1) * letter_spacing;
-    if text_width > TRAY_ICON_SIZE {
+    if text_width > TRAY_ICON_SIZE || max_height > TRAY_ICON_SIZE {
         return None;
     }
 
@@ -227,8 +264,16 @@ fn system_font_text_mask(text: &str) -> Option<Vec<u8>> {
     Some(mask)
 }
 
-fn bitmap_text_mask(text: &str) -> Vec<u8> {
-    let (scale_x, scale_y, gap) = tray_text_metrics(text.len());
+fn bitmap_text_mask(text: &str, large: bool) -> Vec<u8> {
+    let (scale_x, scale_y, gap) = if large {
+        match text.len() {
+            0 | 1 => (7, 8, 0),
+            2 => (6, 8, 8),
+            _ => (4, 8, 4),
+        }
+    } else {
+        tray_text_metrics(text.len())
+    };
     const GLYPH_WIDTH: i32 = 4;
     let text_width =
         text.len() as i32 * GLYPH_WIDTH * scale_x + (text.len().saturating_sub(1) as i32 * gap);
@@ -263,7 +308,7 @@ fn bitmap_text_mask(text: &str) -> Vec<u8> {
 }
 
 fn tray_text_mask(text: &str) -> Vec<u8> {
-    system_font_text_mask(text).unwrap_or_else(|| bitmap_text_mask(text))
+    system_font_text_mask(text, false).unwrap_or_else(|| bitmap_text_mask(text, false))
 }
 
 fn tray_palette(percent: Option<u8>) -> ([u8; 3], [u8; 3], [u8; 3]) {
@@ -335,12 +380,52 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
                     }
                     let angle = (dx.atan2(-dy) + std::f64::consts::TAU) % std::f64::consts::TAU;
                     let progress = percent.unwrap_or(0).min(100) as f64 / 100.0;
-                    if angle / std::f64::consts::TAU <= progress {
+                    if angle / std::f64::consts::TAU < progress {
                         [238, 233, 255]
+                    } else {
+                        [70, 74, 92]
+                    }
+                }
+                TrayIconStyle::D => {
+                    // 横向电量条：外框与端点固定，内部从左向右按剩余额度填充。
+                    let terminal = (57..=61).contains(&x) && (25..=38).contains(&y);
+                    let outline = (2..=55).contains(&x)
+                        && (13..=50).contains(&y)
+                        && (x < 6 || x > 51 || y < 17 || y > 46);
+                    if terminal || outline {
+                        [238, 233, 255]
+                    } else if (11..=46).contains(&x) && (22..=41).contains(&y) {
+                        if ((x - 11) as f64) < 36.0 * percent.unwrap_or(0).min(100) as f64 / 100.0 {
+                            match percent {
+                                Some(value) if value <= 25 => top,
+                                _ => [101, 255, 202],
+                            }
+                        } else {
+                            [58, 62, 80]
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                TrayIconStyle::E => {
+                    // 四根递增柱逐段填充，最后一段保留比例，低额度也可见。
+                    let column = x / 16;
+                    let height = 14 + column * 12;
+                    if !(3..=12).contains(&(x % 16)) || y < 56 - height || y >= 56 {
+                        continue;
+                    }
+                    let fill = (percent.unwrap_or(0).min(100) as f64 / 25.0 - column as f64)
+                        .clamp(0.0, 1.0);
+                    if ((55 - y) as f64) < height as f64 * fill {
+                        match percent {
+                            Some(value) if value <= 25 => top,
+                            _ => [238, 233, 255],
+                        }
                     } else {
                         [58, 62, 80]
                     }
                 }
+                TrayIconStyle::G | TrayIconStyle::H => continue,
                 TrayIconStyle::F => {
                     if !inside_rounded_square(x, y, 0, 11) {
                         continue;
@@ -362,18 +447,34 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
         }
     }
 
-    if style == TrayIconStyle::C {
+    if matches!(
+        style,
+        TrayIconStyle::C | TrayIconStyle::D | TrayIconStyle::E
+    ) {
         return Image::new_owned(rgba, TRAY_ICON_SIZE as u32, TRAY_ICON_SIZE as u32);
     }
 
     let text = percent
         .map(|value| value.min(100).to_string())
         .unwrap_or_else(|| "--".to_string());
-    let text_mask = tray_text_mask(&text);
+    let text_mask = if matches!(style, TrayIconStyle::G | TrayIconStyle::H) {
+        system_font_text_mask(&text, true).unwrap_or_else(|| bitmap_text_mask(&text, true))
+    } else {
+        tray_text_mask(&text)
+    };
 
     let digit_color = match style {
-        TrayIconStyle::A | TrayIconStyle::C => [255, 255, 255, 255],
+        TrayIconStyle::A | TrayIconStyle::C | TrayIconStyle::D | TrayIconStyle::E => {
+            [255, 255, 255, 255]
+        }
         TrayIconStyle::B => [bottom[0], bottom[1], bottom[2], 255],
+        TrayIconStyle::G => [top[0], top[1], top[2], 255],
+        TrayIconStyle::H => match percent {
+            Some(value) if value <= 10 => [255, 156, 160, 255],
+            Some(value) if value <= 25 => [247, 191, 112, 255],
+            Some(_) => [238, 233, 255, 255],
+            None => [154, 164, 181, 255],
+        },
         TrayIconStyle::F => match percent {
             Some(value) if value <= 10 => [255, 112, 126, 255],
             Some(value) if value <= 25 => [255, 184, 92, 255],
@@ -387,6 +488,12 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
             let alpha = text_mask[mask_offset] as u16;
             if alpha > 0 {
                 let offset = mask_offset * 4;
+                if matches!(style, TrayIconStyle::G | TrayIconStyle::H) {
+                    // 透明图标使用字形本身的透明度，避免抗锯齿边缘出现黑底。
+                    rgba[offset..offset + 3].copy_from_slice(&digit_color[..3]);
+                    rgba[offset + 3] = alpha as u8;
+                    continue;
+                }
                 for channel in 0..3 {
                     rgba[offset + channel] = ((rgba[offset + channel] as u16 * (255 - alpha)
                         + digit_color[channel] as u16 * alpha)
@@ -420,6 +527,11 @@ fn quota_tray_tooltip(quota: Option<&codex::TrayQuota>) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(windows)]
+    if let Err(error) = windows_shell::set_app_identity(&context.config().identifier) {
+        eprintln!("{error}");
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
@@ -429,6 +541,15 @@ pub fn run() {
         .manage(testing::TestProcessState::default())
         .manage(testing::TestCaseGenerationState::default())
         .setup(|app| {
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                match windows_shell::install_window_icons(&window) {
+                    Ok(icons) => {
+                        app.manage(icons);
+                    }
+                    Err(error) => eprintln!("设置任务栏图标失败：{error}"),
+                }
+            }
             app.handle().plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
                 None,
@@ -772,6 +893,7 @@ pub fn run() {
             git::stop_repository_project,
             git::list_running_repository_projects,
             git::open_repository_runtime_url,
+            git::open_repository_in_editor,
             git::git_credential_status,
             git::save_git_default_credential,
             git::clear_git_default_credential,
@@ -810,6 +932,7 @@ pub fn run() {
             ai::clear_deepseek_key,
             ai::test_deepseek,
             ai::translate_text,
+            ai::translate_error,
             ai::refine_report_with_ai,
             ai::ask_knowledge,
             testing::list_test_menus,
@@ -859,7 +982,7 @@ pub fn run() {
             worktime::work_time_settings,
             worktime::save_work_time_settings,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build ASTRION");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
@@ -958,8 +1081,8 @@ mod tray_tests {
             "C 方案进度段应使用明显的偏白高亮色"
         );
         assert!(
-            pixel(3, 32)[0..3].iter().all(|channel| *channel <= 80),
-            "C 方案剩余轨道应保持深色"
+            pixel(3, 32)[0..3].iter().all(|channel| *channel <= 96),
+            "C 方案已用部分调浅后仍应明显弱于剩余额度"
         );
         assert_eq!(pixel(32, 3)[3], 255);
         assert_eq!(pixel(3, 32)[3], 255);
@@ -981,7 +1104,11 @@ mod tray_tests {
             TrayIconStyle::A,
             TrayIconStyle::B,
             TrayIconStyle::C,
+            TrayIconStyle::D,
+            TrayIconStyle::E,
             TrayIconStyle::F,
+            TrayIconStyle::G,
+            TrayIconStyle::H,
         ];
         let icons = styles.map(|style| quota_tray_icon(Some(57), style));
         for index in 0..icons.len() {
@@ -991,7 +1118,89 @@ mod tray_tests {
         }
         assert_eq!(TrayIconStyle::from_saved(None), TrayIconStyle::B);
         assert_eq!(TrayIconStyle::from_saved(Some("unknown")), TrayIconStyle::B);
-        assert!(TrayIconStyle::from_input("D").is_err());
+        for style in styles {
+            assert_eq!(TrayIconStyle::from_saved(Some(style.as_str())), style);
+            assert_eq!(TrayIconStyle::from_input(style.as_str()).unwrap(), style);
+        }
+        assert_eq!(TrayIconStyle::from_input(" g ").unwrap(), TrayIconStyle::G);
+        assert!(TrayIconStyle::from_input("unknown").is_err());
+    }
+
+    #[test]
+    fn transparent_digits_are_larger_and_keep_background_clear() {
+        for text in ["0", "5", "11", "57", "99", "100", "--"] {
+            let normal = tray_text_mask(text);
+            let large =
+                system_font_text_mask(text, true).unwrap_or_else(|| bitmap_text_mask(text, true));
+            let height = |mask: &[u8]| {
+                (0..TRAY_ICON_SIZE)
+                    .filter(|y| {
+                        mask[y * TRAY_ICON_SIZE..(y + 1) * TRAY_ICON_SIZE]
+                            .iter()
+                            .any(|alpha| *alpha >= 32)
+                    })
+                    .count()
+            };
+            assert!(
+                height(&large) > height(&normal),
+                "{text} 应比带底色样式更大"
+            );
+            for mask in [&large, &bitmap_text_mask(text, true)] {
+                for edge in 0..TRAY_ICON_SIZE {
+                    assert_eq!(mask[edge], 0);
+                    assert_eq!(mask[63 * 64 + edge], 0);
+                    assert_eq!(mask[edge * 64], 0);
+                    assert_eq!(mask[edge * 64 + 63], 0);
+                }
+            }
+            let percent = text.parse::<u8>().ok();
+            let icon = quota_tray_icon(percent, TrayIconStyle::G);
+            for (pixel, alpha) in icon.rgba().chunks_exact(4).zip(&large) {
+                assert_eq!(pixel[3], *alpha, "只能绘制字形，不能添加底色");
+                if *alpha > 0 {
+                    assert_eq!(&pixel[..3], &tray_palette(percent).0);
+                }
+            }
+            let light_icon = quota_tray_icon(percent, TrayIconStyle::H);
+            for (pixel, alpha) in light_icon.rgba().chunks_exact(4).zip(&large) {
+                assert_eq!(pixel[3], *alpha, "浅色数字应沿用大字形和透明背景");
+                if *alpha > 0 && percent.is_some_and(|value| value > 25) {
+                    assert!(pixel[..3].iter().all(|channel| *channel >= 230));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn progress_styles_fill_monotonically_and_handle_missing_quota() {
+        for style in [TrayIconStyle::C, TrayIconStyle::D, TrayIconStyle::E] {
+            let empty = quota_tray_icon(Some(0), style);
+            let full = quota_tray_icon(Some(100), style);
+            let mut previous = 0;
+            for percent in [0, 1, 10, 25, 57, 99, 100] {
+                let icon = quota_tray_icon(Some(percent), style);
+                let filled = icon
+                    .rgba()
+                    .chunks_exact(4)
+                    .zip(empty.rgba().chunks_exact(4))
+                    .filter(|(pixel, empty_pixel)| pixel != empty_pixel)
+                    .count();
+                assert!(filled >= previous, "{style:?} 进度不能倒退");
+                if percent > 0 {
+                    assert!(filled > 0, "非零额度应显示进度");
+                }
+                previous = filled;
+                // 背景轮廓固定；更新额度时不能叠加数字或多余背景。
+                assert!(icon
+                    .rgba()
+                    .chunks_exact(4)
+                    .zip(empty.rgba().chunks_exact(4))
+                    .all(|(pixel, empty_pixel)| pixel[3] == empty_pixel[3]));
+            }
+            assert_ne!(empty.rgba(), full.rgba());
+            assert_eq!(quota_tray_icon(None, style).rgba(), empty.rgba());
+            assert_eq!(quota_tray_icon(Some(255), style).rgba(), full.rgba());
+        }
     }
 
     #[test]

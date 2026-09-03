@@ -9,8 +9,11 @@ import { useWorkbenchStore } from "../stores/workbench";
 import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, startRepositoryProject, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
+import { APP_BRAND } from "../utils/brand";
+import BrandWordmark from "./BrandWordmark.vue";
 import HeaderIcon from "./HeaderIcon.vue";
 import NavIcon from "./NavIcon.vue";
+import SettingsLink from "./SettingsLink.vue";
 import WindowControlIcon from "./WindowControlIcon.vue";
 import ThemeSwitch from "./ThemeSwitch.vue";
 import TaskEditor from "./TaskEditor.vue";
@@ -703,16 +706,16 @@ onBeforeUnmount(() => {
     </Transition>
     <aside class="icon-sidebar">
       <div class="app-brand-slot">
-        <RouterLink class="app-brand" to="/" title="星枢工作台 · ASTRION">
-          <span class="app-mark"><img :src="appLogo" alt="星枢工作台"></span>
-          <span class="app-brand-name">星枢</span>
+        <RouterLink class="app-brand" to="/" :title="APP_BRAND.name" :aria-label="`${APP_BRAND.name} · 返回首页`">
+          <span class="app-mark" aria-hidden="true"><img :src="appLogo" alt=""></span>
+          <BrandWordmark />
         </RouterLink>
         <button class="cockpit-entry" type="button" title="进入数据驾驶舱" aria-label="进入数据驾驶舱" @click="openCockpit">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5a1 1 0 0 0-1 1v3M16 4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3M16 20h3a1 1 0 0 0 1-1v-3"/><circle cx="12" cy="12" r="2.25"/><path d="M12 7.5v2M12 14.5v2M7.5 12h2M14.5 12h2"/></svg>
         </button>
       </div>
       <nav><RouterLink v-for="item in visibleNavItems" :key="item.path" :to="item.path" :title="item.label"><NavIcon :name="item.icon" /><em>{{ item.label }}</em><b v-if="item.vip" class="vip-badge">VIP</b></RouterLink></nav>
-      <div class="side-footer"><RouterLink class="settings-link" to="/settings" title="设置"><NavIcon name="settings" /><em>设置</em></RouterLink></div>
+      <div class="side-footer"><SettingsLink /></div>
     </aside>
     <header class="app-topbar" @mousedown="prepareWindowDragging" @dblclick="toggleMaximizeFromTopbar">
       <button class="top-search" title="搜索全部本地数据" @click="openSearch">⌕<span>搜索任务、对话、报告、知识与接口</span><kbd>Ctrl K</kbd></button>

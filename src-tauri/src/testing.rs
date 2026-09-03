@@ -2650,7 +2650,7 @@ fn generated_case_value(root: &Path, menu: &TestMenu, scenarios: &[String]) -> V
             "strategy": "page-business-source",
             "description": "根据页面查询项、列表字段、表单字段和操作按钮自动生成"
         },
-        "generatedBy": "星枢工作台 ASTRION",
+        "generatedBy": "星枢 ASTRION",
         "workbenchMenuId": menu.id,
         "generatedAt": Utc::now().to_rfc3339()
     })
@@ -4132,7 +4132,7 @@ fn pdf_html(run: &TestRun) -> String {
     format!(
         r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
 @page{{size:A4;margin:16mm 14mm}}*{{box-sizing:border-box}}body{{font-family:"Microsoft YaHei","Segoe UI",sans-serif;color:#202535;font-size:10.5pt;line-height:1.65;margin:0}}.cover{{padding:18px 20px;border:1px solid #dce1eb;border-radius:12px;background:#f7f8fc;margin-bottom:15px}}.eyebrow{{color:#6757d9;letter-spacing:2px;font-size:8pt}}h1{{margin:6px 0 3px;font-size:22pt}}.meta{{color:#697084}}.summary{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}}.summary div{{padding:10px;border:1px solid #dce1eb;border-radius:8px;text-align:center}}.summary b{{display:block;font-size:17pt}}.scenario{{break-inside:avoid;margin:0 0 12px;border:1px solid #dce1eb;border-radius:10px;overflow:hidden}}.scenario.failed,.scenario.blocked{{border-color:#ef9298}}.scenario header{{display:flex;align-items:center;gap:9px;padding:10px 12px;background:#f6f7fb}}.scenario header span{{width:26px;height:26px;border-radius:7px;background:#ece9ff;color:#6757d9;text-align:center;line-height:26px}}.scenario h2{{font-size:12.5pt;margin:0;flex:1}}.scenario header b{{color:#4ba778}}.scenario.failed header b,.scenario.blocked header b{{color:#d94b56}}.purpose{{margin:10px 12px;color:#596174}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px}}h3{{font-size:10pt;margin:3px 0}}ol,ul{{margin:4px 0;padding-left:20px}}pre{{margin:0 12px 10px;padding:9px;border-radius:7px;background:#fff0f1;color:#8c2530;white-space:pre-wrap;word-break:break-word}}figure{{margin:8px 12px 12px;break-inside:avoid}}img{{display:block;max-width:100%;max-height:220mm;border:1px solid #dce1eb;border-radius:7px}}figcaption{{color:#697084;font-size:8pt;margin-top:4px}}footer{{margin-top:15px;border-top:1px solid #dce1eb;padding-top:8px;color:#697084;font-size:8pt}}</style></head><body>
-<section class="cover"><div class="eyebrow">TEST REPORT</div><h1>{}</h1><div class="meta">{} · {} · {}</div><div class="summary"><div><span>结果</span><b>{}</b></div><div><span>场景</span><b>{}</b></div><div><span>通过</span><b>{}</b></div><div><span>失败</span><b>{}</b></div></div><div class="meta">环境：{}<br>项目目录：{}</div></section>{}<footer>由星枢工作台 ASTRION 导出 · {}</footer></body></html>"#,
+<section class="cover"><div class="eyebrow">TEST REPORT</div><h1>{}</h1><div class="meta">{} · {} · {}</div><div class="summary"><div><span>结果</span><b>{}</b></div><div><span>场景</span><b>{}</b></div><div><span>通过</span><b>{}</b></div><div><span>失败</span><b>{}</b></div></div><div class="meta">环境：{}<br>项目目录：{}</div></section>{}<footer>由星枢 ASTRION 导出 · {}</footer></body></html>"#,
         html_escape(&run.menu_name),
         html_escape(&run.project),
         html_escape(&run.mode),

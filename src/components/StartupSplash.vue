@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import appLogo from "../assets/app-logo.png";
+import BrandWordmark from "./BrandWordmark.vue";
+import { APP_BRAND } from "../utils/brand";
 
 defineProps<{ slow?: boolean }>();
 </script>
 
 <template>
-  <div class="startup-splash" role="status" aria-live="polite" aria-label="星枢工作台正在启动">
+  <div class="startup-splash" role="status" aria-live="polite" :aria-label="`${APP_BRAND.name} 正在启动`">
     <div class="startup-aurora" aria-hidden="true"></div>
     <div class="startup-grid" aria-hidden="true"></div>
     <div class="startup-stars" aria-hidden="true">
@@ -37,8 +39,8 @@ defineProps<{ slow?: boolean }>();
       </div>
 
       <div class="startup-copy">
-        <small>ASTRION · LOCAL WORKSPACE</small>
-        <h1>星枢工作台</h1>
+        <small>PERSONAL WORKSPACE</small>
+        <h1 class="startup-brand-heading" :aria-label="APP_BRAND.name"><BrandWordmark variant="splash" /></h1>
         <p>{{ slow ? "本地数据较多，仍在后台整理工作上下文…" : "正在连接你的项目、记录与工作状态…" }}</p>
         <div class="startup-progress" aria-hidden="true"><i></i></div>
         <div class="startup-steps" aria-hidden="true"><span>唤醒空间</span><span>读取上下文</span><span>同步状态</span></div>
@@ -48,6 +50,8 @@ defineProps<{ slow?: boolean }>();
 </template>
 
 <style scoped>
+.startup-copy .startup-brand-heading{margin:16px 0 20px;font-size:inherit;letter-spacing:normal}
+.startup-stage .startup-copy>small{color:var(--muted);font-size:9px;font-weight:500;letter-spacing:2.6px}
 .startup-splash{position:fixed;inset:0;z-index:1000;overflow:hidden;display:grid;place-items:center;background:radial-gradient(circle at 50% 46%,color-mix(in srgb,var(--primary) 15%,transparent),transparent 28%),linear-gradient(145deg,color-mix(in srgb,var(--bg) 96%,#060817),var(--bg));color:var(--text);isolation:isolate}
 .startup-aurora{position:absolute;width:min(82vw,1050px);height:min(54vw,670px);border-radius:50%;background:conic-gradient(from 210deg,transparent,color-mix(in srgb,var(--primary) 14%,transparent),transparent 38%,color-mix(in srgb,var(--success) 8%,transparent),transparent 72%);filter:blur(54px);animation:startup-aurora 9s linear infinite}
 .startup-grid{position:absolute;inset:-30%;background-image:linear-gradient(color-mix(in srgb,var(--primary) 8%,transparent) 1px,transparent 1px),linear-gradient(90deg,color-mix(in srgb,var(--primary) 8%,transparent) 1px,transparent 1px);background-size:46px 46px;mask-image:radial-gradient(circle at center,#000 0,transparent 63%);transform:perspective(650px) rotateX(62deg) translateY(32%);animation:startup-grid-drift 5s linear infinite}

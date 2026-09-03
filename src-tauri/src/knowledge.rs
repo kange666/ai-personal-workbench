@@ -320,12 +320,12 @@ fn mapped_topic(content: &str) -> Option<(&'static str, &'static str)> {
         (
             ["sqlite", "个人工作台"].as_slice(),
             "本地个人工作台架构",
-            "本地星枢工作台应如何选型和组织核心模块？",
+            "本地星枢 ASTRION 应如何选型和组织核心模块？",
         ),
         (
             ["轻量化", "个人工作台"].as_slice(),
             "本地个人工作台架构",
-            "本地星枢工作台应如何选型和组织核心模块？",
+            "本地星枢 ASTRION 应如何选型和组织核心模块？",
         ),
         (
             ["sunshine", "moonlight"].as_slice(),

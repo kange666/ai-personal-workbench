@@ -7,12 +7,12 @@ import ThemeSwitch from "../components/ThemeSwitch.vue";
 import NavIcon from "../components/NavIcon.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, orderedNavigationItems, saveHiddenNavigationPaths, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
 import { confirmAction } from "../utils/confirm";
+import { refreshUpdateStatus as checkForUpdates } from "../services/updateStatus";
 import {
   clearDeepSeekKey,
   clearApifoxToken,
   clearTapdCredentials,
   activateVip,
-  checkForUpdates,
   createDatabaseBackup,
   deactivateVip,
   deleteQqEmailConfig,
@@ -81,10 +81,14 @@ const hiddenMenuPaths = ref(loadHiddenNavigationPaths());
 const trayIconStyle = ref<TrayIconStyle>("B");
 const trayStyleSaving = ref(false);
 const trayStyleOptions: Array<{ value: TrayIconStyle; label: string }> = [
-  { value: "A", label: "紫色实底" },
-  { value: "B", label: "白底紫字" },
-  { value: "C", label: "圆环进度" },
-  { value: "F", label: "深色荧光" },
+  { value: "A", label: "紫底" },
+  { value: "B", label: "白底" },
+  { value: "F", label: "荧光" },
+  { value: "G", label: "纯数字" },
+  { value: "H", label: "浅色数字" },
+  { value: "C", label: "圆环" },
+  { value: "D", label: "电量条" },
+  { value: "E", label: "分段柱" },
 ];
 let updateSlowTimer: number | undefined;
 const updateProgress = computed(() => updateTotal.value > 0 ? Math.min(100, Math.round(updateDownloaded.value / updateTotal.value * 100)) : 0);
@@ -244,7 +248,7 @@ async function saveApifox() { loading.value=true;error.value="";message.value=""
 async function clearApifox() { loading.value=true;error.value="";message.value="";try{await clearApifoxToken();await refresh();message.value="已删除 Windows 凭据库中的 Apifox 令牌；本地接口缓存仍然保留。";}catch(cause){error.value=String(cause);}finally{loading.value=false;} }
 async function toggleAutostart() { if (!isTauriRuntime()) return; if (autostartEnabled.value) await disable(); else await enable(); autostartEnabled.value = await isEnabled(); }
 async function saveWorkGap() { loading.value = true; error.value = ""; message.value = ""; try { const value = await saveWorkTimeSettings(workGapMinutes.value); workGapMinutes.value = value.gapMinutes; message.value = "工时估算间隔已保存，下一次打开工时明细时自动重新估算。"; } catch (cause) { error.value=String(cause); } finally { loading.value=false; } }
-async function changeTrayIconStyle(style:TrayIconStyle) { if (style===trayIconStyle.value || trayStyleSaving.value) return; trayStyleSaving.value=true; error.value=""; message.value=""; try { trayIconStyle.value=await setTrayIconStyle(style); message.value=`托盘数字已切换为 ${style} 方案。`; } catch(cause) { error.value=String(cause); } finally { trayStyleSaving.value=false; } }
+async function changeTrayIconStyle(style:TrayIconStyle) { if (style===trayIconStyle.value || trayStyleSaving.value) return; trayStyleSaving.value=true; error.value=""; message.value=""; try { trayIconStyle.value=await setTrayIconStyle(style); } catch(cause) { error.value=String(cause); } finally { trayStyleSaving.value=false; } }
 async function saveTapd() { loading.value=true; error.value=""; message.value=""; try { await saveTapdCredentials(tapdAuthMode.value,tapdUser.value,tapdPassword.value,tapdAccessToken.value,tapdOwner.value); tapdUser.value=""; tapdPassword.value=""; tapdAccessToken.value=""; await refresh(); message.value=`TAPD ${tapdAuthMode.value==='token'?'个人访问令牌':'OpenAPI 账号'}已安全保存到 Windows 凭据库。`; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function testTapd() { loading.value=true; error.value=""; message.value=""; try { message.value=await testTapdConnection(); await refresh(); } catch(cause) { error.value=String(cause); await refresh(); } finally { loading.value=false; } }
 async function clearTapd() { loading.value=true; error.value=""; message.value=""; try { await clearTapdCredentials(); await refresh(); message.value="已删除 Windows 凭据库中的 TAPD 凭据。"; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
@@ -294,11 +298,29 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
       <header class="settings-section-title"><div><h2>常用设置</h2><p>调整显示、工时、会员功能与本地数据。</p></div></header>
       <div class="settings-overview-grid">
         <article class="panel settings-card compact-setting-card appearance-settings">
-          <div class="appearance-settings-header"><div><h2>外观</h2><p>切换主题颜色和 Windows 托盘数字样式。</p></div><ThemeSwitch /></div>
+          <h2>外观</h2>
+          <div class="appearance-theme-setting"><b>主题</b><ThemeSwitch /></div>
           <div class="tray-style-setting">
-            <span><b>托盘数字风格</b><small>默认 B；切换后立即生效</small></span>
-            <div class="tray-style-options" role="radiogroup" aria-label="托盘数字风格">
-              <button v-for="option in trayStyleOptions" :key="option.value" type="button" role="radio" :aria-checked="trayIconStyle===option.value" :title="`${option.value} 方案：${option.label}`" :disabled="trayStyleSaving" :class="['tray-style-option',`style-${option.value.toLowerCase()}`,{active:trayIconStyle===option.value}]" @click="changeTrayIconStyle(option.value)"><i>57</i><span>{{ option.value }}</span></button>
+            <b>托盘风格</b>
+            <div class="tray-style-options" role="radiogroup" aria-label="托盘风格">
+              <button v-for="option in trayStyleOptions" :key="option.value" type="button" role="radio" :aria-checked="trayIconStyle===option.value" :aria-label="option.label" :title="option.label" :disabled="trayStyleSaving" :class="['tray-style-option',`style-${option.value.toLowerCase()}`,{active:trayIconStyle===option.value}]" @click="changeTrayIconStyle(option.value)">
+                <svg v-if="option.value==='C'" class="tray-style-preview" viewBox="0 0 64 64" aria-hidden="true">
+                  <circle cx="32" cy="32" r="24" fill="none" stroke="var(--tray-track)" stroke-width="12" />
+                  <circle cx="32" cy="32" r="24" fill="none" stroke="var(--tray-progress)" stroke-width="12" pathLength="100" stroke-dasharray="57 100" transform="rotate(-90 32 32)" />
+                </svg>
+                <svg v-else-if="option.value==='D'" class="tray-style-preview" viewBox="0 0 64 64" aria-hidden="true">
+                  <rect x="4" y="15" width="50" height="34" rx="5" fill="none" stroke="var(--tray-progress)" stroke-width="4" />
+                  <path d="M59 25v14" stroke="var(--tray-progress)" stroke-width="5" />
+                  <path d="M11 32h36" stroke="var(--tray-track)" stroke-width="20" />
+                  <path d="M11 32h20.5" stroke="var(--tray-accent)" stroke-width="20" />
+                </svg>
+                <svg v-else-if="option.value==='E'" class="tray-style-preview" viewBox="0 0 64 64" aria-hidden="true">
+                  <path d="M8 42v14M24 30v26M40 18v38M56 6v50" stroke="var(--tray-track)" stroke-width="10" />
+                  <path d="M8 42v14M24 30v26M40 45v11" stroke="var(--tray-progress)" stroke-width="10" />
+                </svg>
+                <i v-else aria-hidden="true">57</i>
+                <span>{{ option.label }}</span>
+              </button>
             </div>
           </div>
         </article>

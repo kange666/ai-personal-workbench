@@ -323,7 +323,14 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 }
 
 #[tauri::command]
-pub fn check_for_updates() -> UpdateStatus {
+pub async fn check_for_updates() -> Result<UpdateStatus, String> {
+    // 后台检查不能占用桌面窗口线程，尤其是在网络超时时。
+    tauri::async_runtime::spawn_blocking(read_update_status)
+        .await
+        .map_err(|error| format!("检查更新失败：{error}"))
+}
+
+fn read_update_status() -> UpdateStatus {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let checked_at = Utc::now().to_rfc3339();
     let response = reqwest::blocking::Client::builder()

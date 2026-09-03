@@ -17,6 +17,7 @@ import InboxView from "../views/InboxView.vue";
 import ProjectMappingView from "../views/ProjectMappingView.vue";
 import ApiDocsView from "../views/ApiDocsView.vue";
 import { getVipStatus, isTauriRuntime } from "../services/backend";
+import { APP_BRAND } from "../utils/brand";
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -52,7 +53,7 @@ router.beforeEach(async (to) => {
 });
 
 router.afterEach((to) => {
-  document.title = `${String(to.meta.title)} · 星枢`;
+  document.title = `${String(to.meta.title)} · ${APP_BRAND.name}`;
 });
 
 export default router;

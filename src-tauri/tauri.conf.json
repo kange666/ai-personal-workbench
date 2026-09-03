@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "星枢工作台",
-  "version": "1.9.4",
+  "version": "1.9.5",
   "identifier": "com.local.ai-personal-workbench",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "星枢",
+        "title": "星枢 ASTRION",
         "backgroundColor": "#0D111B",
         "width": 1520,
         "height": 940,

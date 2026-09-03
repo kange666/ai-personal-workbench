@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-personal-workbench"
-version = "1.9.4"
+version = "1.9.5"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -39,6 +39,7 @@ dependencies = [
  "tauri-plugin-updater",
  "uuid",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

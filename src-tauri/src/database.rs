@@ -251,7 +251,11 @@ fn migrate_api_sources_shared_external_project_id(connection: &Connection) -> Re
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    if !normalized_sql.contains("external_project_id text not null unique") {
+    // V39 仅处理规范项目必填且唯一的旧表。V45 也有 Apifox ID 唯一约束，
+    // 但规范项目已经可空，不能再次用旧表结构重建，否则会丢失名称和请求配置。
+    if !normalized_sql.contains("external_project_id text not null unique")
+        || !normalized_sql.contains("project_profile_id text not null unique")
+    {
         return Ok(());
     }
 
@@ -2112,6 +2116,92 @@ mod migration_tests {
         assert_eq!(source_count, 2);
         assert_eq!(endpoint_count, 1);
         assert_eq!(foreign_key_errors, 0);
+    }
+
+    fn assert_apifox_project_survives_upgrade_and_restarts(profile_id: Option<&str>) {
+        fn snapshot(connection: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+                .unwrap();
+            let column_count = statement.column_count();
+            statement
+                .query_map([], |row| {
+                    (0..column_count).map(|index| row.get(index)).collect()
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+
+        let directory = test_directory("apifox-restart");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("workbench.sqlite3");
+        let state = DatabaseState::new(database_path.clone()).unwrap();
+        let connection = state.connect().unwrap();
+        connection
+            .execute_batch(
+                r#"INSERT INTO project_profiles(id,display_name,created_at,updated_at)
+             VALUES('profile-demo','测试项目','now','now');
+             INSERT INTO api_sources(
+               id,external_project_id,apifox_project_name,document_title,openapi_version,
+               sync_status,endpoint_count,content_hash,openapi_document_json,
+               request_base_url,request_token_header,code_client,code_function_prefix,
+               code_import_path,code_include_import,code_typescript,last_synced_at,
+               created_at,updated_at
+             ) VALUES(
+               'source-demo','1001','自定义项目名','默认模块','3.1.0',
+               'ready',1,'test-hash','{"openapi":"3.1.0"}',
+               'https://example.invalid','X-Test-Auth','axios','api_',
+               '@/utils/http',1,1,'2026-09-01T00:00:00Z','now','now'
+             );
+             INSERT INTO api_endpoints(id,source_id,method,path,title,document_json,updated_at)
+             VALUES('endpoint-demo','source-demo','GET','/items','列表','{}','now');
+             INSERT INTO api_tag_exports(source_id,tag_path,openapi_url,created_at,updated_at)
+             VALUES('source-demo','通用接口','http://127.0.0.1:4523/export/openapi/1','now','now');
+             UPDATE app_meta SET value='45' WHERE key='schema_version';"#,
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE api_sources SET project_profile_id=?1 WHERE id='source-demo'",
+                [profile_id],
+            )
+            .unwrap();
+        let tables = ["api_sources", "api_endpoints", "api_tag_exports"];
+        let expected = tables.map(|table| snapshot(&connection, table));
+        drop(connection);
+        drop(state);
+
+        // 第一次模拟 V45 升级，后两次模拟当前版本重启；必须保留所有设置及缓存。
+        for _ in 0..3 {
+            let reopened = DatabaseState::new(database_path.clone()).unwrap();
+            let connection = reopened.connect().unwrap();
+            for (table, expected_rows) in tables.iter().zip(&expected) {
+                assert_eq!(&snapshot(&connection, table), expected_rows, "{table}");
+            }
+            let foreign_key_errors: i64 = connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(foreign_key_errors, 0);
+            assert_eq!(
+                reopened.stored_schema_version().unwrap(),
+                Some(SCHEMA_VERSION)
+            );
+        }
+        assert_eq!(backup_files(&directory).len(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn apifox_project_settings_survive_upgrade_and_restarts() {
+        assert_apifox_project_survives_upgrade_and_restarts(Some("profile-demo"));
+    }
+
+    #[test]
+    fn apifox_standalone_project_survives_upgrade_and_restarts() {
+        assert_apifox_project_survives_upgrade_and_restarts(None);
     }
 
     #[test]

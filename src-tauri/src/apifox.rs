@@ -2964,6 +2964,21 @@ mod tests {
             },
         )
         .is_err());
+        drop(state);
+        // 使用真实保存入口模拟新用户添加项目后退出、连续重新打开工作台。
+        // 保持当前 schema_version，不依赖升级分支，也不能要求先关联本地项目。
+        for _ in 0..3 {
+            let reopened = DatabaseState::new(database_path.clone()).unwrap();
+            let connection = reopened.connect().unwrap();
+            let saved: (Option<String>, String) = connection
+                .query_row(
+                    "SELECT project_profile_id,apifox_project_name FROM api_sources WHERE id=?1",
+                    [&saved_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(saved, (None, "统一接口项目".into()));
+        }
         let _ = std::fs::remove_file(database_path);
     }
 }

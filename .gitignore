@@ -13,3 +13,5 @@ release/
 .idea/
 .vscode/
 *.lnk
+# 本地翻译布局验收页，不作为产品或发布源码。
+.translation-preview-*.html

@@ -6,7 +6,9 @@ describe("StartupSplash", () => {
   it("使用独立的全屏启动态展示品牌和首批数据进度", () => {
     const wrapper = mount(StartupSplash);
     expect(wrapper.get(".startup-splash").attributes("role")).toBe("status");
-    expect(wrapper.text()).toContain("星枢工作台");
+    expect(wrapper.get("h1").attributes("aria-label")).toBe("星枢 ASTRION");
+    expect(wrapper.text()).toContain("ASTRION");
+    expect(wrapper.text()).not.toContain("星枢工作台");
     expect(wrapper.text()).toContain("正在连接你的项目、记录与工作状态");
     expect(wrapper.find(".workbench-page-loader").exists()).toBe(false);
   });

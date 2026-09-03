@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   abortGitRepositoryMerge,
@@ -17,6 +17,7 @@ import {
   listRunningRepositoryProjects,
   mergeGitRepositoryBranch,
   openRepositoryRuntimeUrl,
+  openRepositoryInEditor,
   pullGitRepository,
   pushGitRepository,
   resolveGitPullConflicts,
@@ -86,6 +87,16 @@ const categoryEditor = ref<RepositoryAsset | null>(null);
 const categoryDraft = ref("");
 const categorySaving = ref(false);
 const startingPath = ref("");
+const openingProjectPath = ref("");
+const branchProject = ref<RepositoryAsset | null>(null);
+const branchStatus = ref<GitRepositoryStatus | null>(null);
+const branchLoading = ref(false);
+const branchSwitching = ref(false);
+const branchError = ref("");
+const branchDialog = ref<HTMLElement | null>(null);
+let branchRequestId = 0;
+let branchTrigger: HTMLElement | null = null;
+const branchSwitchBlocked = computed(() => !branchStatus.value || branchStatus.value.hasUncommittedChanges || branchStatus.value.mergeInProgress);
 const runningPaths = ref<string[]>([]);
 const runningProcesses = ref<RunningProjectProcess[]>([]);
 const showScanSettings = ref(false);
@@ -365,6 +376,72 @@ async function toggleProjectProcess(item: RepositoryAsset) {
   } catch (cause) { error.value = String(cause); }
   finally { startingPath.value = ""; }
 }
+async function openProjectInEditor(item: RepositoryAsset) {
+  if (openingProjectPath.value) return;
+  openingProjectPath.value = item.path; error.value = ""; message.value = "";
+  try {
+    await openRepositoryInEditor(item.path);
+    message.value = `已请求使用 VS Code 打开 ${item.name}。`;
+  } catch (cause) { error.value = String(cause); }
+  finally { openingProjectPath.value = ""; }
+}
+function applyBranchStatus(status: GitRepositoryStatus) {
+  const item = assets.value.find((asset) => asset.path === status.repositoryPath);
+  if (!item) return;
+  Object.assign(item, {
+    defaultBranch: status.currentBranch, hasUncommittedChanges: status.hasUncommittedChanges,
+    changedFileCount: status.changedFiles.length, aheadCount: status.ahead, behindCount: status.behind,
+  });
+}
+async function refreshBranchChoices() {
+  if (!branchProject.value || branchSwitching.value) return;
+  const path = branchProject.value.path;
+  const requestId = ++branchRequestId;
+  branchLoading.value = true; branchStatus.value = null; branchError.value = "";
+  try {
+    const status = await getGitRepositoryStatus(path);
+    if (requestId !== branchRequestId) return;
+    branchStatus.value = status;
+    applyBranchStatus(status);
+  } catch (cause) { if (requestId === branchRequestId) branchError.value = String(cause); }
+  finally { if (requestId === branchRequestId) branchLoading.value = false; }
+}
+async function openBranchPicker(item: RepositoryAsset, event: MouseEvent) {
+  branchTrigger = event.currentTarget as HTMLElement;
+  branchProject.value = item;
+  const request = refreshBranchChoices();
+  await nextTick();
+  branchDialog.value?.focus();
+  await request;
+}
+function closeBranchPicker() {
+  if (branchSwitching.value) return;
+  ++branchRequestId;
+  branchProject.value = null; branchStatus.value = null; branchLoading.value = false;
+  branchTrigger?.focus();
+}
+async function selectProjectBranch(branch: string) {
+  if (!branchProject.value || branchLoading.value || branchSwitching.value || branchSwitchBlocked.value || branch === branchStatus.value?.currentBranch) return;
+  const path = branchProject.value.path;
+  branchSwitching.value = true; branchError.value = "";
+  try {
+    // 弹窗打开后仍可能产生修改：点击选项时重新校验，后端切换前还会再次检查。
+    const status = await getGitRepositoryStatus(path);
+    branchStatus.value = status;
+    applyBranchStatus(status);
+    if (branchSwitchBlocked.value) return;
+    if (branch !== status.currentBranch) {
+      const result = await switchGitRepositoryBranch(path, branch);
+      message.value = result.message; error.value = "";
+      const item = assets.value.find((asset) => asset.path === path);
+      if (item) item.defaultBranch = branch;
+      await load();
+    }
+    branchSwitching.value = false;
+    closeBranchPicker();
+  } catch (cause) { branchError.value = String(cause); }
+  finally { branchSwitching.value = false; }
+}
 async function openProjectFromRoute() {
   const projectPath = typeof route.query.project === "string" ? route.query.project.trim().toLocaleLowerCase() : "";
   if (!projectPath || !assets.value.length) return;
@@ -535,14 +612,6 @@ async function save() {
   try { await saveRepositoryAsset({ ...form }); message.value = "人工修正已保存，后续扫描不会覆盖这些说明。"; editing.value = false; await refreshSelected(); }
   catch (cause) { error.value = String(cause); } finally { loading.value = false; }
 }
-function exportText(format: "markdown" | "csv") {
-  if (format === "csv") {
-    const quote = (value: string | number | boolean) => `"${String(value).replaceAll('"', '""')}"`;
-    return [["置顶", "项目", "路径", "分类", "用途", "当前分支", "运行状态", "健康状态", "修改文件", "待处理", "Codex任务", "提交记录"].map(quote).join(","), ...filtered.value.map((item) => [item.isPinned ? "是" : "否", item.name, item.path, item.category, item.purpose, item.defaultBranch, runtimeLabel(projectRuntimeStatus(item)), item.healthLevel, item.changedFileCount, item.pendingSummary, item.conversationCount, item.commitCount].map(quote).join(","))].join("\n");
-  }
-  return ["# 项目资产清单", "", `共 ${filtered.value.length} 个项目`, "", ...filtered.value.flatMap((item) => [`## ${item.isPinned ? "📌 " : ""}${item.name}`, `- 路径：${item.path}`, `- 分类：${item.category}`, `- 用途：${item.purpose || "待确认"}`, `- 当前分支：${item.defaultBranch || "无分支"}`, `- 运行：${runtimeLabel(projectRuntimeStatus(item))}`, `- 健康：${item.healthLevel}`, `- 待处理：${item.pendingSummary}`, ""])].join("\n");
-}
-async function copyExport(format: "markdown" | "csv") { await navigator.clipboard.writeText(exportText(format)); message.value = `${format === "csv" ? "CSV" : "Markdown"} 清单已复制，可直接保存为文件。`; }
 onMounted(async () => {
   await load();
   void refreshRuntime();
@@ -557,7 +626,7 @@ onBeforeUnmount(() => { if (runtimeTimer) window.clearInterval(runtimeTimer); })
 
 <template>
   <div class="view projects-view">
-    <header class="page-header"><div><h1>项目资产</h1><p>从这里继续工作、运行项目、处理风险，并查看项目关联记录</p></div><div><RouterLink class="button secondary link-button" to="/project-mapping">项目映射</RouterLink><button class="button secondary" @click="showHiddenList = true">隐藏列表 {{ hiddenAssets.length }}</button><button class="button secondary" @click="copyExport('csv')">导出 CSV</button><button class="button secondary" @click="openScanConfiguration">扫描设置</button><button class="button primary" :disabled="loading" @click="scan">{{ loading ? "处理中…" : "↻ 重新扫描" }}</button></div></header>
+    <header class="page-header project-page-header"><div><h1>项目资产</h1><p>从这里继续工作、运行项目、处理风险，并查看项目关联记录</p></div><div class="project-header-actions"><button class="button secondary" @click="showHiddenList = true">隐藏列表 {{ hiddenAssets.length }}</button><RouterLink class="button secondary link-button" to="/project-mapping">项目映射</RouterLink><button class="button secondary" @click="openScanConfiguration">扫描设置</button><button class="button primary" :disabled="loading" @click="scan">{{ loading ? "处理中…" : "↻ 重新扫描" }}</button></div></header>
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
     <section class="asset-metrics"><article class="panel running"><small>工作台运行中</small><b>{{ runningProcesses.length }}</b><span>启动、停止和日志都留在工作台</span></article><article class="panel warning"><small>需要处理</small><b>{{ attentionCount }}</b><span>修改、落后、启动失败或长期未维护</span></article><article class="panel"><small>有未提交修改</small><b>{{ dirtyCount }}</b><span>工作状态，不再算健康故障</span></article><article class="panel failed"><small>健康检查失败</small><b>{{ failedCount }}</b><span>只统计目录或 Git 无法读取</span></article></section>
     <section class="panel asset-workspace">
@@ -571,16 +640,38 @@ onBeforeUnmount(() => { if (runtimeTimer) window.clearInterval(runtimeTimer); })
               <td><button class="pin-button" :class="{ active: item.isPinned }" :title="item.isPinned ? '取消置顶' : '置顶项目'" @click.stop="togglePin(item)">{{ item.isPinned ? "★" : "☆" }}</button></td>
               <td><b>{{ item.name }}</b><small>{{ item.path }}</small></td>
               <td><button class="category-button" title="点击修改分类" @click.stop="openCategoryEditor(item)">{{ item.category }}</button><small>{{ projectDescription(item) }}</small></td>
-              <td><b class="branch-name">{{ item.defaultBranch || "无分支" }}</b><small v-if="branchSyncSummary(item)" class="branch-sync" :class="{ behind: item.behindCount > 0 }">{{ branchSyncSummary(item) }}</small></td>
+              <td><button class="branch-picker-trigger" :title="`${item.defaultBranch || '无分支'} · 点击选择本地分支，仅工作区干净时可切换`" :aria-label="`切换 ${item.name} 的分支`" aria-haspopup="dialog" @click.stop="openBranchPicker(item, $event)"><span>{{ item.defaultBranch || "无分支" }}</span><svg class="branch-picker-chevron" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><small v-if="branchSyncSummary(item)" class="branch-sync" :class="{ behind: item.behindCount > 0 }">{{ branchSyncSummary(item) }}</small></td>
               <td><div class="work-state"><i v-if="item.healthLevel !== '健康'" class="health-pill" :class="healthClass(item.healthLevel)">健康：{{ item.healthLevel }}</i><i v-if="item.changedFileCount" class="dirty-pill">{{ item.changedFileCount }} 个文件修改</i><small v-if="item.healthLevel === '健康' && !item.changedFileCount" class="clean-state">工作区干净</small></div></td>
               <td><div class="runtime-cell"><i class="runtime-pill" :class="runtimeClass(projectRuntimeStatus(item))">{{ runtimeLabel(projectRuntimeStatus(item)) }}</i><button v-if="projectRuntimeUrl(item)" class="runtime-address-button" :title="`使用默认浏览器打开 ${projectRuntimeUrl(item)}`" @click.stop="openRuntimeUrl(projectRuntimeUrl(item))">{{ projectRuntimeUrl(item) }}</button><small v-else class="runtime-address-empty">{{ isProjectRunning(item.path) ? '正在获取运行地址…' : '—' }}</small></div></td>
-              <td><div class="asset-row-actions"><button class="asset-row-button launch" :class="{ stop: isProjectRunning(item.path) }" :disabled="Boolean(startingPath)" @click.stop="toggleProjectProcess(item)">{{ startingPath === item.path ? (isProjectRunning(item.path) ? '停止中…' : '启动中…') : (isProjectRunning(item.path) ? '■ 停止' : '▶ 启动') }}</button><button class="asset-row-button git" @click.stop="openAsset(item, 'git')">Git</button></div></td>
+              <td><div class="asset-row-actions">
+                <button class="button secondary small project-row-button launch" :class="{ 'danger-button': isProjectRunning(item.path) }" :disabled="Boolean(startingPath)" @click.stop="toggleProjectProcess(item)"><span v-if="startingPath !== item.path" aria-hidden="true">{{ isProjectRunning(item.path) ? '■' : '▶' }}</span>{{ startingPath === item.path ? (isProjectRunning(item.path) ? '停止中…' : '启动中…') : (isProjectRunning(item.path) ? '停止' : '启动') }}</button>
+                <button class="button secondary small project-row-button" @click.stop="openAsset(item, 'git')">Git</button>
+                <button class="button secondary small project-row-button open-project" :disabled="Boolean(openingProjectPath)" title="使用 VS Code 打开项目" @click.stop="openProjectInEditor(item)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11H3Z"/></svg>{{ openingProjectPath === item.path ? '打开中…' : '打开项目' }}</button>
+              </div></td>
             </tr>
           </tbody>
         </table>
         <div v-if="!filtered.length" class="empty-state"><b>当前视图没有项目</b><p>可以切换快捷视图或调整筛选条件。</p></div>
       </div>
     </section>
+    <div v-if="branchProject" class="activity-backdrop branch-picker-backdrop" @click.self="closeBranchPicker" @keydown.esc.stop.prevent="closeBranchPicker">
+      <section ref="branchDialog" class="panel branch-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="branch-picker-title" tabindex="-1">
+        <header><div><h2 id="branch-picker-title">切换本地分支</h2><p>{{ branchProject.name }}</p></div><button class="icon-button" aria-label="关闭分支选择" :disabled="branchSwitching" @click="closeBranchPicker">×</button></header>
+        <div class="branch-picker-body">
+          <p v-if="branchLoading" role="status">正在读取分支并检查工作区…</p>
+          <p v-if="branchError" class="branch-picker-warning" role="alert">{{ branchError }}</p>
+          <template v-if="branchStatus && !branchLoading">
+            <p v-if="branchStatus.mergeInProgress" class="branch-picker-warning" role="alert">当前有未完成的合并，请先完成或取消合并后再切换。</p>
+            <p v-else-if="branchStatus.hasUncommittedChanges" class="branch-picker-warning" role="alert">工作区不干净，有未提交修改或未跟踪文件。请先提交或自行处理后再切换；不会自动暂存或丢弃修改。</p>
+            <p v-else class="branch-picker-help">工作区干净，点击目标分支即可切换。</p>
+            <div class="branch-options"><button v-for="branch in branchStatus.branches" :key="branch" class="branch-option" :class="{ current: branch === branchStatus.currentBranch }" :disabled="branchSwitching || branchSwitchBlocked || branch === branchStatus.currentBranch" @click="selectProjectBranch(branch)"><span>{{ branch }}</span><small>{{ branch === branchStatus.currentBranch ? '当前分支' : '切换' }}</small></button></div>
+            <p v-if="!branchStatus.branches.length">暂无可切换的本地分支。</p>
+          </template>
+          <p v-if="branchSwitching" role="status">正在检查并切换分支，请稍候…</p>
+        </div>
+        <footer><button class="button secondary" :disabled="branchLoading || branchSwitching" @click="refreshBranchChoices">刷新状态</button><button class="button secondary" :disabled="branchSwitching" @click="closeBranchPicker">取消</button></footer>
+      </section>
+    </div>
     <div v-if="showHiddenList" class="activity-backdrop hidden-project-backdrop" @click.self="showHiddenList = false"><section class="hidden-project-dialog panel"><header><div><h2>隐藏项目</h2><p>隐藏只影响项目资产列表，不会删除仓库、报告或历史数据。</p></div><button class="icon-button" @click="showHiddenList = false">×</button></header><div class="hidden-project-list"><article v-for="item in hiddenAssets" :key="item.path"><div><b>{{ item.name }}</b><small>{{ item.path }}</small></div><button class="button secondary small" @click="toggleHidden(item, false)">恢复显示</button></article><div v-if="!hiddenAssets.length" class="empty-state"><b>没有隐藏项目</b><p>在项目详情右上角点击“隐藏”后，会显示在这里。</p></div></div></section></div>
     <div v-if="categoryEditor" class="activity-backdrop category-editor-backdrop" @click.self="categoryEditor = null"><form class="panel category-editor-dialog" @submit.prevent="saveQuickCategory"><header><div><h2>修改项目分类</h2><p>{{ categoryEditor.name }}</p></div><button type="button" class="icon-button" @click="categoryEditor = null">×</button></header><label>分类名称<input v-model="categoryDraft" maxlength="40" list="project-category-options" autofocus placeholder="例如：业务系统 / 个人工具 / 视频项目"><datalist id="project-category-options"><option v-for="item in categories" :key="item" :value="item"></option></datalist></label><footer><button type="button" class="button secondary" @click="categoryEditor = null">取消</button><button class="button primary" :disabled="categorySaving || !categoryDraft.trim()">{{ categorySaving ? '保存中…' : '保存分类' }}</button></footer></form></div>
     <div v-if="showScanSettings" class="activity-backdrop scan-settings-backdrop" @click.self="showScanSettings = false"><section class="panel scan-settings-dialog"><header><div><h2>Git 扫描设置</h2><p>控制项目资产从哪些目录发现仓库；保存设置不会修改项目文件。</p></div><button class="icon-button" @click="showScanSettings = false">×</button></header><div class="scan-settings-body"><label>扫描深度 <input v-model.number="scanConfiguration.maxDepth" type="number" min="1" max="6"><small>从每个根目录向下扫描 1–6 层。</small></label><section><b>扫描根目录</b><div class="scan-chip-list"><span v-for="(root, index) in scanConfiguration.roots" :key="root"><code>{{ root }}</code><button title="移除" @click="scanConfiguration.roots.splice(index, 1)">×</button></span></div><div class="scan-add-row"><input v-model="newScanRoot" placeholder="例如 F:\TB-project" @keyup.enter="addScanRoot"><button class="button secondary" @click="addScanRoot">添加目录</button></div></section><section><b>额外排除的目录名</b><div class="scan-chip-list"><span v-for="(name, index) in scanConfiguration.excludedNames" :key="name"><code>{{ name }}</code><button title="移除" @click="scanConfiguration.excludedNames.splice(index, 1)">×</button></span><small v-if="!scanConfiguration.excludedNames.length">仍会默认跳过 node_modules、target、dist、build 等依赖或构建目录。</small></div><div class="scan-add-row"><input v-model="newExcludedName" placeholder="例如 archive" @keyup.enter="addExcludedName"><button class="button secondary" @click="addExcludedName">添加排除项</button></div></section><section class="scan-history"><b>最近扫描</b><p>{{ formatTime(latestScanAt) }}</p><ul v-if="lastScanErrors.length"><li v-for="item in lastScanErrors" :key="item">{{ item }}</li></ul><small v-else>本次工作台会在扫描结束后列出无法读取的具体目录。</small></section></div><footer><button class="button secondary" :disabled="scanSaving" @click="persistScanConfiguration(false)">仅保存</button><button class="button primary" :disabled="scanSaving || !scanConfiguration.roots.length" @click="persistScanConfiguration(true)">{{ scanSaving ? "保存中…" : "保存并重新扫描" }}</button></footer></section></div>
@@ -679,4 +770,26 @@ onBeforeUnmount(() => { if (runtimeTimer) window.clearInterval(runtimeTimer); })
 @media(max-width:900px){.commit-plan>header{flex-direction:column}.commit-plan-actions{width:100%;justify-content:flex-start}.commit-grouping-switch{max-width:100%}.commit-grouping-switch button{padding:0 7px}}
 .git-changed-files article{grid-template-columns:18px 64px minmax(0,1fr) auto auto}.git-file-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;white-space:nowrap}.git-file-actions .text-button{font-size:9px}.git-diff-preview{margin-top:12px;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--surface-2)}.git-diff-preview>header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:11px 12px;border-bottom:1px solid var(--line)}.git-diff-preview h4{margin:0 0 5px}.git-diff-preview header code{color:var(--muted);overflow-wrap:anywhere}.diff-warning{margin:10px 12px 0;color:var(--warning)}.diff-section>b{display:block;padding:9px 12px;color:var(--muted)}.diff-code{max-height:360px;overflow-y:auto;border-top:1px solid var(--line);background:#0b0e14;font:10px/1.55 monospace}.diff-code span{display:block;min-height:16px;padding:0 10px;white-space:pre-wrap;overflow-wrap:anywhere;color:#aeb6c5}.diff-code span.addition{background:rgba(46,160,67,.16);color:#7ee787}.diff-code span.deletion{background:rgba(248,81,73,.16);color:#ff7b72}.diff-code span.hunk{background:rgba(88,166,255,.12);color:#79c0ff}.diff-code span.meta{color:#8b949e}.post-commit-guide{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:15px 20px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--success) 9%,transparent)}.post-commit-guide>div:first-child{min-width:0}.post-commit-guide small,.post-commit-guide b,.post-commit-guide p{display:block}.post-commit-guide small{color:var(--success)}.post-commit-guide b{margin-top:5px}.post-commit-guide code{display:inline-block;margin-top:6px;color:var(--primary)}.post-commit-guide p{margin:5px 0 0;color:var(--muted)}.post-commit-guide>div:last-child{display:flex;gap:8px;flex-shrink:0}.git-safety-panel,.git-operation-log{padding:18px 20px;border-bottom:1px solid var(--line)}.git-safety-panel>header,.git-operation-log>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.git-safety-panel header p,.git-operation-log header p{margin:4px 0 0;color:var(--muted)}.git-safety-panel>div{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 8px}.git-safety-panel>small{color:var(--muted)}.git-operation-log article{margin-top:9px;padding:10px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}.git-operation-log article.success{border-left:3px solid var(--success)}.git-operation-log article.error{border-left:3px solid var(--danger)}.git-operation-log article>div{display:flex;align-items:center;gap:8px}.git-operation-log article i{font-style:normal;color:var(--success);font-size:9px}.git-operation-log article.error i{color:var(--danger)}.git-operation-log article time{margin-left:auto;color:var(--muted);font-size:9px}.git-operation-log article p{margin:7px 0 0;color:var(--muted)}.git-operation-log details{margin-top:8px}.git-operation-log summary{cursor:pointer;color:var(--primary)}.git-operation-log pre{max-height:220px;margin:8px 0 0;padding:9px;overflow:auto;border-radius:7px;background:#0b0e14;color:#aeb6c5;white-space:pre-wrap;overflow-wrap:anywhere;font:10px/1.55 monospace}
 @media(max-width:900px){.git-changed-files article{grid-template-columns:18px 58px minmax(0,1fr)}.git-changed-files article>em{grid-column:2}.git-file-actions{grid-column:3;justify-content:flex-start;flex-wrap:wrap}.post-commit-guide{align-items:flex-start;flex-direction:column}.post-commit-guide>div:last-child{width:100%}}
+.project-page-header{height:auto;min-height:72px;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+.project-header-actions{flex-wrap:wrap;justify-content:flex-end}
+.asset-table th{font-size:12px;line-height:1.5;font-weight:700;color:var(--text);padding-top:12px;padding-bottom:12px}
+.asset-table th:nth-child(1){width:46px}.asset-table th:nth-child(2){width:21%}.asset-table th:nth-child(3){width:14%}.asset-table th:nth-child(4){width:15%}.asset-table th:nth-child(5){width:14%}.asset-table th:nth-child(6){width:auto}.asset-table th:nth-child(7){width:144px}
+.asset-row-actions{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.asset-row-actions .project-row-button{width:100%;min-width:0;padding:0 4px;font-size:12px;gap:4px}
+.project-row-button.open-project{grid-column:1/-1}
+.project-row-button.launch:not(.danger-button){color:var(--primary);border-color:color-mix(in srgb,var(--primary) 35%,var(--line));background:var(--primary-soft)}
+.project-row-button:disabled{opacity:.5;cursor:not-allowed}
+.branch-picker-trigger{display:flex;align-items:center;gap:6px;max-width:100%;padding:6px;border:1px solid transparent;border-radius:var(--control-radius);background:transparent;color:var(--primary);font-weight:700;line-height:20px;text-align:left}
+.branch-picker-trigger>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.branch-picker-chevron{display:block;flex:0 0 14px;width:14px;height:14px}
+.branch-picker-trigger:hover{background:var(--primary-soft);border-color:var(--line)}
+.branch-picker-trigger:focus-visible,.branch-option:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.branch-picker-backdrop{z-index:250;align-items:center;justify-content:center;padding:20px}
+.branch-picker-dialog{width:min(480px,calc(100vw - 40px));max-height:calc(100vh - 60px);overflow:auto;outline:none}
+.branch-picker-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px;border-bottom:1px solid var(--line)}
+.branch-picker-dialog h2{margin:0 0 6px;font-size:18px}.branch-picker-dialog header p{margin:0;color:var(--muted);overflow-wrap:anywhere}
+.branch-picker-body{padding:12px 20px}.branch-picker-help{color:var(--muted);line-height:1.6}.branch-picker-warning{padding:10px 12px;border-radius:8px;background:color-mix(in srgb,var(--warning) 12%,var(--surface));color:var(--warning);line-height:1.6;overflow-wrap:anywhere}
+.branch-options{display:grid;gap:6px;max-height:300px;overflow-y:auto;padding:3px}
+.branch-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text);text-align:left}
+.branch-option>span{overflow-wrap:anywhere;min-width:0}.branch-option>small{flex-shrink:0;color:var(--muted)}.branch-option.current{color:var(--primary);background:var(--primary-soft)}.branch-option:not(:disabled):hover{border-color:var(--primary);color:var(--primary)}.branch-option:disabled:not(.current){opacity:.5;cursor:not-allowed}
+.branch-picker-dialog>footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px 18px}
 </style>

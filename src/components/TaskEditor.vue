@@ -2,6 +2,7 @@
 import { computed, reactive, watch } from "vue";
 import { useRouter } from "vue-router";
 import type { TaskDraft, WorkTask } from "../types/workbench";
+import { APP_BRAND } from "../utils/brand";
 
 const props = defineProps<{ open: boolean; task?: WorkTask | null }>();
 const router = useRouter();
@@ -9,7 +10,7 @@ const emit = defineEmits<{ close: []; save: [draft: TaskDraft]; update: [id: str
 
 const blank = (): TaskDraft => ({
   title: "",
-  project: "星枢工作台",
+  project: APP_BRAND.name,
   scope: "day",
   priority: "P1",
   plannedDate: "2026-08-03",

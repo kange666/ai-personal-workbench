@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { deleteWorkSession, getWorkSummary, isTauriRuntime, listWorkSessions, saveWorkSession, type WorkSession, type WorkSummary } from "../services/backend";
+import { APP_BRAND } from "../utils/brand";
 
 const props = defineProps<{ open: boolean; startDate: string; endDate: string; title?: string }>();
 const emit = defineEmits<{ close: []; changed: [] }>();
@@ -16,7 +17,7 @@ const projects = computed(() => [...new Set(sessions.value.map(item => item.proj
 
 function today() { return new Date().toLocaleDateString("sv-SE"); }
 function blankSession(date = props.startDate || today()): WorkSession {
-  return { id: "", date, startTime: "09:00", endTime: "10:00", durationMinutes: 60, project: "星枢工作台", workType: "功能开发", source: "manual", note: "", createdAt: "", updatedAt: "" };
+  return { id: "", date, startTime: "09:00", endTime: "10:00", durationMinutes: 60, project: APP_BRAND.name, workType: "功能开发", source: "manual", note: "", createdAt: "", updatedAt: "" };
 }
 function formatMinutes(value: number) {
   const hours = Math.floor(value / 60); const minutes = value % 60;

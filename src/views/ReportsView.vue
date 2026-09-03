@@ -8,7 +8,7 @@ const today = new Date().toISOString().slice(0, 10);
 const demoReports: ReportRecord[] = [{
   id: "demo-report", reportType: "weekly", periodStart: "2026-07-27", periodEnd: "2026-08-02",
   title: "2026年第31周工作总结", status: "draft", createdAt: "2026-08-02T16:00:00+08:00", updatedAt: "2026-08-02T16:00:00+08:00",
-  contentMarkdown: "# 2026年第31周工作总结\n\n统计周期：2026-07-27 至 2026-08-02\n\n## 工作概览\n\n- 完成任务：8 项\n- 活跃项目：3 个\n- Token 使用：542800\n\n## 已完成事项\n\n- [星枢工作台] 完成产品原型与正式版基础搭建。\n- [星枢工作台] 确认 B 指挥中心布局及双主题。\n\n## 问题与风险\n\n- 桌面端仍需安装 Windows C++ 链接工具后才能完成打包验证。\n\n## 下一步计划\n\n- 完成本地数据采集与自动报告链路。",
+  contentMarkdown: "# 2026年第31周工作总结\n\n统计周期：2026-07-27 至 2026-08-02\n\n## 工作概览\n\n- 完成任务：8 项\n- 活跃项目：3 个\n- Token 使用：542800\n\n## 已完成事项\n\n- [星枢 ASTRION] 完成产品原型与正式版基础搭建。\n- [星枢 ASTRION] 确认 B 指挥中心布局及双主题。\n\n## 问题与风险\n\n- 桌面端仍需安装 Windows C++ 链接工具后才能完成打包验证。\n\n## 下一步计划\n\n- 完成本地数据采集与自动报告链路。",
 }];
 
 const reports = ref<ReportRecord[]>(isTauriRuntime() ? [] : demoReports);

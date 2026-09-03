@@ -1,7 +1,7 @@
 [package]
 name = "ai-personal-workbench"
-version = "1.9.4"
-description = "ASTRION 星枢工作台本地桌面程序"
+version = "1.9.5"
+description = "星枢 ASTRION 本地桌面程序"
 authors = ["Local User"]
 edition = "2021"
 
@@ -30,6 +30,10 @@ base64 = "0.22"
 lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[target.'cfg(windows)'.dependencies]
+# 显式设置 Windows 任务栏图标与应用身份；使用已有锁文件中的版本。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 default = ["custom-protocol"]
