@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { cancelTestRun, ensureWeeklyAudit, getTestCaseGeneration, getTestRun, isTauriRuntime, listFeatureParity, listTestMenus, listTestProjects, listTestRuns, listTestScenarios, listTestSuites, listToolchains, listWeeklyAudits, preflightTest, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestCaseGeneration, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestCaseGenerationJob, type TestMenu, type TestPreflight, type TestProject, type TestRecommendation, type TestRun, type TestScenario, type TestSuite, type TestMode, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
+import { cancelTestRun, getTestCaseGeneration, getTestRun, isTauriRuntime, listFeatureParity, listTestMenus, listTestProjects, listTestRuns, listTestScenarios, listTestSuites, listToolchains, listWeeklyAudits, preflightTest, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestCaseGeneration, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestCaseGenerationJob, type TestMenu, type TestPreflight, type TestProject, type TestRecommendation, type TestRun, type TestScenario, type TestSuite, type TestMode, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
+import { readTestingMenuCache, writeTestingMenuCache } from "../utils/testingCenterCache";
 import TestReportDialog from "../components/TestReportDialog.vue";
 
 const demoMenus: TestMenu[] = [
@@ -17,6 +18,12 @@ function storedProjectPath() {
 }
 function normalizedProjectPath(value: string) {
   return value.replace(/^\\\\\?\\/, "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
+function cachedProjectMenus(projectPath: string): TestMenu[] {
+  return readTestingMenuCache<TestMenu>(window.sessionStorage, projectPath);
+}
+function cacheProjectMenus(projectPath: string, items: TestMenu[]) {
+  writeTestingMenuCache(window.sessionStorage, projectPath, items);
 }
 const store = useWorkbenchStore();
 const route = useRoute();
@@ -40,6 +47,12 @@ const parityDomainFilter = ref("全部领域");
 const paritySourceMessage = ref("");
 const loading = ref(false);
 const projectLoading = ref(false);
+const projectRefreshing = ref(false);
+const recommendationsLoading = ref(false);
+const parityLoading = ref(false);
+const parityLoaded = ref(false);
+const auditLoading = ref(false);
+const auditLoaded = ref(false);
 const loadingProjectName = ref("");
 let projectLoadSequence = 0;
 const error = ref("");
@@ -238,56 +251,111 @@ async function refresh() {
   const requestedProject = String(route.query.project || "");
   const restoredProject = availableProjects.find(item => normalizedProjectPath(item.path) === normalizedProjectPath(requestedProject || selectedProjectPath.value));
   selectedProjectPath.value = restoredProject?.path || availableProjects[0]?.path || "";
-  const paritySummary = await syncFeatureParity();
-  paritySourceMessage.value = paritySummary.sourceMessage;
-  await ensureWeeklyAudit();
-  const nextMenus = selectedProjectPath.value ? await listTestMenus(selectedProjectPath.value) : [];
-  [runs.value, parities.value, toolchains.value, audits.value, recommendations.value] = await Promise.all([
-    selectedProjectPath.value ? listTestRuns(undefined, selectedProjectPath.value) : Promise.resolve([]),
-    listFeatureParity(), listToolchains(), listWeeklyAudits(),
-    selectedProjectPath.value ? recommendTestsFromGit(selectedProjectPath.value) : Promise.resolve([]),
-  ]);
-  menus.value = nextMenus;
-  if (!toolchains.value.installations.length) toolchains.value = await scanToolchains();
+  if (selectedProjectPath.value) await refreshSelectedProject();
+}
+
+async function manualRefresh() {
+  if (!isTauriRuntime() || loading.value || projectLoading.value || projectRefreshing.value) return;
+  loading.value = true; error.value = ""; message.value = "";
+  try {
+    await refresh();
+    await Promise.all([loadParityData(true), loadAuditData()]);
+    message.value = "当前项目、对照矩阵和检查数据已刷新。";
+  } catch (cause) { error.value = String(cause); }
+  finally { loading.value = false; }
+}
+
+async function refreshRecommendations(projectPath: string, sequence: number) {
+  recommendationsLoading.value = true;
+  try {
+    const nextRecommendations = await recommendTestsFromGit(projectPath);
+    if (sequence === projectLoadSequence && selectedProjectPath.value === projectPath) {
+      recommendations.value = nextRecommendations;
+    }
+  } catch (cause) {
+    if (sequence === projectLoadSequence) message.value = `测试列表已加载，但 Git 推荐读取失败：${String(cause)}`;
+  } finally {
+    if (sequence === projectLoadSequence) recommendationsLoading.value = false;
+  }
 }
 
 async function refreshSelectedProject() {
-  if (!isTauriRuntime() || !selectedProjectPath.value || projectLoading.value) return;
+  if (!isTauriRuntime() || !selectedProjectPath.value || projectLoading.value || projectRefreshing.value) return;
   const projectPath = selectedProjectPath.value;
   const sequence = ++projectLoadSequence;
+  const cachedMenus = cachedProjectMenus(projectPath);
   loadingProjectName.value = projects.value.find(item => item.path === projectPath)?.name || "所选项目";
-  projectLoading.value = true; error.value = ""; message.value = "";
-  menus.value = []; runs.value = []; recommendations.value = [];
+  projectLoading.value = !cachedMenus.length;
+  projectRefreshing.value = Boolean(cachedMenus.length);
+  error.value = ""; message.value = "";
+  menus.value = cachedMenus;
+  runs.value = [];
+  recommendations.value = [];
+  recommendationsLoading.value = false;
   try {
-    // 先读取菜单，让后续 Git 推荐复用同一份菜单缓存，避免菜单接口不可达时重复等待。
-    const nextMenus = await listTestMenus(projectPath);
-    const [nextRuns, nextRecommendations] = await Promise.all([
+    const [nextMenus, nextRuns] = await Promise.all([
+      listTestMenus(projectPath),
       listTestRuns(undefined, projectPath),
-      recommendTestsFromGit(projectPath),
     ]);
     if (sequence !== projectLoadSequence || selectedProjectPath.value !== projectPath) return;
     menus.value = nextMenus;
     runs.value = nextRuns;
-    recommendations.value = nextRecommendations;
+    cacheProjectMenus(projectPath, nextMenus);
     selectedRecommendations.value = [];
-  } catch (cause) { error.value = String(cause); }
+    void refreshRecommendations(projectPath, sequence);
+  } catch (cause) {
+    error.value = cachedMenus.length ? `实时刷新失败，当前显示最近缓存：${String(cause)}` : String(cause);
+  }
   finally {
     if (sequence === projectLoadSequence) {
       projectLoading.value = false;
+      projectRefreshing.value = false;
       loadingProjectName.value = "";
     }
   }
 }
+
+async function loadParityData(forceSync = false) {
+  if (!isTauriRuntime() || parityLoading.value) return;
+  parityLoading.value = true; error.value = "";
+  try {
+    if (forceSync) {
+      const summary = await syncFeatureParity();
+      paritySourceMessage.value = summary.sourceMessage;
+    }
+    parities.value = await listFeatureParity();
+    if (!parities.value.length && !forceSync) {
+      const summary = await syncFeatureParity();
+      paritySourceMessage.value = summary.sourceMessage;
+      parities.value = await listFeatureParity();
+    } else if (!paritySourceMessage.value) {
+      paritySourceMessage.value = "已读取工作台上次保存的对照结果";
+    }
+    parityLoaded.value = true;
+  } catch (cause) { error.value = String(cause); }
+  finally { parityLoading.value = false; }
+}
+
+async function loadAuditData() {
+  if (!isTauriRuntime() || auditLoading.value) return;
+  auditLoading.value = true; error.value = "";
+  try {
+    [audits.value, toolchains.value] = await Promise.all([listWeeklyAudits(), listToolchains()]);
+    if (!toolchains.value.installations.length) toolchains.value = await scanToolchains();
+    auditLoaded.value = true;
+  } catch (cause) { error.value = String(cause); }
+  finally { auditLoading.value = false; }
+}
 async function runAudit() {
   if (!isTauriRuntime() || loading.value) return;
   loading.value=true; error.value="";
-  try { const result=await runWeeklyAudit(); audits.value=await listWeeklyAudits(); toolchains.value=await listToolchains(); message.value=`${result.weekStart} 周检完成：${result.summary}`; }
+  try { const result=await runWeeklyAudit(); audits.value=await listWeeklyAudits(); toolchains.value=await listToolchains(); auditLoaded.value=true; message.value=`${result.weekStart} 周检完成：${result.summary}`; }
   catch(cause){error.value=String(cause);} finally{loading.value=false;}
 }
 async function rescanToolchains() {
   if (!isTauriRuntime() || loading.value) return;
   loading.value=true; error.value="";
-  try{toolchains.value=await scanToolchains();message.value=`已读取 ${toolchains.value.installations.length} 个工具入口，发现 ${toolchains.value.conflicts.length} 个待人工确认项。`;}
+  try{toolchains.value=await scanToolchains();auditLoaded.value=true;message.value=`已读取 ${toolchains.value.installations.length} 个工具入口，发现 ${toolchains.value.conflicts.length} 个待人工确认项。`;}
   catch(cause){error.value=String(cause);}finally{loading.value=false;}
 }
 async function saveParity(feature: FeatureParity) {
@@ -396,6 +464,10 @@ watch(selectedProjectPath, (value) => {
   try { window.localStorage.setItem(selectedProjectStorageKey, value); }
   catch { /* WebView 禁用本地存储时不阻断测试中心。 */ }
 });
+watch(activeSection, (section) => {
+  if (section === "parity" && !parityLoaded.value) void loadParityData();
+  if (section === "audit" && !auditLoaded.value) void loadAuditData();
+});
 
 onMounted(async () => {
   loading.value = true;
@@ -412,22 +484,24 @@ onMounted(async () => {
 
 <template>
   <div class="view testing-view">
-    <header class="page-header testing-page-header"><div><div class="testing-title-row"><h1>测试中心</h1><select v-model="selectedProjectPath" :disabled="loading || projectLoading" @change="refreshSelectedProject"><option v-if="!projects.length" value="">项目资产中暂无项目</option><option v-for="item in projects" :key="item.path" :value="item.path">{{ item.name }} · {{ item.projectKind }}</option></select></div><p>选择项目资产中的本地项目，分层记录静态、接口与浏览器测试证据</p></div><div><button class="button secondary" :disabled="loading || projectLoading" @click="refresh">↻ 刷新项目、矩阵与报告</button></div></header>
+    <header class="page-header testing-page-header"><div><div class="testing-title-row"><h1>测试中心</h1><select v-model="selectedProjectPath" :disabled="loading || projectLoading || projectRefreshing" @change="refreshSelectedProject"><option v-if="!projects.length" value="">项目资产中暂无项目</option><option v-for="item in projects" :key="item.path" :value="item.path">{{ item.name }} · {{ item.projectKind }}</option></select></div><p>选择项目资产中的本地项目，分层记录静态、接口与浏览器测试证据</p></div><div><button class="button secondary" :disabled="loading || projectLoading || projectRefreshing" @click="manualRefresh">↻ 刷新项目、矩阵与报告</button></div></header>
     <div v-if="projectLoading" class="project-switch-loading" role="status" aria-live="polite">
       <div class="project-switch-loading-card">
         <i class="project-switch-spinner"></i>
-        <div><b>正在切换到 {{ loadingProjectName }}</b><p>正在读取系统菜单、测试报告和变更推荐，请稍候…</p></div>
+        <div><b>正在切换到 {{ loadingProjectName }}</b><p>正在读取系统菜单和历史报告，请稍候…</p></div>
         <span class="project-switch-progress"><i></i></span>
       </div>
     </div>
+    <div v-if="projectRefreshing" class="project-background-refresh" role="status"><i></i>已显示缓存，正在后台校验最新菜单和报告…</div>
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
     <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">功能 / 页面测试</button><button :class="{active:activeSection==='history'}" @click="activeSection='history'">测试历史</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button><button :class="{active:activeSection==='audit'}" @click="activeSection='audit'">系统周检与工具链</button></div>
     <section v-if="activeSection==='menus'" class="metric-grid testing-metrics testing-metrics-v2"><article class="clickable-card" @click="statusFilter='all'"><span>功能 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='blocked'"><span>环境 / 执行问题</span><b>{{ stats.blocked }}</b><p :class="stats.blocked ? 'warning-text' : ''">● 点击筛选</p></article></section>
     <section v-if="activeSection==='menus' && recommendations.length" class="panel test-recommendations"><header><div><b>根据 Git 变更推荐测试</b><p>只推荐与当前项目页面源码直接关联的测试；可勾选多项顺序执行。</p></div><div class="recommendation-actions"><span>{{ recommendations.length }} 项</span><button class="button primary small" :disabled="batchRunning || !selectedRecommendations.length" @click="runRecommendedBatch">{{ batchRunning ? '执行中…' : `执行已选 ${selectedRecommendations.length} 项` }}</button></div></header><div><article v-for="item in recommendations.slice(0,8)" :key="item.menuId"><input v-model="selectedRecommendations" type="checkbox" :value="item.menuId"><span class="project-badge">{{ item.project }}</span><div><b>{{ item.menuName }}</b><small>{{ item.reason }} · {{ item.changedFiles.slice(0,2).join('、') }}</small></div><button class="button secondary small" @click="openRecommendation(item)">配置</button></article></div></section>
+    <div v-if="activeSection==='menus' && recommendationsLoading" class="deferred-inline-loading" role="status"><i></i>测试列表已可用，正在后台分析 Git 变更推荐…</div>
     <section v-if="activeSection==='menus'" class="panel testing-panel">
       <div class="testing-toolbar testing-toolbar-v2"><label>⌕<input v-model="query" placeholder="搜索功能名称、路由或源码路径"></label><select v-model="statusFilter"><option value="all">全部状态</option><option value="tested">已测试</option><option value="untested">未测试</option><option value="passed">最近通过</option><option value="failed">最近未通过</option><option value="blocked">环境 / 执行问题</option></select><select v-model="typeFilter"><option value="all">全部能力</option><option value="functional">已有功能用例</option><option value="style">页面 / 样式检查</option></select></div>
       <div class="testing-note"><b>当前项目</b><span>{{ selectedProject?.name || '尚未选择' }} · {{ selectedProjectPath || '请先在项目资产中扫描本地项目' }}。缺少菜单用例的页面可以在测试配置中勾选“添加测试文件”；不会覆盖同名文件。</span></div>
-      <div class="test-table-wrap"><table class="test-table"><thead><tr><th>配置</th><th>功能 / 页面</th><th>可用测试能力</th><th>最近结果</th><th>测试报告</th><th>操作</th></tr></thead><tbody><tr v-for="menu in filteredMenus" :key="menu.id"><td><span class="project-badge" :class="{app:menu.projectKind==='uni-app'}">{{ menu.hasCaseFile ? '已有用例' : '仅页面' }}</span></td><td><b>{{ menu.name }}</b><small>{{ menu.route }}</small><em>{{ menu.sourcePath }}</em></td><td><div class="capability-tags"><span v-if="menu.capabilities.mock">模拟接口</span><span v-if="menu.capabilities.realApi">真实接口</span><span v-if="menu.capabilities.sourceStyle">源码 / 样式</span><span v-if="menu.capabilities.browserStyle">浏览器样式</span><span v-if="!menu.hasCaseFile" class="muted">可选择添加测试配置</span></div></td><td><span class="test-status" :class="menu.latestStatus || 'untested'">{{ statusLabel(menu) }}</span><small>{{ formatTime(menu.latestTime) }}</small></td><td><button class="text-button" :disabled="!menu.tested" @click="openReport(menu)">{{ menu.tested ? '查看报告' : '暂无报告' }}</button></td><td><button class="button primary small" :disabled="loading" @click="openConfig(menu)">▶ 测试</button></td></tr></tbody></table><div v-if="!filteredMenus.length" class="empty-state"><b>没有符合条件的功能或页面</b><p>请调整状态、测试能力或关键词筛选；也可以先在项目资产中扫描项目。</p></div></div>
+      <div class="test-table-wrap"><table class="test-table"><thead><tr><th>配置</th><th>功能 / 页面</th><th>可用测试能力</th><th>最近结果</th><th>测试报告</th><th>操作</th></tr></thead><tbody><tr v-for="menu in filteredMenus" :key="menu.id"><td><span class="project-badge" :class="{app:menu.projectKind==='uni-app'}">{{ menu.hasCaseFile ? '已有用例' : '仅页面' }}</span></td><td><b>{{ menu.name }}</b><small>{{ menu.route }}</small><em>{{ menu.sourcePath }}</em></td><td><div class="capability-tags"><span v-if="menu.capabilities.mock">模拟接口</span><span v-if="menu.capabilities.realApi">真实接口</span><span v-if="menu.capabilities.sourceStyle">源码 / 样式</span><span v-if="menu.capabilities.browserStyle">浏览器样式</span><span v-if="!menu.hasCaseFile" class="muted">可选择添加测试配置</span></div></td><td><span class="test-status" :class="menu.latestStatus || 'untested'">{{ statusLabel(menu) }}</span><small>{{ formatTime(menu.latestTime) }}</small></td><td><button class="text-button" :disabled="!menu.tested" @click="openReport(menu)">{{ menu.tested ? '查看报告' : '暂无报告' }}</button></td><td><button class="button primary small" :disabled="loading || projectRefreshing" @click="openConfig(menu)">▶ 测试</button></td></tr></tbody></table><div v-if="!filteredMenus.length" class="empty-state"><b>没有符合条件的功能或页面</b><p>请调整状态、测试能力或关键词筛选；也可以先在项目资产中扫描项目。</p></div></div>
     </section>
 
     <section v-else-if="activeSection==='history'" class="panel test-history-panel">
@@ -435,7 +509,8 @@ onMounted(async () => {
       <div class="history-table-wrap"><table><thead><tr><th>时间</th><th>功能 / 页面</th><th>测试类型</th><th>结果</th><th>场景</th><th>耗时</th><th></th></tr></thead><tbody><tr v-for="run in runs" :key="run.id"><td>{{ new Date(run.startedAt).toLocaleString('zh-CN') }}</td><td><b>{{ run.menuName }}</b><small>{{ run.project }}</small></td><td>{{ modeLabel(run.mode) }}</td><td><span class="test-status" :class="run.status">{{ run.status==='passed'?'通过':run.status==='failed'?'未通过':run.status==='blocked'?'环境阻塞':run.status==='error'?'执行异常':run.status==='cancelled'?'已取消':'执行中' }}</span></td><td>{{ run.passedCount }} / {{ run.totalCount }} 通过</td><td>{{ run.durationMs < 1000 ? `${run.durationMs} ms` : `${(run.durationMs/1000).toFixed(1)} 秒` }}</td><td><button class="text-button" @click="openRun(run)">查看报告</button></td></tr></tbody></table><div v-if="!runs.length" class="empty-state"><b>当前项目还没有测试记录</b><p>运行一次页面测试后，历史结果会显示在这里。</p></div></div>
     </section>
 
-    <section v-else-if="activeSection==='parity'" class="panel parity-panel">
+    <section v-else-if="activeSection==='parity'" class="panel parity-panel lazy-data-panel">
+      <div v-if="parityLoading" class="deferred-panel-loading" role="status"><i></i><b>正在读取 PC / APP 对照矩阵</b><span>首次打开时才加载，不再阻塞测试列表。</span></div>
       <div class="testing-note"><b>全量来源</b><span>{{ paritySourceMessage || '正在读取 client / APP 真实菜单与本地页面。' }}。匹配结论只表示功能名称、父级和路径能够对应；“接口”和“浏览器”仍须实际执行后才会显示通过。</span></div>
       <div class="parity-overview">
         <button :class="{active:parityStatusFilter==='all'}" @click="parityStatusFilter='all'"><span>全部功能</span><b>{{ parityStats.total }}</b></button>
@@ -447,7 +522,8 @@ onMounted(async () => {
       <div class="parity-table-wrap"><table class="parity-table"><thead><tr><th>领域 / 功能</th><th>PC 功能</th><th>APP 功能</th><th>匹配状态</th><th>验证进度</th><th></th></tr></thead><tbody><tr v-for="feature in filteredParities" :key="feature.id" @click="selectedParity=feature"><td><small>{{ feature.domain }}</small><b>{{ feature.featureName }}</b></td><td><span :class="{missing:feature.parityStatus==='app-only'}">{{ feature.parityStatus==='app-only'?'— 未找到对应功能':feature.pcPage||'菜单 / 操作配置' }}</span></td><td><span :class="{missing:feature.parityStatus==='pc-only'}">{{ feature.parityStatus==='pc-only'?'— 未找到对应功能':feature.appPage||'菜单 / 操作配置' }}</span></td><td><i class="parity-status" :class="feature.parityStatus">{{ parityLabel(feature.parityStatus) }}</i></td><td><div class="compact-verification"><span v-for="platform in parityPlatforms" :key="platform"><b>{{ platform }}</b><em v-for="kind in verificationKinds" :key="kind" :class="regression(feature,platform,kind)?.status" :title="`${kind}：${evidenceLabel(regression(feature,platform,kind)?.status)}`"></em></span></div></td><td><button class="text-button">详情 →</button></td></tr></tbody></table><div v-if="!filteredParities.length" class="empty-state"><b>没有符合条件的对照项</b><p>请调整关键词、领域或匹配状态。</p></div></div>
     </section>
 
-    <section v-else class="audit-layout">
+    <section v-else class="audit-layout lazy-data-panel">
+      <div v-if="auditLoading" class="deferred-panel-loading" role="status"><i></i><b>正在读取周检和工具链</b><span>这些检查只在打开当前标签时加载。</span></div>
       <article class="panel weekly-audit-panel"><header><div><small>WEEKLY ACCEPTANCE</small><h2>每周整体检查</h2><p>每周一 09:00 后自动执行；程序未运行时，下次启动自动补跑。</p></div><button class="button primary" :disabled="loading" @click="runAudit">{{ loading?'检查中…':'立即重新检查' }}</button></header><template v-if="audits[0]"><div class="audit-summary"><b :class="audits[0].status">{{ audits[0].status==='passed'?'全部通过':audits[0].status==='attention'?'有待确认项':'存在失败项' }}</b><span>{{ audits[0].weekStart }} 开始的一周</span><em v-if="audits[0].catchUpRun">漏跑补偿</em></div><div class="audit-checks"><article v-for="item in audits[0].checks" :key="item.checkType" :class="item.status"><i>{{ item.status==='passed'?'✓':item.status==='attention'?'!':'×' }}</i><div><b>{{ item.target }}</b><p>{{ item.summary }}</p></div></article></div><p class="audit-boundary">{{ audits[0].summary }}</p></template><div v-else class="empty-state"><b>本周周检尚未执行</b><p>到计划时间会自动运行，也可以现在手工执行。</p></div></article>
       <article class="panel toolchain-panel"><header><div><small>TOOLCHAIN</small><h2>工具链冲突</h2><p>只读检查 PATH 顺序和版本，不自动卸载或改环境变量。</p></div><button class="button secondary" :disabled="loading" @click="rescanToolchains">重新扫描</button></header><div class="tool-overview"><b>{{ toolchains.installations.length }}</b><span>检测到的入口</span><b :class="{warning:toolchains.conflicts.length}">{{ toolchains.conflicts.length }}</b><span>待人工确认</span></div><div v-if="toolchains.conflicts.length" class="conflict-list"><article v-for="item in toolchains.conflicts" :key="item.id"><header><b>{{ item.toolName }}</b><span>{{ item.conflictType==='multiple-paths'?'重复入口':'版本不一致' }}</span></header><p>{{ item.summary }}</p><small>{{ item.recommendedAction }}</small></article></div><div v-else class="empty-state compact"><b>未发现冲突</b><p>当前 PATH 中的工具入口没有明显重复或版本差异。</p></div><details class="installation-details"><summary>查看全部工具入口</summary><div v-for="item in toolchains.installations" :key="item.id"><b>{{ item.toolName }}</b><code>{{ item.version }}</code><span>#{{ item.pathPriority+1 }} · {{ item.source }}</span><small>{{ item.executablePath }}</small></div></details></article>
     </section>
@@ -499,6 +575,8 @@ onMounted(async () => {
 .project-switch-loading-card>div{min-width:0}.project-switch-loading-card b{display:block;font-size:16px}.project-switch-loading-card p{margin:6px 0 0;color:var(--muted);font-size:12px}
 .project-switch-spinner{grid-row:1;width:34px;height:34px;border:3px solid color-mix(in srgb,var(--primary) 18%,transparent);border-top-color:var(--primary);border-radius:50%;animation:project-switch-spin .8s linear infinite}
 .project-switch-progress{grid-column:1/-1;height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}.project-switch-progress>i{display:block;width:42%;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--primary),#8f84ff);animation:project-switch-progress 1.25s ease-in-out infinite}
+.project-background-refresh,.deferred-inline-loading{display:flex;align-items:center;gap:8px;margin:0 0 12px;padding:9px 12px;border:1px solid color-mix(in srgb,var(--primary) 25%,var(--line));border-radius:9px;background:color-mix(in srgb,var(--primary) 7%,var(--surface));color:var(--muted);font-size:12px}.project-background-refresh>i,.deferred-inline-loading>i{width:13px;height:13px;flex:0 0 auto;border:2px solid color-mix(in srgb,var(--primary) 20%,transparent);border-top-color:var(--primary);border-radius:50%;animation:project-switch-spin .8s linear infinite}
+.lazy-data-panel{position:relative;min-height:280px}.deferred-panel-loading{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;border-radius:inherit;background:color-mix(in srgb,var(--surface) 88%,transparent);backdrop-filter:blur(2px)}.deferred-panel-loading>i{width:30px;height:30px;border:3px solid color-mix(in srgb,var(--primary) 20%,transparent);border-top-color:var(--primary);border-radius:50%;animation:project-switch-spin .8s linear infinite}.deferred-panel-loading>b{font-size:14px}.deferred-panel-loading>span{color:var(--muted);font-size:12px}
 @keyframes project-switch-spin{to{transform:rotate(360deg)}}
 @keyframes project-switch-progress{0%{transform:translateX(-110%)}100%{transform:translateX(345%)}}
 .testing-title-row{display:flex;align-items:center;gap:12px}.testing-title-row h1{margin:0}.testing-title-row select{max-width:430px;height:36px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text);padding:0 11px}.testing-metrics-v2{grid-template-columns:repeat(5,minmax(0,1fr))}.testing-toolbar-v2{grid-template-columns:minmax(320px,1fr) 170px 170px}.test-status.blocked,.test-status.cancelled{background:color-mix(in srgb,var(--warning) 13%,transparent);color:var(--warning)}.test-status.error{background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger)}

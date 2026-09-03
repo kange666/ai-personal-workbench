@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "星枢",
+        "backgroundColor": "#0D111B",
         "width": 1520,
         "height": 940,
         "minWidth": 1180,

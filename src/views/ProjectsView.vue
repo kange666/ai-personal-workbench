@@ -97,6 +97,7 @@ const lastScanErrors = ref<string[]>([]);
 const lastScanAt = ref("");
 const nowTick = ref(Date.now());
 let runtimeTimer: number | undefined;
+let runtimeStateInitialized = false;
 const commitMessages = reactive<Record<string, string>>({});
 const selectedStageFiles = ref<string[]>([]);
 const autoFetchingRemote = ref(false);
@@ -232,21 +233,23 @@ async function load() {
   if (!isTauriRuntime()) return;
   loading.value = true; error.value = "";
   try {
-    const runningProjects = await listRunningRepositoryProjects();
-    const repositoryAssets = await listRepositoryAssets();
-    runningProcesses.value = runningProjects;
-    runningPaths.value = runningProjects.map((item) => item.projectPath);
-    assets.value = repositoryAssets;
+    assets.value = await listRepositoryAssets();
   } catch (cause) { error.value = String(cause); } finally { loading.value = false; }
 }
 async function refreshRuntime() {
   if (!isTauriRuntime()) return;
   try {
+    const previousPaths = new Set(runningPaths.value);
     const runningProjects = await listRunningRepositoryProjects();
+    const nextPaths = runningProjects.map((item) => item.projectPath);
+    const processListChanged = previousPaths.size !== nextPaths.length || nextPaths.some((path) => !previousPaths.has(path));
     runningProcesses.value = runningProjects;
-    runningPaths.value = runningProjects.map((item) => item.projectPath);
-    assets.value = await listRepositoryAssets();
-    if (selected.value) selected.value = assets.value.find((item) => item.path === selected.value?.path) ?? selected.value;
+    runningPaths.value = nextPaths;
+    if (runtimeStateInitialized && processListChanged) {
+      assets.value = await listRepositoryAssets();
+      if (selected.value) selected.value = assets.value.find((item) => item.path === selected.value?.path) ?? selected.value;
+    }
+    runtimeStateInitialized = true;
   } catch { /* 轮询失败不覆盖用户正在查看的操作消息。 */ }
 }
 async function loadGitStatus(path: string) {
@@ -277,17 +280,32 @@ async function autoFetchRemoteStatus(path: string) {
 }
 async function openGitOperations() {
   activeTab.value = "git";
-  if (selected.value) await autoFetchRemoteStatus(selected.value.path);
+  if (!selected.value) return;
+  try {
+    if (gitStatus.value?.repositoryPath !== selected.value.path) await loadGitStatus(selected.value.path);
+    await autoFetchRemoteStatus(selected.value.path);
+  } catch (cause) {
+    error.value = String(cause);
+    gitStatus.value = null;
+  }
 }
 async function openAsset(item: RepositoryAsset, tab: "overview" | "relations" | "git" = "overview", refreshRemote = true) {
-  if (selected.value?.path !== item.path) {
+  const assetChanged = selected.value?.path !== item.path;
+  if (assetChanged) {
     gitOperationLogs.value = [];
     fileDiff.value = null;
     postCommitPrompt.value = null;
+    gitStatus.value = null;
+    details.value = { conversations: [], commits: [], associations: [], nextAction: "" };
   }
   selected.value = item; activeTab.value = tab; editing.value = false; fillForm(item); error.value = ""; remoteRefreshNote.value = "";
   try {
-    [details.value] = await Promise.all([getRepositoryAssetDetails(item.path), loadGitStatus(item.path)]);
+    if (tab === "git") {
+      const [assetDetails] = await Promise.all([getRepositoryAssetDetails(item.path), loadGitStatus(item.path)]);
+      details.value = assetDetails;
+    } else {
+      details.value = await getRepositoryAssetDetails(item.path);
+    }
     discardStaleCommitPlan();
     syncCommitMessages();
     if (tab === "git" && refreshRemote) await autoFetchRemoteStatus(item.path);
@@ -527,6 +545,7 @@ function exportText(format: "markdown" | "csv") {
 async function copyExport(format: "markdown" | "csv") { await navigator.clipboard.writeText(exportText(format)); message.value = `${format === "csv" ? "CSV" : "Markdown"} 清单已复制，可直接保存为文件。`; }
 onMounted(async () => {
   await load();
+  void refreshRuntime();
   await openProjectFromRoute();
   runtimeTimer = window.setInterval(() => {
     nowTick.value = Date.now();

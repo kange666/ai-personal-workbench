@@ -19,6 +19,7 @@ import NotificationDrawer from "./NotificationDrawer.vue";
 import QuickCapture from "./QuickCapture.vue";
 import TranslationDialog from "./TranslationDialog.vue";
 import CockpitScreensaver from "./CockpitScreensaver.vue";
+import StartupSplash from "./StartupSplash.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
 import { estimateTestRunProgress } from "../utils/testRunProgress";
@@ -67,6 +68,8 @@ const projectActionPath = ref("");
 const projectActionMessage = ref("");
 const pageLoading = ref(true);
 const pageLoadingSlow = ref(false);
+const startupLoading = ref(true);
+const startupSlow = ref(false);
 const backendRequestCount = ref(0);
 let topbarDragStart: { x:number; y:number } | null = null;
 const navigationOrder = ref(loadNavigationOrder());
@@ -175,6 +178,10 @@ let railStatusTicks = 0;
 let pageLoadingStartedAt = Date.now();
 let pageLoadingFinishTimer = 0;
 let pageLoadingSlowTimer = 0;
+let startupStartedAt = Date.now();
+let startupSlowTimer = 0;
+let startupFinishTimer = 0;
+let startupSafetyTimer = 0;
 let emailUnlisten: UnlistenFn | undefined;
 let vipUnlisten: UnlistenFn | undefined;
 let codexDataUnlisten: UnlistenFn | undefined;
@@ -216,6 +223,38 @@ function revealSlowPage() {
   pageLoadingSlow.value = false;
   window.clearTimeout(pageLoadingFinishTimer);
   window.clearTimeout(pageLoadingSlowTimer);
+}
+
+async function initializeStartup() {
+  startupStartedAt=Date.now();
+  startupSlowTimer=window.setTimeout(() => { startupSlow.value=true; },3_500);
+  const notificationsPromise=loadNotifications(true);
+  void notificationsPromise.then(syncTapdNotifications);
+  const initialData=Promise.allSettled([
+    store.hydrate(),
+    loadSystemHealth(),
+    notificationsPromise,
+    loadEmailStatus(),
+    loadVipStatus(),
+    loadActiveOperations(),
+    loadProjectOptions(),
+    loadSidebarWorktime(),
+  ]);
+  const safetyLimit=new Promise<void>(resolve => {
+    startupSafetyTimer=window.setTimeout(resolve,12_000);
+  });
+  await Promise.race([initialData.then(() => undefined),safetyLimit]);
+  const minimumVisibleTime=Math.max(0,1_100-(Date.now()-startupStartedAt));
+  startupFinishTimer=window.setTimeout(() => {
+    startupLoading.value=false;
+    startupSlow.value=false;
+    pageLoading.value=false;
+    pageLoadingSlow.value=false;
+    window.clearTimeout(startupSlowTimer);
+    window.clearTimeout(startupSafetyTimer);
+    window.clearTimeout(pageLoadingFinishTimer);
+    window.clearTimeout(pageLoadingSlowTimer);
+  },minimumVisibleTime);
 }
 
 watch(() => router.currentRoute.value.fullPath, (nextPath, previousPath) => {
@@ -587,14 +626,8 @@ async function refreshLocalData() {
 }
 onMounted(() => {
   resetCockpitIdle();
-  void loadSystemHealth();
-  void loadNotifications(true).then(syncTapdNotifications);
+  void initializeStartup();
   void initializeQuickCaptureShortcut();
-  void loadEmailStatus();
-  void loadVipStatus();
-  void loadActiveOperations();
-  void loadProjectOptions();
-  void loadSidebarWorktime();
   if (isTauriRuntime()) void listen<EmailNotificationStatus>("codex-email-status-changed", event => { emailStatus.value=event.payload; }).then(unlisten => { emailUnlisten=unlisten; });
   if (isTauriRuntime()) void listen<VipStatus>("vip-status-changed", event => { vipStatus.value=event.payload; }).then(unlisten => { vipUnlisten=unlisten; });
   if (isTauriRuntime()) void listen("codex-data-updated", () => { window.dispatchEvent(new CustomEvent("workbench-codex-data-updated")); }).then(unlisten => { codexDataUnlisten=unlisten; });
@@ -638,6 +671,9 @@ onBeforeUnmount(() => {
   window.clearTimeout(notificationToastTimer);
   window.clearTimeout(pageLoadingFinishTimer);
   window.clearTimeout(pageLoadingSlowTimer);
+  window.clearTimeout(startupSlowTimer);
+  window.clearTimeout(startupFinishTimer);
+  window.clearTimeout(startupSafetyTimer);
   emailUnlisten?.();
   vipUnlisten?.();
   codexDataUnlisten?.();
@@ -662,6 +698,9 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell">
+    <Transition name="startup-screen">
+      <StartupSplash v-if="startupLoading" :slow="startupSlow" />
+    </Transition>
     <aside class="icon-sidebar">
       <div class="app-brand-slot">
         <RouterLink class="app-brand" to="/" title="星枢工作台 · ASTRION">
@@ -734,7 +773,7 @@ onBeforeUnmount(() => {
     <main class="page-area">
       <RouterView @new-task="editorOpen = true" />
       <Transition name="page-loader">
-        <div v-if="pageLoading" class="workbench-page-loader" role="status" aria-live="polite">
+        <div v-if="pageLoading && !startupLoading" class="workbench-page-loader" role="status" aria-live="polite">
           <div class="page-loader-visual" aria-hidden="true"><i></i><i></i><i></i><span>✦</span></div>
           <div class="page-loader-copy"><small>LOCAL WORKSPACE SYNC</small><b>正在载入{{ pageLoadingTitle }}</b><p>{{ pageLoadingSlow ? '本地数据量较大，仍在继续读取。' : '正在读取本地数据与运行状态…' }}</p></div>
           <button v-if="pageLoadingSlow" class="button secondary small" @click="revealSlowPage">先查看页面</button>

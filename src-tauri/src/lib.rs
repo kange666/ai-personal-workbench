@@ -336,9 +336,9 @@ fn quota_tray_icon(percent: Option<u8>, style: TrayIconStyle) -> Image<'static> 
                     let angle = (dx.atan2(-dy) + std::f64::consts::TAU) % std::f64::consts::TAU;
                     let progress = percent.unwrap_or(0).min(100) as f64 / 100.0;
                     if angle / std::f64::consts::TAU <= progress {
-                        top
+                        [238, 233, 255]
                     } else {
-                        [102, 107, 128]
+                        [58, 62, 80]
                     }
                 }
                 TrayIconStyle::F => {
@@ -953,6 +953,14 @@ mod tray_tests {
             &icon.rgba()[offset..offset + 4]
         };
         assert_ne!(pixel(32, 3), pixel(3, 32), "环形进度与剩余轨道应可区分");
+        assert!(
+            pixel(32, 3)[0..3].iter().all(|channel| *channel >= 230),
+            "C 方案进度段应使用明显的偏白高亮色"
+        );
+        assert!(
+            pixel(3, 32)[0..3].iter().all(|channel| *channel <= 80),
+            "C 方案剩余轨道应保持深色"
+        );
         assert_eq!(pixel(32, 3)[3], 255);
         assert_eq!(pixel(3, 32)[3], 255);
         assert_eq!(pixel(32, 32)[3], 0, "C 方案圆心应透明且不显示数字");

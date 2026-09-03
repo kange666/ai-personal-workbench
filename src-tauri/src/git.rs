@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
 
 #[cfg(windows)]
@@ -18,6 +19,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const GIT_CREDENTIAL_SERVICE: &str = "ai-personal-workbench";
 const GIT_CREDENTIAL_ACCOUNT: &str = "git-default";
 const DEFAULT_GIT_USERNAME: &str = "lzsk";
+const RUNTIME_SNAPSHOT_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,6 +139,7 @@ struct ManagedProjectProcess {
     child: Child,
     run_id: String,
     telemetry: Arc<Mutex<RuntimeTelemetry>>,
+    last_persisted_at: Instant,
 }
 
 #[derive(Default)]
@@ -2839,6 +2842,7 @@ fn create_managed_project_process(
         child,
         run_id,
         telemetry,
+        last_persisted_at: Instant::now(),
     };
     let persist_result = database.connect().and_then(|connection| {
         connection
@@ -2874,29 +2878,53 @@ fn managed_process_info(process: &ManagedProjectProcess) -> RunningProjectProces
     info
 }
 
+fn runtime_snapshot_requires_persistence(
+    previous: &RunningProjectProcess,
+    current: &RunningProjectProcess,
+    elapsed: Duration,
+    finalizing: bool,
+) -> bool {
+    finalizing
+        || elapsed >= RUNTIME_SNAPSHOT_FALLBACK_INTERVAL
+        || previous.status != current.status
+        || previous.local_url != current.local_url
+        || previous.log_excerpt != current.log_excerpt
+        || previous.error_message != current.error_message
+}
+
 fn persist_runtime_snapshot(
     database: &DatabaseState,
-    process: &ManagedProjectProcess,
+    process: &mut ManagedProjectProcess,
     finished_at: Option<&str>,
     exit_code: Option<i32>,
 ) -> Result<RunningProjectProcess, String> {
     let info = managed_process_info(process);
-    database
-        .connect()?
-        .execute(
-            "UPDATE repository_runtime_runs SET status=?2,local_url=?3,log_excerpt=?4,error_message=?5,
-                    finished_at=COALESCE(?6,finished_at),exit_code=COALESCE(?7,exit_code) WHERE id=?1",
-            params![
-                process.run_id,
-                info.status,
-                info.local_url,
-                info.log_excerpt,
-                info.error_message,
-                finished_at,
-                exit_code
-            ],
-        )
-        .map_err(|error| error.to_string())?;
+    let should_persist = runtime_snapshot_requires_persistence(
+        &process.info,
+        &info,
+        process.last_persisted_at.elapsed(),
+        finished_at.is_some() || exit_code.is_some(),
+    );
+    if should_persist {
+        database
+            .connect()?
+            .execute(
+                "UPDATE repository_runtime_runs SET status=?2,local_url=?3,log_excerpt=?4,error_message=?5,
+                        finished_at=COALESCE(?6,finished_at),exit_code=COALESCE(?7,exit_code) WHERE id=?1",
+                params![
+                    process.run_id,
+                    info.status,
+                    info.local_url,
+                    info.log_excerpt,
+                    info.error_message,
+                    finished_at,
+                    exit_code
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        process.info = info.clone();
+        process.last_persisted_at = Instant::now();
+    }
     Ok(info)
 }
 
@@ -3041,7 +3069,7 @@ pub fn stop_repository_project(
         telemetry.status = "stopped".to_string();
     }
     let finished_at = Utc::now().to_rfc3339();
-    let info = persist_runtime_snapshot(&database, &process, Some(&finished_at), Some(0))?;
+    let info = persist_runtime_snapshot(&database, &mut process, Some(&finished_at), Some(0))?;
     Ok(launch_result(
         &info,
         false,
@@ -4245,17 +4273,18 @@ mod tests {
         normalized_commit_grouping_mode, parse_ai_indexed_commit_plan,
         parse_ai_single_commit_summary, parse_changed_files, parse_commits, reconcile_upstream,
         reconcile_upstream_outcome, redact_ai_commit_context, repository_attention,
-        resolve_conflicts_with_side, runtime_line_failed, sensitive_path,
-        spawn_project_start_command, terminate_managed_process, valid_conventional_commit_message,
-        validate_ai_indexed_commit_groups, validated_branch, validated_changed_file,
-        validated_local_runtime_url, validated_stage_files, workbench_stash_reference,
-        GitScanConfiguration, ManagedProjectProcess, RunningProjectProcess, RuntimeTelemetry,
-        UpstreamReconcileOutcome,
+        resolve_conflicts_with_side, runtime_line_failed, runtime_snapshot_requires_persistence,
+        sensitive_path, spawn_project_start_command, terminate_managed_process,
+        valid_conventional_commit_message, validate_ai_indexed_commit_groups, validated_branch,
+        validated_changed_file, validated_local_runtime_url, validated_stage_files,
+        workbench_stash_reference, GitScanConfiguration, ManagedProjectProcess,
+        RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
+        RUNTIME_SNAPSHOT_FALLBACK_INTERVAL,
     };
     use chrono::Utc;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn commit_parser_keeps_author_identity_for_personal_reports() {
@@ -4333,6 +4362,49 @@ mod tests {
         assert!(runtime_line_failed("Failed to compile with 1 error"));
         assert!(runtime_line_failed("Module parse failed: Unexpected token"));
         assert!(!runtime_line_failed("0 errors found"));
+    }
+
+    #[test]
+    fn runtime_snapshot_is_saved_only_for_changes_fallback_or_finish() {
+        let previous = RunningProjectProcess {
+            project_path: "C:\\project".to_string(),
+            project_name: "测试项目".to_string(),
+            command: "npm run dev".to_string(),
+            process_id: 100,
+            status: "running".to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            local_url: "http://localhost:82/".to_string(),
+            log_path: "runtime.log".to_string(),
+            log_excerpt: "ready".to_string(),
+            error_message: String::new(),
+        };
+        assert!(!runtime_snapshot_requires_persistence(
+            &previous,
+            &previous,
+            Duration::from_secs(2),
+            false,
+        ));
+
+        let mut changed = previous.clone();
+        changed.log_excerpt = "hot updated".to_string();
+        assert!(runtime_snapshot_requires_persistence(
+            &previous,
+            &changed,
+            Duration::from_secs(2),
+            false,
+        ));
+        assert!(runtime_snapshot_requires_persistence(
+            &previous,
+            &previous,
+            RUNTIME_SNAPSHOT_FALLBACK_INTERVAL,
+            false,
+        ));
+        assert!(runtime_snapshot_requires_persistence(
+            &previous,
+            &previous,
+            Duration::from_secs(2),
+            true,
+        ));
     }
 
     #[test]
@@ -4716,6 +4788,7 @@ mod tests {
                 status: "running".to_string(),
                 ..RuntimeTelemetry::default()
             })),
+            last_persisted_at: Instant::now(),
         };
         terminate_managed_process(&mut process).unwrap();
         assert!(process.child.try_wait().unwrap().is_some());

@@ -35,12 +35,13 @@ const props = defineProps<{
 const emit = defineEmits<{ close: []; navigate: [route: string] }>();
 
 const returnButton = ref<HTMLButtonElement | null>(null);
-const period = ref<Period>("week");
+const period = ref<Period>("today");
 const now = ref(new Date());
 const todayIso = computed(() => localDateIso(now.value));
 const customStart = ref(todayIso.value);
 const customEnd = ref(todayIso.value);
 const loading = ref(false);
+const periodSwitching = ref(false);
 const errorMessage = ref("");
 const periodActivity = ref<DailyActivity[]>([]);
 const heatActivity = ref<DailyActivity[]>([]);
@@ -50,6 +51,9 @@ const workSummary = ref<WorkSummary>({ startDate:"", endDate:"", totalMinutes:0,
 const pulseHoverIndex = ref<number | null>(null);
 let clockTimer = 0;
 let refreshTimer = 0;
+let loadSequence = 0;
+let periodTransitionSequence = 0;
+let componentActive = true;
 
 function startOfWeek(date: Date) {
   const result = new Date(date);
@@ -76,19 +80,29 @@ function isWithinRange(value: string | undefined, start: string, end: string) {
   return date >= start && date <= end;
 }
 
-async function loadCockpitData() {
+async function loadCockpitData(refreshHeat = false) {
   if (!isTauriRuntime()) return;
+  const requestSequence = ++loadSequence;
   loading.value = true;
   errorMessage.value = "";
   const heatDates = recentDateKeys(90, now.value);
   const range = selectedRange.value;
+  const heatStart = heatDates[0];
+  const heatEnd = heatDates[heatDates.length - 1];
+  const heatRequest = refreshHeat || !heatActivity.value.length
+    ? getDailyActivity(heatStart, heatEnd)
+    : Promise.resolve(heatActivity.value);
+  const periodRequest = range.start >= heatStart && range.end <= heatEnd
+    ? heatRequest.then(items => items.filter(item => item.date >= range.start && item.date <= range.end))
+    : getDailyActivity(range.start, range.end);
   const [activityResult, heatResult, workResult, reportResult, sessionResult] = await Promise.allSettled([
-    getDailyActivity(range.start, range.end),
-    getDailyActivity(heatDates[0], heatDates[heatDates.length - 1]),
+    periodRequest,
+    heatRequest,
     getWorkSummary(range.start, range.end, false),
     listReports(),
     listWorkSessions(todayIso.value, todayIso.value, false),
   ]);
+  if (!componentActive || requestSequence !== loadSequence) return;
   if (activityResult.status === "fulfilled") periodActivity.value = activityResult.value;
   if (heatResult.status === "fulfilled") heatActivity.value = heatResult.value;
   if (workResult.status === "fulfilled") workSummary.value = workResult.value;
@@ -97,6 +111,16 @@ async function loadCockpitData() {
   const failed = [activityResult, heatResult, workResult, reportResult, sessionResult].filter(item => item.status === "rejected");
   if (failed.length) errorMessage.value = `${failed.length} 项本地数据暂时读取失败，将继续自动刷新。`;
   loading.value = false;
+}
+
+async function loadPeriodWithTransition() {
+  const transitionSequence = ++periodTransitionSequence;
+  periodSwitching.value = true;
+  await Promise.all([
+    loadCockpitData(false),
+    new Promise<void>(resolve => window.setTimeout(resolve, 360)),
+  ]);
+  if (transitionSequence === periodTransitionSequence) periodSwitching.value = false;
 }
 
 const filteredTests = computed(() => props.testRuns.filter(run => !["queued","running"].includes(run.status) && isWithinRange(run.startedAt, selectedRange.value.start, selectedRange.value.end)));
@@ -184,7 +208,11 @@ function quotaLabel(item: CodexQuotaWindow) {
 }
 const quotaWindows = computed(() => [props.quota.primary,props.quota.secondary].filter((item):item is CodexQuotaWindow => Boolean(item)).slice(0,2));
 const quotaFreshnessText = computed(() => ({ fresh:"刚刚更新",recent:"近期快照",stale:"快照较旧" } as Record<string,string>)[props.quota.freshness] || "实时快照");
-const latestNotifications = computed(() => props.notifications.slice(0,3));
+const selectedPeriodLabel = computed(() => periodOptions.find(item => item.key === period.value)?.label || "所选周期");
+const latestNotifications = computed(() => [...props.notifications]
+  .filter(item => !item.isRead)
+  .sort((left,right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+  .slice(0,5));
 function messageTime(value:string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit"}).format(date);
@@ -295,14 +323,21 @@ function notificationIcon(item:WorkbenchNotification) {
   return "check";
 }
 
-watch([period,customStart,customEnd], () => void loadCockpitData());
+watch([period,customStart,customEnd], () => void loadPeriodWithTransition());
 onMounted(() => {
-  void loadCockpitData();
+  componentActive=true;
+  void loadCockpitData(true);
   clockTimer=window.setInterval(() => { now.value=new Date(); },1_000);
-  refreshTimer=window.setInterval(() => void loadCockpitData(),60_000);
+  refreshTimer=window.setInterval(() => void loadCockpitData(true),60_000);
   void nextTick(() => returnButton.value?.focus());
 });
-onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(refreshTimer); });
+onBeforeUnmount(() => {
+  componentActive=false;
+  loadSequence+=1;
+  periodTransitionSequence+=1;
+  window.clearInterval(clockTimer);
+  window.clearInterval(refreshTimer);
+});
 </script>
 
 <template>
@@ -317,11 +352,12 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
         <div v-if="period==='custom'" class="cockpit-custom-range"><input v-model="customStart" type="date" aria-label="开始日期"><span>—</span><input v-model="customEnd" type="date" aria-label="结束日期"></div>
       </header>
 
-      <div class="cockpit-kpis">
+      <div class="cockpit-kpis" :class="{refreshing:periodSwitching}">
         <article v-for="item in kpis" :key="item.label"><i><CockpitIcon :name="item.icon" /></i><span><small>{{ item.label }}</small><b>{{ item.value }}<em>{{ item.unit }}</em></b></span></article>
       </div>
 
-      <div class="cockpit-main">
+      <div class="cockpit-main" :class="{refreshing:periodSwitching}">
+        <div v-if="periodSwitching" class="cockpit-loading-layer" role="status" aria-live="polite"><span><i></i>正在加载{{ selectedPeriodLabel }}数据</span><u><em></em></u></div>
         <div class="cockpit-analytics">
           <article class="cockpit-panel pulse-panel">
             <header><h2>工作脉搏</h2><div class="pulse-meta"><small>相对趋势 · 悬浮查看实际值</small><nav><span v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`"><i></i>{{ item.label }}</span></nav></div></header>
@@ -356,7 +392,7 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
         </div>
 
         <aside class="cockpit-live-rail">
-          <article class="cockpit-panel messages-panel"><header><h2>消息通知 <b>{{ latestNotifications.length }}</b></h2><button @click="navigate('/inbox')">查看全部 →</button></header><div><button v-for="item in latestNotifications" :key="item.id" @click="navigate(item.route || '/inbox')"><i :class="{warning:notificationIcon(item)==='warning'}"><CockpitIcon :name="notificationIcon(item)" /></i><span><b><em v-if="notificationTitleParts(item).project">{{ notificationTitleParts(item).project }}</em>{{ notificationTitleParts(item).title }}</b><small>{{ item.body }}</small></span><time>{{ messageTime(item.createdAt) }}</time></button><p v-if="!latestNotifications.length" class="cockpit-empty">暂无新消息</p></div></article>
+          <article class="cockpit-panel messages-panel" :class="{compact:latestNotifications.length>=5}"><header><h2>消息通知 <b>{{ latestNotifications.length }}</b></h2><button @click="navigate('/inbox')">查看全部 →</button></header><div><button v-for="item in latestNotifications" :key="item.id" @click="navigate(item.route || '/inbox')"><i :class="{warning:notificationIcon(item)==='warning'}"><CockpitIcon :name="notificationIcon(item)" /></i><span><b><em v-if="notificationTitleParts(item).project">{{ notificationTitleParts(item).project }}</em>{{ notificationTitleParts(item).title }}</b><small>{{ item.body }}</small></span><time>{{ messageTime(item.createdAt) }}</time></button><p v-if="!latestNotifications.length" class="cockpit-empty">暂无未读消息</p></div></article>
           <article class="cockpit-panel running-panel"><header><h2>正在运行 <b>{{ runningCount }}</b></h2><small>每 3 秒刷新</small></header><div>
             <button v-if="activeProject" @click="navigate(`/projects?project=${encodeURIComponent(activeProject.projectPath)}`)"><i></i><span><b>项目 · {{ activeProject.projectName }}</b><small>{{ activeProject.status==='starting'?'正在启动':'运行中' }}</small><u><em></em></u></span></button>
             <button v-if="activeTest" @click="navigate(`/testing?run=${encodeURIComponent(activeTest.id)}`)"><i></i><span><b>测试 · {{ activeTest.menuName }}</b><small>{{ activeTestProgress ? `${activeTestProgress.percent}% · ${activeTestProgress.etaText}` : '执行中' }}</small><u class="determinate"><em :style="{width:`${activeTestProgress?.percent || 0}%`}"></em></u></span></button>
@@ -842,6 +878,13 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.messages-panel.compact > div { display: grid; align-content: start; }
+.messages-panel.compact > div > button {
+  height: clamp(44px, 5.8vh, 58px);
+  min-height: 0;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
 .running-empty { display: grid; justify-items: center; gap: 7px; }
 .running-empty > i {
   width: 7px;
@@ -864,8 +907,75 @@ onBeforeUnmount(() => { window.clearInterval(clockTimer);window.clearInterval(re
   box-shadow: 0 0 3px rgba(112, 191, 255, 0.22);
 }
 .timeline-track > i.report { width: 6px !important; }
+
+/* 切换统计周期时短暂遮罩旧值，避免用户把上一周期数据误认为新结果。 */
+.cockpit-main { position: relative; }
+.cockpit-main.refreshing > .cockpit-analytics {
+  opacity: 0.52;
+  filter: saturate(0.72);
+  transition: opacity 0.18s ease, filter 0.18s ease;
+}
+.cockpit-kpis.refreshing article > span { opacity: 0.48; }
+.cockpit-kpis.refreshing article::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 -35%;
+  width: 28%;
+  background: linear-gradient(90deg, transparent, rgba(112, 191, 255, 0.08), transparent);
+  animation: cockpit-period-scan 0.9s ease-in-out infinite;
+}
+.cockpit-loading-layer {
+  position: absolute;
+  inset: 0 calc(max(330px, 28.5vw) + 7px) 0 0;
+  z-index: 8;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  pointer-events: none;
+  background: rgba(2, 8, 13, 0.16);
+  backdrop-filter: blur(1px);
+}
+.cockpit-loading-layer > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid rgba(112, 191, 255, 0.26);
+  border-radius: 6px;
+  color: #a9cce4;
+  background: rgba(5, 17, 26, 0.92);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28), inset 0 1px rgba(255, 255, 255, 0.035);
+}
+.cockpit-loading-layer > span > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c-live);
+  box-shadow: 0 0 10px rgba(84, 221, 189, 0.64);
+  animation: cockpit-breathe 0.9s ease-in-out infinite;
+}
+.cockpit-loading-layer > u {
+  width: 190px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(112, 191, 255, 0.1);
+  text-decoration: none;
+}
+.cockpit-loading-layer > u > em {
+  display: block;
+  width: 42%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, #70bfff, transparent);
+  animation: cockpit-loading-flow 0.85s ease-in-out infinite;
+}
 @keyframes cockpit-breathe{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.08)}}@keyframes cockpit-number-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}@keyframes cockpit-line-flow{to{stroke-dashoffset:-120}}@keyframes cockpit-progress{0%{transform:translateX(-100%)}100%{transform:translateX(260%)}}@keyframes cockpit-current-pulse{0%,100%{opacity:.58}50%{opacity:1}}
 @keyframes cockpit-activity-scan { 0%,55% { transform: translateX(0); opacity: 0; } 65% { opacity: 1; } 100% { transform: translateX(560%); opacity: 0; } }
-@media(max-width:1280px){.cockpit-screen{padding-left:10px;padding-right:10px}.cockpit-kpis article{padding:10px}.cockpit-kpis article>i{display:grid;width:32px;height:32px;flex-basis:32px;font-size:16px}.cockpit-kpis b{font-size:23px}.cockpit-main{grid-template-columns:minmax(0,1fr) 370px}.cockpit-title small{display:none}.cockpit-periods button{min-width:62px}.activity-list>button{padding:2px;grid-template-columns:18px 54px minmax(0,1fr) 42px;gap:5px}.activity-list button>i{width:17px;height:17px;font-size:10px}.activity-list button>b,.activity-list button>span{font-size:9px}.activity-list button>time{font-size:8px}}
+@keyframes cockpit-period-scan { from { transform: translateX(0); } to { transform: translateX(490%); } }
+@keyframes cockpit-loading-flow { from { transform: translateX(-110%); } to { transform: translateX(340%); } }
+@media(max-width:1280px){.cockpit-screen{padding-left:10px;padding-right:10px}.cockpit-kpis article{padding:10px}.cockpit-kpis article>i{display:grid;width:32px;height:32px;flex-basis:32px;font-size:16px}.cockpit-kpis b{font-size:23px}.cockpit-main{grid-template-columns:minmax(0,1fr) 370px}.cockpit-loading-layer{right:377px}.cockpit-title small{display:none}.cockpit-periods button{min-width:62px}.activity-list>button{padding:2px;grid-template-columns:18px 54px minmax(0,1fr) 42px;gap:5px}.activity-list button>i{width:17px;height:17px;font-size:10px}.activity-list button>b,.activity-list button>span{font-size:9px}.activity-list button>time{font-size:8px}}
 @media(prefers-reduced-motion:reduce){.cockpit-screen *{animation:none!important;transition:none!important}}
 </style>

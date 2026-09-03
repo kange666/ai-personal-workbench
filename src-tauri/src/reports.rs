@@ -1834,14 +1834,27 @@ pub fn history_coverage(state: tauri::State<'_, DatabaseState>) -> Result<Histor
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn daily_activity(
+pub async fn daily_activity(
     state: tauri::State<'_, DatabaseState>,
     start_date: String,
     end_date: String,
 ) -> Result<Vec<DailyActivity>, String> {
-    NaiveDate::parse_from_str(&start_date, "%Y-%m-%d").map_err(|error| error.to_string())?;
-    NaiveDate::parse_from_str(&end_date, "%Y-%m-%d").map_err(|error| error.to_string())?;
-    let work_summary = worktime::summary_for_range(&state, &start_date, &end_date, true)?;
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        daily_activity_for_state(&database, &start_date, &end_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn daily_activity_for_state(
+    state: &DatabaseState,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<DailyActivity>, String> {
+    NaiveDate::parse_from_str(start_date, "%Y-%m-%d").map_err(|error| error.to_string())?;
+    NaiveDate::parse_from_str(end_date, "%Y-%m-%d").map_err(|error| error.to_string())?;
+    let work_summary = worktime::summary_for_range(state, start_date, end_date, true)?;
     let connection = state.connect()?;
     let mut statement = connection
         .prepare(

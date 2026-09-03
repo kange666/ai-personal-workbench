@@ -18,7 +18,7 @@ vi.mock("../services/backend",()=>({
   listWorkSessions:async()=>[{id:"work-1",date:"2026-09-01",startTime:"09:00",endTime:"10:00",durationMinutes:60,project:"个人工作台",workType:"Codex 开发",source:"estimated",note:"",createdAt:"2026-09-01T09:00:00",updatedAt:"2026-09-01T10:00:00"}],
 }));
 
-const notifications=Array.from({length:4},(_,index)=>({id:`notice-${index}`,kind:"codex_complete" as const,title:index===0 ? "个人工作台：消息 1" : `消息 ${index+1}`,body:`消息内容 ${index+1}`,output:"",route:`/inbox?item=${index}`,isRead:false,createdAt:`2026-09-01T14:3${index}:00`,reviewStatus:"pending" as const,reviewNote:""}));
+const notifications=Array.from({length:6},(_,index)=>({id:`notice-${index}`,kind:"codex_complete" as const,title:index===0 ? "个人工作台：消息 1" : `消息 ${index+1}`,body:`消息内容 ${index+1}`,output:"",route:`/inbox?item=${index}`,isRead:index===4,createdAt:`2026-09-01T14:${39-index}:00`,reviewStatus:"pending" as const,reviewNote:""}));
 const runningProject={projectPath:"C:/workbench",projectName:"个人工作台",command:"npm run dev",processId:1,status:"running" as const,startedAt:"2026-09-01T08:00:00",localUrl:"http://localhost:1420",logPath:"",logExcerpt:"",errorMessage:""};
 const runningTest={id:"test-1",menuId:"api",project:"个人工作台",projectPath:"C:/workbench",menuName:"接口回归",mode:"mock" as const,status:"running" as const,startedAt:"2026-09-01T14:00:00",reportMarkdown:"",outputExcerpt:"",errorMessage:"",selectedScenarios:["a","b"],scenarioResults:[],artifacts:[],totalCount:2,passedCount:1,failedCount:0,skippedCount:0,durationMs:0,environmentSummary:"",cleanupStatus:"unknown" as const};
 const runningTapd={id:"tapd-1",itemKey:"workspace:415",itemId:"415",workspaceId:"workspace",repositoryPath:"C:/workbench",status:"running" as const,output:"",errorMessage:"",baselineHead:"",baselineWorktree:"",resultHead:"",changedFiles:[],testSummary:"",reviewStatus:"pending" as const,reviewNote:"",triggerSource:"auto" as const,sourceModifiedAt:"",triggerReason:"",executionMode:"automatic" as const,executionBlockReason:"",testRequired:true,processReportPath:"",createdAt:"2026-09-01T14:00:00",updatedAt:"2026-09-01T14:00:00"};
@@ -35,10 +35,12 @@ describe("CockpitScreensaver",()=>{
     expect(wrapper.find(".cockpit-kpis").text()).toContain("报告数量18");
     expect(wrapper.findAll(".heat-grid>i")).toHaveLength(90);
     expect(mocks.getDailyActivity).toHaveBeenCalledWith("2026-06-04","2026-09-01");
+    expect(mocks.getDailyActivity).toHaveBeenCalledTimes(1);
     expect(wrapper.find(".cockpit-quota-summary").text()).toContain("5h68%7d83%");
     expect(wrapper.find(".quota-panel").exists()).toBe(false);
-    expect(wrapper.findAll(".messages-panel>div>button")).toHaveLength(3);
-    expect(wrapper.findAll(".messages-panel .cockpit-icon")).toHaveLength(3);
+    expect(wrapper.findAll(".messages-panel>div>button")).toHaveLength(5);
+    expect(wrapper.findAll(".messages-panel .cockpit-icon")).toHaveLength(5);
+    expect(wrapper.find(".messages-panel").text()).not.toContain("消息 5");
     expect(wrapper.find(".messages-panel button b em").text()).toBe("个人工作台");
     expect(wrapper.findAll(".activity-panel .activity-list>button")).toHaveLength(5);
     expect(wrapper.find(".activity-panel").text()).toContain("实时动态");
@@ -60,6 +62,19 @@ describe("CockpitScreensaver",()=>{
     expect(wrapper.get(".pulse-tooltip").classes()).toContain("edge-left");
     await pulseHits[pulseHits.length-1].trigger("mouseenter");
     expect(wrapper.get(".pulse-tooltip").classes()).toContain("edge-right");
+    wrapper.unmount();vi.useRealTimers();
+  });
+
+  it("默认展示今日数据，切换周期时显示加载过渡",async()=>{
+    const wrapper=mountCockpit();await flushPromises();
+    expect(wrapper.find(".cockpit-periods button.active").text()).toBe("今日");
+    expect(mocks.getDailyActivity).toHaveBeenCalledTimes(1);
+    await wrapper.findAll(".cockpit-periods button")[1].trigger("click");
+    expect(wrapper.get(".cockpit-loading-layer").text()).toContain("正在加载本周数据");
+    expect(wrapper.get(".cockpit-main").classes()).toContain("refreshing");
+    vi.advanceTimersByTime(360);await flushPromises();
+    expect(wrapper.find(".cockpit-loading-layer").exists()).toBe(false);
+    expect(mocks.getDailyActivity).toHaveBeenCalledTimes(1);
     wrapper.unmount();vi.useRealTimers();
   });
 
