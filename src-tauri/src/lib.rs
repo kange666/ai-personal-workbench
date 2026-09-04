@@ -562,7 +562,20 @@ pub fn run() {
                 }
             }
 
-            let path = app.path().app_data_dir()?.join("workbench.sqlite3");
+            // 开发审查模式必须显式指定隔离目录，避免桌面样式验收写入用户正在使用的数据库。
+            #[cfg(debug_assertions)]
+            let audit_mode = std::env::var_os("ASTRION_AUDIT_MODE").as_deref()
+                == Some(std::ffi::OsStr::new("1"));
+            #[cfg(not(debug_assertions))]
+            let audit_mode = false;
+            let path = if audit_mode {
+                let directory = std::env::var_os("ASTRION_AUDIT_DATA_DIR")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| std::io::Error::other("审查模式缺少 ASTRION_AUDIT_DATA_DIR"))?;
+                PathBuf::from(directory).join("workbench.sqlite3")
+            } else {
+                app.path().app_data_dir()?.join("workbench.sqlite3")
+            };
             ensure_parent(&path).map_err(std::io::Error::other)?;
             let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
             testing::recover_incomplete_test_runs(&state).map_err(std::io::Error::other)?;
@@ -632,6 +645,11 @@ pub fn run() {
                     }
                 });
             tray_builder.build(app)?;
+
+            // 审查副本只提供前端显式发起的只读页面请求，不启动邮件、维护、发布恢复等后台任务。
+            if audit_mode {
+                return Ok(());
+            }
 
             let quota_app = app.handle().clone();
             let quota_state = state.clone();

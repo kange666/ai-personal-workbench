@@ -44,3 +44,20 @@
 .calendar-layout.mode-combined {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 600px), 1fr));
 }
+
+/* 最小桌面窗口收紧顶部栏留白，确保三个窗口控制按钮都保留完整点击区域。 */
+@media (max-width: 1280px) {
+  .app-topbar { gap: 8px; padding-left: 16px; }
+  .window-controls { margin-right: 0; }
+}
+
+/* 放大字号时给额度文字足够宽度，避免标签溢出按钮。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .top-quota-trigger {
+  min-width: 180px;
+}
+
+/* 知识正文可能包含长路径或连续英文，需要在卡片自身宽度内换行。 */
+.knowledge-item > div:nth-child(2) { min-width: 0; }
+.knowledge-content,
+.knowledge-source { overflow-wrap: anywhere; }
+.knowledge-source { max-width: 100%; white-space: normal; text-align: left; }

@@ -277,5 +277,7 @@ onBeforeUnmount(() => { window.clearInterval(jobTimer); window.removeEventListen
 .tapd-project-editor{width:520px;overflow-x:hidden;padding-bottom:0}.tapd-project-editor>header{padding:16px 20px}.tapd-project-editor .tapd-form{display:grid!important;grid-template-columns:minmax(0,1fr)!important;gap:14px;padding:18px 20px;border-bottom:1px solid var(--line)}.tapd-form>label{grid-column:1;min-width:0;display:grid;gap:7px;color:var(--muted)}.tapd-form input:not([type=checkbox]){width:100%;height:40px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:0 11px}.tapd-form .tapd-switch{min-height:42px;display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--text)}.tapd-form .settings-actions{grid-column:1;justify-content:flex-end;padding-top:2px}
 .tapd-rule-note{margin:16px 20px 20px;padding:14px 15px;border:1px solid var(--line);background:var(--surface-2);border-radius:9px}.tapd-rule-note p{margin:6px 0 0;color:var(--muted);line-height:1.6}
 .tapd-acceptance-warning{color:var(--danger)!important}
+.tapd-row i.bug{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:1400px){.tapd-table-head,.tapd-row{grid-template-columns:100px minmax(220px,1fr) 74px 62px 82px 82px 112px}}
 @media(max-width:900px){.tapd-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.tapd-work-list{overflow-x:auto}.tapd-project-editor{width:min(520px,100vw)}}
 </style>

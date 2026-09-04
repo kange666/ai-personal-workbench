@@ -183,7 +183,7 @@ watch(() => props.run?.id, () => {
     <section class="panel test-report-dialog test-report-v2">
       <header>
         <div class="report-title-block">
-          <h2>{{ title }}</h2>
+          <h2 :title="title">{{ title }}</h2>
           <p>{{ run ? `${run.project} · ${modeLabel(run.mode)} · ${new Date(run.startedAt).toLocaleString('zh-CN')}` : "历史 Markdown 报告" }}</p>
         </div>
         <div class="report-header-actions">
