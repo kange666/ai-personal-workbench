@@ -1,16 +1,48 @@
-export const COCKPIT_IDLE_MS = 10 * 60 * 1_000;
+export const COCKPIT_IDLE_DEFAULT_MINUTES = 10;
+export const COCKPIT_IDLE_MS = COCKPIT_IDLE_DEFAULT_MINUTES * 60 * 1_000;
 export const COCKPIT_WARNING_MS = 10 * 1_000;
+export const cockpitIdleSettingsChangedEvent = "workbench-cockpit-idle-settings-changed";
+
+export type CockpitIdleMinutes = number | null;
+
+export const cockpitIdleMinuteOptions = [5, 10, 15, 30, 60] as const;
+const cockpitIdleStorageKey = "workbench-cockpit-idle-minutes-v1";
 
 export interface CockpitIdleState {
   open: boolean;
   warningSeconds: number;
 }
 
+/** 读取驾驶舱屏保时间；null 表示仅允许手动进入。 */
+export function loadCockpitIdleMinutes(): CockpitIdleMinutes {
+  try {
+    const saved = localStorage.getItem(cockpitIdleStorageKey);
+    if (saved === "never") return null;
+    const minutes = Number(saved);
+    return cockpitIdleMinuteOptions.includes(minutes as typeof cockpitIdleMinuteOptions[number])
+      ? minutes
+      : COCKPIT_IDLE_DEFAULT_MINUTES;
+  } catch {
+    return COCKPIT_IDLE_DEFAULT_MINUTES;
+  }
+}
+
+/** 保存后通知应用壳层立即重置空闲倒计时。 */
+export function saveCockpitIdleMinutes(minutes: CockpitIdleMinutes): void {
+  if (minutes !== null && !cockpitIdleMinuteOptions.includes(minutes as typeof cockpitIdleMinuteOptions[number])) {
+    throw new Error("不支持的驾驶舱屏保时间");
+  }
+  localStorage.setItem(cockpitIdleStorageKey, minutes === null ? "never" : String(minutes));
+  window.dispatchEvent(new Event(cockpitIdleSettingsChangedEvent));
+}
+
 /** 根据最后一次有效操作计算屏保状态，后台数据刷新不会影响这个时间。 */
-export function cockpitIdleState(lastActivityAt: number, now = Date.now()): CockpitIdleState {
+export function cockpitIdleState(lastActivityAt: number, now = Date.now(), idleMinutes: CockpitIdleMinutes = COCKPIT_IDLE_DEFAULT_MINUTES): CockpitIdleState {
+  if (idleMinutes === null) return { open: false, warningSeconds: 0 };
+  const idleMs = idleMinutes * 60 * 1_000;
   const elapsed = Math.max(0, now - lastActivityAt);
-  if (elapsed >= COCKPIT_IDLE_MS) return { open: true, warningSeconds: 0 };
-  const remaining = COCKPIT_IDLE_MS - elapsed;
+  if (elapsed >= idleMs) return { open: true, warningSeconds: 0 };
+  const remaining = idleMs - elapsed;
   return {
     open: false,
     warningSeconds: remaining <= COCKPIT_WARNING_MS ? Math.max(1, Math.ceil(remaining / 1_000)) : 0,

@@ -433,7 +433,7 @@ export interface RepositoryAssociation {
 
 export interface RepositoryAssetDetails {
   conversations: Array<{ id: string; title: string; updatedAt: string; archived: boolean }>;
-  commits: Array<{ hash: string; subject: string; committedAt: string }>;
+  commits: Array<{ hash: string; subject: string; committedAt: string; authorName: string; authorEmail: string }>;
   commitPlan?: CommitPlan;
   associations: RepositoryAssociation[];
   nextAction: string;
@@ -586,6 +586,24 @@ export interface GitFileDiff {
   stagedDiff: string;
   unstagedDiff: string;
   truncated: boolean;
+  additions: number;
+  modifications: number;
+  deletions: number;
+}
+
+export interface GitCommitFile {
+  path: string;
+  status: string;
+  label: string;
+}
+
+export interface GitCommitFileDiff {
+  path: string;
+  diff: string;
+  truncated: boolean;
+  additions: number;
+  modifications: number;
+  deletions: number;
 }
 
 export interface GitOperationResult {
@@ -603,6 +621,12 @@ export interface GitPullConflict {
 
 export interface GitPullResult extends GitOperationResult {
   conflict: GitPullConflict | null;
+}
+
+export interface GitSmartSyncResult {
+  message: string;
+  output: string;
+  conflictsResolved: boolean;
 }
 
 export interface TapdWorkItem {
@@ -1716,6 +1740,22 @@ export async function stageGitRepositoryChanges(path: string, files: string[]): 
 
 export async function getGitRepositoryFileDiff(path: string, file: string): Promise<GitFileDiff> {
   return invoke<GitFileDiff>("git_repository_file_diff", { path, file });
+}
+
+export async function getGitRepositoryCommitFiles(path: string, commitHash: string): Promise<GitCommitFile[]> {
+  return invoke<GitCommitFile[]>("git_repository_commit_files", { path, commitHash });
+}
+
+export async function getGitRepositoryCommitFileDiff(path: string, commitHash: string, file: string): Promise<GitCommitFileDiff> {
+  return invoke<GitCommitFileDiff>("git_repository_commit_file_diff", { path, commitHash, file });
+}
+
+export async function discardGitRepositoryChanges(path: string, files: string[]): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_discard_repository_changes", { path, files });
+}
+
+export async function smartSyncGitRepository(path: string, files: string[]): Promise<GitSmartSyncResult> {
+  return invoke<GitSmartSyncResult>("git_smart_sync_repository", { path, files });
 }
 
 export async function unstageGitRepositoryChanges(path: string, files: string[]): Promise<GitOperationResult> {

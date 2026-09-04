@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getDailyActivity,
   getWorkSummary,
@@ -54,6 +55,7 @@ let refreshTimer = 0;
 let loadSequence = 0;
 let periodTransitionSequence = 0;
 let componentActive = true;
+let cockpitDragStart: { x: number; y: number } | null = null;
 
 function startOfWeek(date: Date) {
   const result = new Date(date);
@@ -317,6 +319,21 @@ const currentTimeText = computed(() => new Intl.DateTimeFormat("zh-CN",{hour:"2-
 const liveUpdatedText = computed(() => new Intl.DateTimeFormat("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(now.value));
 
 function navigate(route:string) { emit("navigate",route); }
+function isCockpitHeaderInteractiveTarget(target: HTMLElement) {
+  return Boolean(target.closest("button,input,select,textarea,[role='button']"));
+}
+function prepareCockpitWindowDragging(event: MouseEvent) {
+  if (!isTauriRuntime() || event.button !== 0 || isCockpitHeaderInteractiveTarget(event.target as HTMLElement)) return;
+  cockpitDragStart = { x:event.screenX, y:event.screenY };
+}
+async function continueCockpitWindowDragging(event: MouseEvent) {
+  if (!cockpitDragStart || (event.buttons & 1) === 0) return;
+  const moved = Math.hypot(event.screenX - cockpitDragStart.x, event.screenY - cockpitDragStart.y);
+  if (moved < 4) return;
+  cockpitDragStart = null;
+  await getCurrentWindow().startDragging();
+}
+function cancelCockpitWindowDragging() { cockpitDragStart = null; }
 function notificationIcon(item:WorkbenchNotification) {
   if (item.kind === "tapd_item" || item.title.includes("失败")) return "warning";
   if (item.kind === "jenkins_publish") return "deploy";
@@ -329,6 +346,8 @@ onMounted(() => {
   void loadCockpitData(true);
   clockTimer=window.setInterval(() => { now.value=new Date(); },1_000);
   refreshTimer=window.setInterval(() => void loadCockpitData(true),60_000);
+  window.addEventListener("mousemove", continueCockpitWindowDragging);
+  window.addEventListener("mouseup", cancelCockpitWindowDragging);
   void nextTick(() => returnButton.value?.focus());
 });
 onBeforeUnmount(() => {
@@ -337,12 +356,14 @@ onBeforeUnmount(() => {
   periodTransitionSequence+=1;
   window.clearInterval(clockTimer);
   window.clearInterval(refreshTimer);
+  window.removeEventListener("mousemove", continueCockpitWindowDragging);
+  window.removeEventListener("mouseup", cancelCockpitWindowDragging);
 });
 </script>
 
 <template>
   <section class="cockpit-screen" role="dialog" aria-modal="true" aria-label="数据驾驶舱屏保模式" @keydown.esc.stop="emit('close')">
-      <header class="cockpit-header">
+      <header class="cockpit-header" @mousedown="prepareCockpitWindowDragging">
         <button ref="returnButton" class="cockpit-return" @click="emit('close')">← 返回工作台</button>
         <div class="cockpit-title"><h1>数据驾驶舱</h1><span>屏保模式</span><small><i></i>实时更新 {{ liveUpdatedText }}</small></div>
         <div class="cockpit-quota-summary" :title="quota.available ? quotaFreshnessText : '暂无有效额度快照'"><small>Codex 剩余额度</small><span v-for="item in quotaWindows" :key="item.windowMinutes"><em>{{ quotaLabel(item) }}</em><b>{{ Math.round(item.remainingPercent) }}%</b></span><strong v-if="!quotaWindows.length">--</strong><i></i></div>
@@ -437,7 +458,9 @@ onBeforeUnmount(() => {
     linear-gradient(rgba(112, 191, 255, 0.026) 1px, transparent 1px),
     linear-gradient(90deg, rgba(112, 191, 255, 0.026) 1px, transparent 1px);
 }
-.cockpit-header { gap: 16px; }
+.cockpit-header { gap: 16px; cursor: grab; user-select: none; }
+.cockpit-header button { cursor: pointer; }
+.cockpit-header input { cursor: text; user-select: text; }
 .cockpit-return,
 .cockpit-periods,
 .cockpit-quota-summary {

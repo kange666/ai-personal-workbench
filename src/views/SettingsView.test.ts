@@ -57,6 +57,26 @@ describe("工时卡片中的页面字号", () => {
   });
 });
 
+describe("自动化中的驾驶舱屏保", () => {
+  it("默认十分钟，切换为永不自动进入后立即保存", async () => {
+    await renderView();
+    const card = wrapper.get(".cockpit-automation-settings");
+    const select = card.get("select");
+    expect((select.element as HTMLSelectElement).value).toBe("10");
+    await select.setValue("never");
+    expect(localStorage.getItem("workbench-cockpit-idle-minutes-v1")).toBe("never");
+    expect(card.text()).toContain("已关闭自动进入");
+    expect(wrapper.get(".scan-message").text()).toContain("驾驶舱屏保已关闭");
+  });
+
+  it("切换分钟数后立即更新本机偏好", async () => {
+    await renderView();
+    await wrapper.get(".cockpit-automation-settings select").setValue("30");
+    expect(localStorage.getItem("workbench-cockpit-idle-minutes-v1")).toBe("30");
+    expect(wrapper.get(".cockpit-automation-settings").text()).toContain("30 分钟后进入");
+  });
+});
+
 describe("外观与托盘风格", () => {
   it("显示八种有名称的样式，进度预览不含数字，移除冗余说明", async () => {
     await renderView();

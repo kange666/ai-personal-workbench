@@ -27,7 +27,7 @@ import StartupSplash from "./StartupSplash.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
 import { estimateTestRunProgress } from "../utils/testRunProgress";
-import { cockpitIdleState } from "../utils/cockpit";
+import { cockpitIdleSettingsChangedEvent, cockpitIdleState, loadCockpitIdleMinutes } from "../utils/cockpit";
 import { buildJenkinsActiveOperations } from "../utils/jenkinsActiveOperations";
 import { confirmAction } from "../utils/confirm";
 
@@ -178,6 +178,7 @@ let activeOperationsTimer = 0;
 let railStatusTimer = 0;
 let cockpitIdleTimer = 0;
 let cockpitLastActivityAt = Date.now();
+let cockpitIdleMinutes = loadCockpitIdleMinutes();
 let railStatusTicks = 0;
 let pageLoadingStartedAt = Date.now();
 let pageLoadingFinishTimer = 0;
@@ -306,9 +307,13 @@ function openCockpit() {
 }
 function evaluateCockpitIdle() {
   if (cockpitOpen.value || document.visibilityState === "hidden") return;
-  const state=cockpitIdleState(cockpitLastActivityAt);
+  const state=cockpitIdleState(cockpitLastActivityAt, Date.now(), cockpitIdleMinutes);
   cockpitIdleWarningSeconds.value=state.warningSeconds;
   if (state.open) openCockpit();
+}
+function applyCockpitIdleSettings() {
+  cockpitIdleMinutes=loadCockpitIdleMinutes();
+  resetCockpitIdle();
 }
 function handleCockpitActivity() {
   if (!cockpitOpen.value) resetCockpitIdle();
@@ -653,6 +658,7 @@ onMounted(() => {
   window.addEventListener("wheel",handleCockpitActivity,{capture:true,passive:true});
   window.addEventListener("touchstart",handleCockpitActivity,{capture:true,passive:true});
   document.addEventListener("visibilitychange",handleCockpitVisibilityChange);
+  window.addEventListener(cockpitIdleSettingsChangedEvent,applyCockpitIdleSettings);
   window.addEventListener("open-workbench-search", openSearch);
   window.addEventListener("open-workbench-notification", openNotificationFromPage);
   window.addEventListener("open-quick-capture", openQuickCaptureFromPage);
@@ -688,6 +694,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("wheel",handleCockpitActivity,true);
   window.removeEventListener("touchstart",handleCockpitActivity,true);
   document.removeEventListener("visibilitychange",handleCockpitVisibilityChange);
+  window.removeEventListener(cockpitIdleSettingsChangedEvent,applyCockpitIdleSettings);
   window.removeEventListener("open-workbench-search", openSearch);
   window.removeEventListener("open-workbench-notification", openNotificationFromPage);
   window.removeEventListener("open-quick-capture", openQuickCaptureFromPage);

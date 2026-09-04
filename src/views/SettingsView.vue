@@ -8,6 +8,7 @@ import NavIcon from "../components/NavIcon.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, orderedNavigationItems, saveHiddenNavigationPaths, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
 import { confirmAction } from "../utils/confirm";
 import { fontSizeOptions, loadFontSize, saveFontSize, type FontSize } from "../utils/fontSize";
+import { cockpitIdleMinuteOptions, loadCockpitIdleMinutes, saveCockpitIdleMinutes, type CockpitIdleMinutes } from "../utils/cockpit";
 import { refreshUpdateStatus as checkForUpdates } from "../services/updateStatus";
 import {
   clearDeepSeekKey,
@@ -59,6 +60,7 @@ const error = ref("");
 const loading = ref(false);
 const autostartEnabled = ref(false);
 const workGapMinutes = ref(45);
+const cockpitIdleMinutes = ref<CockpitIdleMinutes>(loadCockpitIdleMinutes());
 const fontSize = ref(loadFontSize());
 const fontSizeRevision = ref(0);
 function changeFontSize(value: FontSize) {
@@ -108,6 +110,7 @@ const updateProgress = computed(() => updateTotal.value > 0 ? Math.min(100, Math
 const updateBusy = computed(() => ["checking", "backing-up", "downloading", "installing"].includes(updatePhase.value));
 const orderedMenuItems = computed(() => orderedNavigationItems(menuOrder.value));
 const hiddenMenuPathSet = computed(() => new Set(hiddenMenuPaths.value));
+const cockpitIdleStatusText = computed(() => cockpitIdleMinutes.value === null ? "已关闭自动进入" : `${cockpitIdleMinutes.value} 分钟后进入`);
 
 function emailStateText() {
   return ({ unconfigured:"未配置", unverified:"待测试", disabled:"已配置 · 已关闭", ready:"已配置 · 已开启", error:"连接异常" } as Record<string,string>)[emailStatus.value.state] || "未配置";
@@ -166,6 +169,19 @@ async function prepareSignedUpdate() {
   pendingUpdate.value = available;
   updatePhase.value = "ready";
   return available;
+}
+function changeCockpitIdleMinutes(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  const next: CockpitIdleMinutes = value === "never" ? null : Number(value);
+  try {
+    saveCockpitIdleMinutes(next);
+    cockpitIdleMinutes.value = next;
+    message.value = next === null ? "驾驶舱屏保已关闭，仍可从左上角手动进入。" : `驾驶舱屏保已设为无操作 ${next} 分钟后自动进入。`;
+    error.value = "";
+  } catch {
+    cockpitIdleMinutes.value = loadCockpitIdleMinutes();
+    error.value = "驾驶舱屏保时间保存失败，请重试。";
+  }
 }
 async function downloadSignedUpdate(update: Update) {
   let lastError: unknown;
@@ -436,6 +452,14 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
       <article class="panel settings-card report-automation-settings">
         <div><h2>自动报告</h2><p>关闭窗口后程序保留在托盘；每天 22:00 生成日报，周日和月末同时生成周报、月报。</p></div>
         <div class="autostart-control"><span class="settings-status ready">自动生成已启用</span><button class="button secondary" @click="toggleAutostart">开机启动：{{ autostartEnabled ? '开' : '关' }}</button></div>
+      </article>
+      <article class="panel settings-card report-automation-settings cockpit-automation-settings">
+        <div><h2>驾驶舱屏保</h2><p>工作台连续无操作后自动进入数据驾驶舱；手动进入不受此设置影响。</p></div>
+        <div class="autostart-control cockpit-idle-control">
+          <span class="settings-status" :class="{ ready:cockpitIdleMinutes!==null }">{{ cockpitIdleStatusText }}</span>
+          <label>无操作<select :value="cockpitIdleMinutes===null ? 'never' : String(cockpitIdleMinutes)" aria-label="驾驶舱屏保时间" @change="changeCockpitIdleMinutes"><option v-for="minutes in cockpitIdleMinuteOptions" :key="minutes" :value="String(minutes)">{{ minutes }} 分钟</option><option value="never">永不自动进入</option></select></label>
+        </div>
+        <small>默认 10 分钟 · 修改后立即生效 · 仅保存在当前电脑。</small>
       </article>
     </section>
   </div>

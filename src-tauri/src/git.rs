@@ -170,6 +170,8 @@ pub struct RepositoryCommit {
     pub hash: String,
     pub subject: String,
     pub committed_at: String,
+    pub author_name: String,
+    pub author_email: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -244,6 +246,28 @@ pub struct GitFileDiff {
     pub staged_diff: String,
     pub unstaged_diff: String,
     pub truncated: bool,
+    pub additions: usize,
+    pub modifications: usize,
+    pub deletions: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitFile {
+    pub path: String,
+    pub status: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitFileDiff {
+    pub path: String,
+    pub diff: String,
+    pub truncated: bool,
+    pub additions: usize,
+    pub modifications: usize,
+    pub deletions: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -270,6 +294,14 @@ pub struct GitPullResult {
     pub output: String,
     pub commit_hash: String,
     pub conflict: Option<GitPullConflict>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSmartSyncResult {
+    pub message: String,
+    pub output: String,
+    pub conflicts_resolved: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -825,6 +857,194 @@ fn truncate_diff(value: String, limit: usize) -> (String, bool) {
         ),
         true,
     )
+}
+
+fn diff_change_summary(diff: &str) -> (usize, usize, usize) {
+    fn flush_block(
+        added: &mut usize,
+        deleted: &mut usize,
+        additions: &mut usize,
+        modifications: &mut usize,
+        deletions: &mut usize,
+    ) {
+        let changed = (*added).min(*deleted);
+        *modifications += changed;
+        *additions += *added - changed;
+        *deletions += *deleted - changed;
+        *added = 0;
+        *deleted = 0;
+    }
+
+    let (mut additions, mut modifications, mut deletions) = (0, 0, 0);
+    let (mut added_block, mut deleted_block) = (0, 0);
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added_block += 1;
+        } else if line.starts_with('-') {
+            deleted_block += 1;
+        } else {
+            flush_block(
+                &mut added_block,
+                &mut deleted_block,
+                &mut additions,
+                &mut modifications,
+                &mut deletions,
+            );
+        }
+    }
+    flush_block(
+        &mut added_block,
+        &mut deleted_block,
+        &mut additions,
+        &mut modifications,
+        &mut deletions,
+    );
+    (additions, modifications, deletions)
+}
+
+fn validated_commit_hash(path: &str, commit_hash: &str) -> Result<String, String> {
+    let commit_hash = commit_hash.trim();
+    if !(7..=64).contains(&commit_hash.len())
+        || !commit_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("提交编号无效，请刷新提交历史后重试。".to_string());
+    }
+    let verify = format!("{commit_hash}^{{commit}}");
+    git_output(&["-C", path, "cat-file", "-e", &verify])?;
+    git_output(&["-C", path, "rev-parse", commit_hash])
+}
+
+fn commit_first_parent(path: &str, commit_hash: &str) -> Result<Option<String>, String> {
+    let parents = git_output(&["-C", path, "rev-list", "--parents", "-n", "1", commit_hash])?;
+    Ok(parents.split_whitespace().nth(1).map(str::to_string))
+}
+
+fn historical_file_label(status: &str) -> String {
+    match status.chars().next().unwrap_or('M') {
+        'A' => "新增".to_string(),
+        'D' => "删除".to_string(),
+        'R' => "重命名".to_string(),
+        'C' => "复制".to_string(),
+        _ => "修改".to_string(),
+    }
+}
+
+fn historical_commit_files(path: &str, commit_hash: &str) -> Result<Vec<GitCommitFile>, String> {
+    let commit_hash = validated_commit_hash(path, commit_hash)?;
+    let parent = commit_first_parent(path, &commit_hash)?;
+    let arguments = if let Some(parent) = parent {
+        vec![
+            "-c".into(),
+            "core.quotepath=false".into(),
+            "diff".into(),
+            "--name-status".into(),
+            "--no-renames".into(),
+            "-z".into(),
+            parent,
+            commit_hash,
+        ]
+    } else {
+        vec![
+            "-c".into(),
+            "core.quotepath=false".into(),
+            "diff-tree".into(),
+            "--root".into(),
+            "--no-commit-id".into(),
+            "--name-status".into(),
+            "--no-renames".into(),
+            "-r".into(),
+            "-z".into(),
+            commit_hash,
+        ]
+    };
+    let output = git_operation_output(path, &arguments, false)?;
+    let records = output
+        .split('\0')
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    let mut index = 0;
+    while index < records.len() {
+        let record = records[index];
+        index += 1;
+        let (status, file) = if let Some((status, file)) = record.split_once('\t') {
+            (status, file)
+        } else if let Some(file) = records.get(index) {
+            index += 1;
+            (record, *file)
+        } else {
+            break;
+        };
+        if file.trim().is_empty() {
+            continue;
+        }
+        files.push(GitCommitFile {
+            path: file.replace('\\', "/"),
+            status: status.to_string(),
+            label: historical_file_label(status),
+        });
+    }
+    Ok(files)
+}
+
+fn historical_commit_file_diff(
+    path: &str,
+    commit_hash: &str,
+    file: &str,
+) -> Result<GitCommitFileDiff, String> {
+    let commit_hash = validated_commit_hash(path, commit_hash)?;
+    let file = file.replace('\\', "/");
+    repository_file_path(path, &file)?;
+    if !historical_commit_files(path, &commit_hash)?
+        .iter()
+        .any(|item| item.path == file)
+    {
+        return Err("该文件不在这次提交中，请刷新提交历史后重试。".to_string());
+    }
+    let parent = commit_first_parent(path, &commit_hash)?;
+    let arguments = if let Some(parent) = parent {
+        vec![
+            "-c".into(),
+            "core.quotepath=false".into(),
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-renames".into(),
+            "--unified=3".into(),
+            parent,
+            commit_hash,
+            "--".into(),
+            file.clone(),
+        ]
+    } else {
+        vec![
+            "-c".into(),
+            "core.quotepath=false".into(),
+            "show".into(),
+            "--format=".into(),
+            "--no-ext-diff".into(),
+            "--no-renames".into(),
+            "--unified=3".into(),
+            commit_hash,
+            "--".into(),
+            file.clone(),
+        ]
+    };
+    let full_diff = git_operation_output(path, &arguments, false)?;
+    let (additions, modifications, deletions) = diff_change_summary(&full_diff);
+    let (diff, truncated) = truncate_diff(full_diff, 120 * 1024);
+    Ok(GitCommitFileDiff {
+        path: file,
+        diff,
+        truncated,
+        additions,
+        modifications,
+        deletions,
+    })
 }
 
 fn workbench_stash_reference(path: &str) -> Result<Option<String>, String> {
@@ -1964,7 +2184,7 @@ pub fn repository_asset_details(
         .collect::<Vec<_>>();
     let mut commit_statement = connection
         .prepare(
-            "SELECT commit_hash,subject,committed_at FROM git_commits
+            "SELECT commit_hash,subject,committed_at,COALESCE(author_name,''),COALESCE(author_email,'') FROM git_commits
              WHERE repository_path=?1 ORDER BY committed_at DESC LIMIT 30",
         )
         .map_err(|error| error.to_string())?;
@@ -1974,6 +2194,8 @@ pub fn repository_asset_details(
                 hash: row.get(0)?,
                 subject: row.get(1)?,
                 committed_at: row.get(2)?,
+                author_name: row.get(3)?,
+                author_email: row.get(4)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -3833,6 +4055,257 @@ pub fn git_pull_repository(
     Ok(pull_result(&message, output, commit_hash, None))
 }
 
+fn restore_smart_submit_original(
+    path: &str,
+    original_head: &str,
+    stash_reference: &str,
+) -> Result<String, String> {
+    if merge_in_progress(path) {
+        let _ = git_operation_output(path, &["merge".into(), "--abort".into()], false);
+    }
+    // 本地改动已经完整保存在专用 stash 中，先回到原 HEAD，再恢复执行前的暂存区和工作区。
+    git_operation_output(
+        path,
+        &["reset".into(), "--hard".into(), original_head.to_string()],
+        false,
+    )?;
+    let output = git_operation_output(
+        path,
+        &[
+            "stash".into(),
+            "apply".into(),
+            "--index".into(),
+            stash_reference.to_string(),
+        ],
+        false,
+    )?;
+    let drop_output = git_operation_output(
+        path,
+        &["stash".into(), "drop".into(), stash_reference.to_string()],
+        false,
+    )
+    .unwrap_or_else(|error| format!("执行前状态已恢复，但临时保存需要人工清理：{error}"));
+    Ok([output, drop_output]
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+async fn smart_sync_selected_changes(
+    path: &str,
+    files: &[String],
+) -> Result<GitSmartSyncResult, String> {
+    if merge_in_progress(path) {
+        return Err("当前正在合并，不能开始智能提交。".to_string());
+    }
+    let changed_files = parse_changed_files(&git_status_output(path)?);
+    let changed = changed_files
+        .iter()
+        .map(|file| file.path.replace('\\', "/"))
+        .collect::<HashSet<_>>();
+    let mut selected = Vec::new();
+    for file in files {
+        let normalized = file.replace('\\', "/");
+        if normalized.trim().is_empty() || !changed.contains(&normalized) {
+            return Err(format!("所选文件当前不在变更清单中：{file}"));
+        }
+        repository_file_path(path, &normalized)?;
+        if !selected.contains(&normalized) {
+            selected.push(normalized);
+        }
+    }
+    if selected.is_empty() {
+        return Err("请先选择要智能提交的文件。".to_string());
+    }
+    let selected_set = selected.iter().cloned().collect::<HashSet<_>>();
+    let unselected_staged = changed_files
+        .iter()
+        .filter(|file| {
+            is_staged_change(file) && !selected_set.contains(&file.path.replace('\\', "/"))
+        })
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    if !unselected_staged.is_empty() {
+        return Err(format!(
+            "暂存区还有未选择文件，请一并选择或先移出暂存区：{}",
+            unselected_staged.join("、")
+        ));
+    }
+
+    let original_head = git_output(&["-C", path, "rev-parse", "HEAD"])
+        .map_err(|_| "当前仓库还没有初始提交，不能自动同步远程。".to_string())?;
+    let mut stage_arguments = vec!["add".into(), "--".into()];
+    stage_arguments.extend(selected.iter().cloned());
+    git_operation_output(path, &stage_arguments, false)?;
+
+    let stash_label = format!("workbench-smart-submit-{}", uuid::Uuid::new_v4());
+    let stash_output = git_operation_output(
+        path,
+        &[
+            "stash".into(),
+            "push".into(),
+            "--include-untracked".into(),
+            "--message".into(),
+            stash_label,
+        ],
+        false,
+    )?;
+    let stash_reference = "stash@{0}";
+    let mut outputs = vec![stash_output];
+
+    let synchronized = async {
+        ensure_clean_worktree(path)?;
+        let upstream = git_output(&[
+            "-C",
+            path,
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ])
+        .unwrap_or_default();
+        let mut conflicts_resolved = false;
+        let remote_message = if upstream.is_empty() {
+            "当前分支尚未关联上游，已跳过拉取，将在推送时建立关联。".to_string()
+        } else {
+            let counts = git_output(&[
+                "-C",
+                path,
+                "rev-list",
+                "--left-right",
+                "--count",
+                "HEAD...@{upstream}",
+            ])?;
+            let values = counts.split_whitespace().collect::<Vec<_>>();
+            let ahead = values
+                .first()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let behind = values
+                .get(1)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let local_head = git_output(&["-C", path, "rev-parse", "HEAD"])?;
+            let remote_head = git_output(&["-C", path, "rev-parse", &upstream])?;
+            match reconcile_upstream_outcome(path, &upstream, ahead, behind)? {
+                UpstreamReconcileOutcome::Completed { message, output } => {
+                    if !output.trim().is_empty() {
+                        outputs.push(output);
+                    }
+                    message
+                }
+                UpstreamReconcileOutcome::Conflict {
+                    ai_blocked_files, ..
+                } => {
+                    if !ai_blocked_files.is_empty() {
+                        return Err(format!(
+                            "冲突文件不适合交给 AI 自动合并：{}",
+                            ai_blocked_files.join("、")
+                        ));
+                    }
+                    outputs.push(
+                        resolve_pull_conflicts_inner(path, "ai", &local_head, &remote_head).await?,
+                    );
+                    conflicts_resolved = true;
+                    "检测到远程冲突，AI 已保留双方有效修改并创建合并提交。".to_string()
+                }
+            }
+        };
+
+        let apply_result = git_operation_output(
+            path,
+            &[
+                "stash".into(),
+                "apply".into(),
+                "--index".into(),
+                stash_reference.into(),
+            ],
+            false,
+        );
+        match apply_result {
+            Ok(output) => outputs.push(output),
+            Err(error) => {
+                let conflicts = git_conflicted_files(path)?;
+                if conflicts.is_empty() {
+                    return Err(format!("恢复本地修改失败：{error}"));
+                }
+                let blocked = ai_blocked_conflict_files(path, &conflicts);
+                if !blocked.is_empty() {
+                    return Err(format!(
+                        "恢复本地修改时发生冲突，以下文件不能由 AI 自动合并：{}",
+                        blocked.join("、")
+                    ));
+                }
+                for file in &conflicts {
+                    ai_resolve_conflict_file(path, file).await?;
+                }
+                let remaining = git_conflicted_files(path)?;
+                if !remaining.is_empty() {
+                    return Err(format!("仍有未解决的冲突文件：{}", remaining.join("、")));
+                }
+                conflicts_resolved = true;
+                outputs.push(format!("AI 已合并恢复本地修改时产生的冲突：{error}"));
+            }
+        }
+
+        outputs.push(git_operation_output(
+            path,
+            &["reset".into(), "--mixed".into(), "HEAD".into()],
+            false,
+        )?);
+        let mut restage_arguments = vec!["add".into(), "--".into()];
+        restage_arguments.extend(selected.iter().cloned());
+        outputs.push(git_operation_output(path, &restage_arguments, false)?);
+        Ok::<_, String>((remote_message, conflicts_resolved))
+    }
+    .await;
+
+    let (remote_message, conflicts_resolved) = match synchronized {
+        Ok(value) => value,
+        Err(error) => {
+            return match restore_smart_submit_original(path, &original_head, stash_reference) {
+                Ok(_) => Err(format!("{error}。已恢复到智能提交前状态。")),
+                Err(restore_error) => Err(format!(
+                    "{error}。自动恢复失败，原修改仍保存在 {stash_reference}：{restore_error}"
+                )),
+            };
+        }
+    };
+    match git_operation_output(
+        path,
+        &["stash".into(), "drop".into(), stash_reference.into()],
+        false,
+    ) {
+        Ok(output) => outputs.push(output),
+        Err(error) => outputs.push(format!("本地修改已恢复，但清理临时保存失败：{error}")),
+    }
+    Ok(GitSmartSyncResult {
+        message: remote_message,
+        output: outputs
+            .into_iter()
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        conflicts_resolved,
+    })
+}
+
+#[tauri::command]
+pub async fn git_smart_sync_repository(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    files: Vec<String>,
+) -> Result<GitSmartSyncResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    let result = smart_sync_selected_changes(&path, &files).await;
+    if result.is_ok() {
+        let _ = import_head_commit(&state, &path);
+    }
+    refresh_basic_repository_state(&state, &path)?;
+    result
+}
+
 #[tauri::command]
 pub async fn git_resolve_pull_conflicts(
     state: tauri::State<'_, DatabaseState>,
@@ -3945,6 +4418,9 @@ pub fn git_repository_file_diff(
             }
         };
     }
+    let (staged_additions, staged_modifications, staged_deletions) = diff_change_summary(&staged);
+    let (unstaged_additions, unstaged_modifications, unstaged_deletions) =
+        diff_change_summary(&unstaged);
     let (staged_diff, staged_truncated) = truncate_diff(staged, 120 * 1024);
     let (unstaged_diff, unstaged_truncated) = truncate_diff(unstaged, 120 * 1024);
     Ok(GitFileDiff {
@@ -3952,7 +4428,121 @@ pub fn git_repository_file_diff(
         staged_diff,
         unstaged_diff,
         truncated: staged_truncated || unstaged_truncated,
+        additions: staged_additions + unstaged_additions,
+        modifications: staged_modifications + unstaged_modifications,
+        deletions: staged_deletions + unstaged_deletions,
     })
+}
+
+#[tauri::command]
+pub fn git_repository_commit_files(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    commit_hash: String,
+) -> Result<Vec<GitCommitFile>, String> {
+    ensure_managed_repository(&state, &path)?;
+    historical_commit_files(&path, &commit_hash)
+}
+
+#[tauri::command]
+pub fn git_repository_commit_file_diff(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    commit_hash: String,
+    file: String,
+) -> Result<GitCommitFileDiff, String> {
+    ensure_managed_repository(&state, &path)?;
+    historical_commit_file_diff(&path, &commit_hash, &file)
+}
+
+fn discard_repository_files(path: &str, files: &[String]) -> Result<String, String> {
+    if files.is_empty() {
+        return Err("请先选择要还原的文件。".to_string());
+    }
+    if merge_in_progress(path) {
+        return Err("当前正在合并，不能放弃文件修改；请先完成或取消合并。".to_string());
+    }
+    let changed = parse_changed_files(&git_status_output(path)?)
+        .into_iter()
+        .map(|file| (file.path.replace('\\', "/"), file))
+        .collect::<HashMap<_, _>>();
+    let mut selected = Vec::new();
+    for file in files {
+        let normalized = file.replace('\\', "/");
+        if normalized.trim().is_empty() || !changed.contains_key(&normalized) {
+            return Err(format!("所选文件当前不在变更清单中：{file}"));
+        }
+        repository_file_path(path, &normalized)?;
+        if !selected.contains(&normalized) {
+            selected.push(normalized);
+        }
+    }
+
+    let has_head = git_output(&["-C", path, "rev-parse", "--verify", "HEAD"]).is_ok();
+    let mut outputs = Vec::new();
+    for file in &selected {
+        let tracked_in_head = has_head
+            && git_output(&["-C", path, "cat-file", "-e", &format!("HEAD:{file}")]).is_ok();
+        if tracked_in_head {
+            outputs.push(git_operation_output(
+                path,
+                &[
+                    "restore".into(),
+                    "--source=HEAD".into(),
+                    "--staged".into(),
+                    "--worktree".into(),
+                    "--".into(),
+                    file.clone(),
+                ],
+                false,
+            )?);
+            continue;
+        }
+
+        if changed.get(file).is_some_and(is_staged_change) {
+            outputs.push(git_operation_output(
+                path,
+                &[
+                    "rm".into(),
+                    "--cached".into(),
+                    "--force".into(),
+                    "--ignore-unmatch".into(),
+                    "--".into(),
+                    file.clone(),
+                ],
+                false,
+            )?);
+        }
+        let target = repository_file_path(path, file)?;
+        if let Ok(metadata) = target.symlink_metadata() {
+            if metadata.is_dir() {
+                fs::remove_dir_all(&target).map_err(|error| format!("无法删除 {file}：{error}"))?;
+            } else {
+                fs::remove_file(&target).map_err(|error| format!("无法删除 {file}：{error}"))?;
+            }
+        }
+    }
+    Ok(outputs
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+#[tauri::command]
+pub fn git_discard_repository_changes(
+    state: tauri::State<'_, DatabaseState>,
+    path: String,
+    files: Vec<String>,
+) -> Result<GitOperationResult, String> {
+    ensure_managed_repository(&state, &path)?;
+    let output = discard_repository_files(&path, &files)?;
+    refresh_basic_repository_state(&state, &path)?;
+    Ok(operation_result(
+        &format!("已放弃 {} 个选中文件的本地修改。", files.len()),
+        output,
+        String::new(),
+    ))
 }
 
 #[tauri::command]
@@ -4321,19 +4911,21 @@ mod tests {
         ai_blocked_conflict_files, ai_context_contains_sensitive_content, begin_conflicted_merge,
         binary_path, commit_group_for_path, commit_message_with_details,
         commit_selected_staged_files, conventional_commit_message, detect_project_commands,
-        discover_repository_candidates, ensure_clean_worktree, excluded_commit_path,
-        extract_local_url, fallback_commit_groups, git_conflicted_files, git_operation_output,
-        git_output, git_status_output, has_unstaged_change, hbuilderx_compiler_from_root,
-        is_hbuilderx_project, is_staged_change, normalize_repository_category,
-        normalized_commit_grouping_mode, parse_ai_indexed_commit_plan,
-        parse_ai_single_commit_summary, parse_changed_files, parse_commits, reconcile_upstream,
-        reconcile_upstream_outcome, redact_ai_commit_context, repository_attention,
-        resolve_conflicts_with_side, runtime_line_failed, runtime_snapshot_requires_persistence,
-        sensitive_path, spawn_project_start_command, terminate_managed_process,
-        valid_conventional_commit_message, validate_ai_indexed_commit_groups, validated_branch,
-        validated_changed_file, validated_local_runtime_url, validated_stage_files,
-        vscode_open_command, workbench_stash_reference, GitScanConfiguration,
-        ManagedProjectProcess, RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
+        diff_change_summary, discard_repository_files, discover_repository_candidates,
+        ensure_clean_worktree, excluded_commit_path, extract_local_url, fallback_commit_groups,
+        git_conflicted_files, git_operation_output, git_output, git_status_output,
+        has_unstaged_change, hbuilderx_compiler_from_root, historical_commit_file_diff,
+        historical_commit_files, is_hbuilderx_project, is_staged_change,
+        normalize_repository_category, normalized_commit_grouping_mode,
+        parse_ai_indexed_commit_plan, parse_ai_single_commit_summary, parse_changed_files,
+        parse_commits, reconcile_upstream, reconcile_upstream_outcome, redact_ai_commit_context,
+        repository_attention, resolve_conflicts_with_side, runtime_line_failed,
+        runtime_snapshot_requires_persistence, sensitive_path, smart_sync_selected_changes,
+        spawn_project_start_command, terminate_managed_process, valid_conventional_commit_message,
+        validate_ai_indexed_commit_groups, validated_branch, validated_changed_file,
+        validated_local_runtime_url, validated_stage_files, vscode_open_command,
+        workbench_stash_reference, GitScanConfiguration, ManagedProjectProcess,
+        RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
         RUNTIME_SNAPSHOT_FALLBACK_INTERVAL,
     };
     use chrono::Utc;
@@ -4847,6 +5439,188 @@ mod tests {
         };
         terminate_managed_process(&mut process).unwrap();
         assert!(process.child.try_wait().unwrap().is_some());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn diff_summary_separates_added_modified_and_deleted_lines() {
+        let diff = "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -1,4 +1,5 @@\n-old one\n-old two\n+new one\n+new two\n+added\n context\n@@ -8,2 +9,1 @@\n-removed\n context";
+        assert_eq!(diff_change_summary(diff), (1, 2, 1));
+    }
+
+    #[test]
+    fn commit_history_lists_files_and_loads_each_file_diff() {
+        let directory = std::env::temp_dir().join(format!(
+            "workbench-git-commit-history-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let repository = directory.display().to_string();
+        let run = |arguments: &[&str]| {
+            git_operation_output(
+                &repository,
+                &arguments
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "History Tester"]);
+        run(&["config", "user.email", "history@example.com"]);
+        std::fs::write(directory.join("tracked.txt"), "old\nsame\n").unwrap();
+        run(&["add", "tracked.txt"]);
+        run(&["commit", "-m", "test: baseline"]);
+        std::fs::write(directory.join("tracked.txt"), "new\nsame\nadded\n").unwrap();
+        std::fs::write(directory.join("added.txt"), "created\n").unwrap();
+        run(&["add", "tracked.txt", "added.txt"]);
+        run(&["commit", "-m", "test: history details"]);
+        let commit_hash = git_output(&["-C", &repository, "rev-parse", "HEAD"]).unwrap();
+
+        let files = historical_commit_files(&repository, &commit_hash).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files
+            .iter()
+            .any(|file| file.path == "tracked.txt" && file.label == "修改"));
+        assert!(files
+            .iter()
+            .any(|file| file.path == "added.txt" && file.label == "新增"));
+
+        let diff = historical_commit_file_diff(&repository, &commit_hash, "tracked.txt").unwrap();
+        assert!(diff.diff.contains("-old"));
+        assert!(diff.diff.contains("+new"));
+        assert_eq!(
+            (diff.additions, diff.modifications, diff.deletions),
+            (1, 1, 0)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn discard_selected_files_restores_tracked_and_removes_untracked() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-git-discard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let repository = directory.display().to_string();
+        let run = |arguments: &[&str]| {
+            git_operation_output(
+                &repository,
+                &arguments
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "workbench-test"]);
+        run(&["config", "user.email", "workbench@example.com"]);
+        std::fs::write(directory.join("tracked.txt"), "base\n").unwrap();
+        run(&["add", "tracked.txt"]);
+        run(&["commit", "-m", "base"]);
+        std::fs::write(directory.join("tracked.txt"), "changed\n").unwrap();
+        run(&["add", "tracked.txt"]);
+        std::fs::write(directory.join("new.txt"), "new\n").unwrap();
+
+        discard_repository_files(
+            &repository,
+            &["tracked.txt".to_string(), "new.txt".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(directory.join("tracked.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "base\n"
+        );
+        assert!(!directory.join("new.txt").exists());
+        assert!(git_status_output(&repository).unwrap().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn smart_sync_keeps_unselected_changes_and_restages_only_selected_files() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-git-smart-{}", uuid::Uuid::new_v4()));
+        let remote = directory.join("remote.git");
+        let source = directory.join("source");
+        let local = directory.join("local");
+        std::fs::create_dir_all(&directory).unwrap();
+        let root = directory.display().to_string();
+        let remote_path = remote.display().to_string();
+        let source_path = source.display().to_string();
+        let local_path = local.display().to_string();
+        let run = |repository: &str, arguments: &[&str]| {
+            git_operation_output(
+                repository,
+                &arguments
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap()
+        };
+        run(&root, &["init", "--bare", &remote_path]);
+        run(&root, &["init", "-b", "main", &source_path]);
+        run(&source_path, &["config", "user.name", "workbench-test"]);
+        run(
+            &source_path,
+            &["config", "user.email", "workbench@example.com"],
+        );
+        std::fs::write(source.join("selected.txt"), "base\n").unwrap();
+        run(&source_path, &["add", "--all"]);
+        run(&source_path, &["commit", "-m", "base"]);
+        run(&source_path, &["remote", "add", "origin", &remote_path]);
+        run(&source_path, &["push", "--set-upstream", "origin", "main"]);
+        run(&remote_path, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run(&root, &["clone", &remote_path, &local_path]);
+        run(&local_path, &["config", "user.name", "workbench-test"]);
+        run(
+            &local_path,
+            &["config", "user.email", "workbench@example.com"],
+        );
+
+        std::fs::write(source.join("remote.txt"), "remote\n").unwrap();
+        run(&source_path, &["add", "--all"]);
+        run(&source_path, &["commit", "-m", "remote"]);
+        run(&source_path, &["push"]);
+        std::fs::write(local.join("selected.txt"), "selected change\n").unwrap();
+        std::fs::write(local.join("unselected.txt"), "keep me\n").unwrap();
+        run(&local_path, &["add", "selected.txt"]);
+        run(&local_path, &["fetch", "origin"]);
+
+        let result = tauri::async_runtime::block_on(smart_sync_selected_changes(
+            &local_path,
+            &["selected.txt".to_string()],
+        ))
+        .unwrap();
+
+        assert!(!result.conflicts_resolved);
+        assert!(local.join("remote.txt").exists());
+        let status = parse_changed_files(&git_status_output(&local_path).unwrap());
+        let selected = status
+            .iter()
+            .find(|file| file.path == "selected.txt")
+            .unwrap();
+        let unselected = status
+            .iter()
+            .find(|file| file.path == "unselected.txt")
+            .unwrap();
+        assert!(is_staged_change(selected));
+        assert!(!is_staged_change(unselected));
+        assert!(has_unstaged_change(unselected));
+        assert!(git_operation_output(
+            &local_path,
+            &["stash".into(), "list".into(), "--format=%gs".into()],
+            false,
+        )
+        .unwrap()
+        .is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
 

@@ -9,6 +9,9 @@ const mocks=vi.hoisted(()=>({
     return result;
   }),
 }));
+const windowApi=vi.hoisted(()=>({startDragging:vi.fn(async()=>undefined)}));
+
+vi.mock("@tauri-apps/api/window",()=>({getCurrentWindow:()=>windowApi}));
 
 vi.mock("../services/backend",()=>({
   isTauriRuntime:()=>true,
@@ -26,7 +29,7 @@ const runningTapd={id:"tapd-1",itemKey:"workspace:415",itemId:"415",workspaceId:
 function mountCockpit(){return mount(CockpitScreensaver,{props:{quota:{available:true,freshness:"fresh",selectionReason:"test",primary:{usedPercent:32,remainingPercent:68,windowMinutes:300,resetsAt:0},secondary:{usedPercent:17,remainingPercent:83,windowMinutes:10080,resetsAt:0}},notifications,runningProjects:[runningProject],testRuns:[runningTest],tapdJobs:[runningTapd]}});}
 
 describe("CockpitScreensaver",()=>{
-  beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date(2026,8,1,14,32,8));mocks.getDailyActivity.mockClear();});
+  beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date(2026,8,1,14,32,8));mocks.getDailyActivity.mockClear();windowApi.startDragging.mockClear();});
 
   it("完整展示顶部统计、九十天热力和实时信息",async()=>{
     const wrapper=mountCockpit();await flushPromises();
@@ -92,6 +95,19 @@ describe("CockpitScreensaver",()=>{
     expect(wrapper.emitted("close")).toHaveLength(1);
     await wrapper.get(".messages-panel>div>button").trigger("click");
     expect(wrapper.emitted("navigate")?.[0]).toEqual(["/inbox?item=0"]);
+    wrapper.unmount();vi.useRealTimers();
+  });
+
+  it("从头部非交互区域拖动时调用桌面窗口拖动，按钮不会触发",async()=>{
+    const wrapper=mountCockpit();await flushPromises();
+    await wrapper.get(".cockpit-title").trigger("mousedown",{button:0,screenX:10,screenY:10});
+    window.dispatchEvent(new MouseEvent("mousemove",{buttons:1,screenX:18,screenY:10}));
+    await flushPromises();
+    expect(windowApi.startDragging).toHaveBeenCalledTimes(1);
+    await wrapper.get(".cockpit-return").trigger("mousedown",{button:0,screenX:10,screenY:10});
+    window.dispatchEvent(new MouseEvent("mousemove",{buttons:1,screenX:24,screenY:10}));
+    await flushPromises();
+    expect(windowApi.startDragging).toHaveBeenCalledTimes(1);
     wrapper.unmount();vi.useRealTimers();
   });
 });
