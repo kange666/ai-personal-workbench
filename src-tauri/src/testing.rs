@@ -101,6 +101,36 @@ impl TestCaseGenerationState {
             .ok_or_else(|| "没有找到专属用例生成任务。".to_string())
     }
 
+    fn list(&self) -> Result<Vec<TestCaseGenerationJob>, String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| "无法读取专属用例生成状态。".to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(jobs)
+    }
+
+    fn active_for(
+        &self,
+        project_path: &str,
+        menu_id: &str,
+    ) -> Result<Option<TestCaseGenerationJob>, String> {
+        Ok(self
+            .jobs
+            .lock()
+            .map_err(|_| "无法读取专属用例生成状态。".to_string())?
+            .values()
+            .find(|job| {
+                job.project_path.eq_ignore_ascii_case(project_path)
+                    && job.menu_id == menu_id
+                    && matches!(job.status.as_str(), "queued" | "running")
+            })
+            .cloned())
+    }
+
     fn progress(&self, job_id: &str, percent: u8, message: impl Into<String>) {
         if let Ok(mut jobs) = self.jobs.lock() {
             if let Some(job) = jobs.get_mut(job_id) {
@@ -2978,6 +3008,10 @@ pub fn start_test_case_generation(
         .into_iter()
         .find(|menu| menu.id == menu_id)
         .ok_or_else(|| "没有找到对应功能或页面。".to_string())?;
+    let canonical_path = display_path(&root);
+    if let Some(active) = generation_state.active_for(&canonical_path, &menu.id)? {
+        return Ok(active);
+    }
     if dedicated_real_spec_file(&menu)
         .map(|file| root.join("e2e").join("specs").join(file).is_file())
         .unwrap_or(false)
@@ -2994,7 +3028,7 @@ pub fn start_test_case_generation(
     let id = Uuid::new_v4().to_string();
     let job = TestCaseGenerationJob {
         id: id.clone(),
-        project_path: display_path(&root),
+        project_path: canonical_path,
         menu_id: menu.id.clone(),
         menu_name: menu.name.clone(),
         status: "queued".into(),
@@ -3023,6 +3057,13 @@ pub fn get_test_case_generation(
     job_id: String,
 ) -> Result<TestCaseGenerationJob, String> {
     generation_state.get(&job_id)
+}
+
+#[tauri::command]
+pub fn list_test_case_generations(
+    generation_state: tauri::State<'_, TestCaseGenerationState>,
+) -> Result<Vec<TestCaseGenerationJob>, String> {
+    generation_state.list()
 }
 
 fn preflight_for(
@@ -3253,6 +3294,344 @@ fn normalize_artifact_path(root: &Path, value: &str) -> String {
     display_path(&resolved)
 }
 
+fn clean_test_output(value: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '\u{1b}' | '\u{9b}' | '\u{fffd}') && chars.peek() == Some(&'[') {
+            chars.next();
+            for control in chars.by_ref() {
+                if ('@'..='~').contains(&control) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '\r' {
+            continue;
+        }
+        if ch.is_control() && !matches!(ch, '\n' | '\t') {
+            continue;
+        }
+        cleaned.push(ch);
+    }
+    let mut cleaned = cleaned.trim().to_string();
+    for key in ["E2E_AUTH_TOKEN", "HLZT_TOKEN"] {
+        if let Some(secret) = std::env::var_os(key).and_then(|value| value.into_string().ok()) {
+            if !secret.trim().is_empty() {
+                cleaned = cleaned.replace(&secret, "[测试凭据已隐藏]");
+            }
+        }
+    }
+    cleaned
+}
+
+fn playwright_error_detail(result: &Value) -> String {
+    fn push_error(error: &Value, parts: &mut Vec<String>) {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !message.trim().is_empty() {
+            parts.push(message.to_string());
+        }
+        if let Some(location) = error.get("location") {
+            let file = location
+                .get("file")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let line = location
+                .get("line")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let column = location
+                .get("column")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            if !file.is_empty() {
+                parts.push(format!("代码位置：{file}:{line}:{column}"));
+            }
+        }
+        if let Some(snippet) = error.get("snippet").and_then(Value::as_str) {
+            if !snippet.trim().is_empty() {
+                parts.push(format!("相关代码：\n{snippet}"));
+            }
+        }
+        if let Some(stack) = error.get("stack").and_then(Value::as_str) {
+            if !stack.trim().is_empty() && stack.trim() != message.trim() {
+                parts.push(format!("调用栈：\n{stack}"));
+            }
+        }
+    }
+
+    let mut parts = Vec::new();
+    if let Some(error) = result.get("error") {
+        push_error(error, &mut parts);
+    }
+    if let Some(errors) = result.get("errors").and_then(Value::as_array) {
+        for error in errors {
+            push_error(error, &mut parts);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    clean_test_output(
+        &parts
+            .into_iter()
+            .filter(|part| seen.insert(part.clone()))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+    .chars()
+    .take(8000)
+    .collect()
+}
+
+struct FailureDiagnosis {
+    category: &'static str,
+    stage: &'static str,
+    summary: String,
+    possible_causes: Vec<&'static str>,
+    troubleshooting_steps: Vec<&'static str>,
+}
+
+fn detailed_test_error(error: &str, output: &str) -> String {
+    let error = clean_test_output(error);
+    let output = clean_test_output(output);
+    let mut details = error.clone();
+    if !output.is_empty() && output != error {
+        if !details.is_empty() {
+            details.push_str("\n\n");
+        }
+        details.push_str("原始命令输出摘要：\n");
+        details.extend(output.chars().take(8000));
+    }
+    details
+}
+
+fn diagnose_test_failure(error: &str, status: &str) -> FailureDiagnosis {
+    let normalized = error.to_lowercase();
+    if ["timeout", "timed out", "超时", "exceeded"]
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+    {
+        let duration = normalized
+            .find("timeout of ")
+            .and_then(|start| {
+                normalized[start + 11..]
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .map(|milliseconds| {
+                if milliseconds >= 60_000 && milliseconds % 60_000 == 0 {
+                    format!("测试超过 {} 分钟仍未完成", milliseconds / 60_000)
+                } else {
+                    format!("测试超过 {:.1} 秒仍未完成", milliseconds as f64 / 1000.0)
+                }
+            })
+            .unwrap_or_else(|| "测试在规定时间内没有完成".into());
+        return FailureDiagnosis {
+            category: "执行超时",
+            stage: if ["locator", "expect", "waiting for", "element"]
+                .iter()
+                .any(|pattern| normalized.contains(pattern))
+            {
+                "页面交互或断言等待阶段"
+            } else {
+                "场景执行阶段"
+            },
+            summary: format!("{duration}，Playwright 一直没有等到当前操作或断言满足条件。"),
+            possible_causes: vec![
+                "页面接口长时间没有返回，加载状态或遮罩层一直未结束。",
+                "测试定位的按钮、表格或弹框没有出现，选择器可能与当前页面不一致。",
+                "登录态、权限或 Token 失效，页面停留在登录页或无权限状态。",
+                "测试环境响应较慢，或前置数据不满足当前业务场景。",
+            ],
+            troubleshooting_steps: vec![
+                "先查看失败截图，确认超时时页面实际停留在哪一步。",
+                "从完整技术详情中定位最后一个 locator、expect、page.goto 或接口地址。",
+                "在浏览器 Network 中确认对应接口是否完成，并核对 HTTP 状态码和响应内容。",
+                "检查元素定位方式、页面 loading 状态和该场景所需前置数据。",
+            ],
+        };
+    }
+    if [
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "token",
+        "登录",
+        "权限",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        return FailureDiagnosis {
+            category: "登录或权限异常",
+            stage: "身份验证或接口请求阶段",
+            summary: "请求或页面访问没有通过身份验证，测试无法进入预期业务状态。".into(),
+            possible_causes: vec![
+                "环境变量中的 Token 已过期或没有传入测试进程。",
+                "当前账号缺少该菜单或接口权限。",
+                "接口使用的请求头名称与测试配置不一致。",
+            ],
+            troubleshooting_steps: vec![
+                "确认工作台读取的是当前 Windows 用户环境变量。",
+                "用同一账号手工进入页面并执行相同操作。",
+                "检查失败请求的请求头、HTTP 状态码和响应消息。",
+            ],
+        };
+    }
+    if normalized.contains("404") || normalized.contains("not found") {
+        return FailureDiagnosis {
+            category: "地址或资源不存在",
+            stage: "页面导航或接口请求阶段",
+            summary: "页面、接口或测试依赖的资源返回了 404，当前访问地址没有对应内容。".into(),
+            possible_causes: vec![
+                "页面路由或接口地址拼接错误。",
+                "开发代理没有把请求转发到正确服务。",
+                "后端版本与当前前端接口路径不一致。",
+            ],
+            troubleshooting_steps: vec![
+                "从完整技术详情中确认完整请求地址。",
+                "核对项目代理配置和后端服务地址。",
+                "直接访问接口并确认该环境是否部署了对应版本。",
+            ],
+        };
+    }
+    if [
+        "500",
+        "502",
+        "503",
+        "504",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        return FailureDiagnosis {
+            category: "服务端异常",
+            stage: "接口请求与响应阶段",
+            summary: "接口返回了服务端错误，页面无法获得完成当前场景所需的数据。".into(),
+            possible_causes: vec![
+                "后端服务内部报错或依赖服务不可用。",
+                "测试参数或前置数据触发了服务端异常。",
+                "当前环境部署状态不完整。",
+            ],
+            troubleshooting_steps: vec![
+                "确认失败接口的状态码、请求参数和响应正文。",
+                "查看对应时间点的后端日志。",
+                "使用相同参数单独重放接口以缩小问题范围。",
+            ],
+        };
+    }
+    if [
+        "locator",
+        "strict mode",
+        "waiting for",
+        "not visible",
+        "not attached",
+        "element",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        return FailureDiagnosis {
+            category: "页面元素未找到",
+            stage: "页面元素定位与交互阶段",
+            summary: "Playwright 没有找到或无法操作测试所需的页面元素。".into(),
+            possible_causes: vec![
+                "页面结构或按钮文字已经变化，原定位器失效。",
+                "元素位于未展开的弹框、抽屉或 Tab 中。",
+                "接口未返回导致目标区域没有渲染。",
+            ],
+            troubleshooting_steps: vec![
+                "结合截图确认目标控件是否实际显示。",
+                "根据调用栈中的文件和行号定位具体 locator。",
+                "检查元素是否需要先切换 Tab、展开弹框或等待接口完成。",
+            ],
+        };
+    }
+    if ["expect", "expected", "received", "assert", "断言"]
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+    {
+        return FailureDiagnosis {
+            category: "结果与预期不一致",
+            stage: "结果断言阶段",
+            summary: "页面或接口已经返回结果，但实际值没有满足测试断言。".into(),
+            possible_causes: vec![
+                "业务逻辑发生变化，测试预期尚未同步。",
+                "接口数据或页面状态确实不正确。",
+                "测试环境的基础数据与用例假设不同。",
+            ],
+            troubleshooting_steps: vec![
+                "对比错误中的 Expected 和 Received。",
+                "核对接口响应、页面展示和业务规则三者是否一致。",
+                "确认是产品缺陷还是用例预期需要更新。",
+            ],
+        };
+    }
+    if [
+        "net::err",
+        "connection refused",
+        "dns",
+        "page.goto",
+        "navigation",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+    {
+        return FailureDiagnosis {
+            category: "页面或网络不可达",
+            stage: "页面导航阶段",
+            summary: "浏览器没有成功打开目标页面，后续业务步骤无法执行。".into(),
+            possible_causes: vec![
+                "前端项目尚未启动或访问端口不正确。",
+                "代理、DNS 或网络连接异常。",
+                "页面跳转到了错误地址。",
+            ],
+            troubleshooting_steps: vec![
+                "确认项目运行状态和测试使用的完整 URL。",
+                "在浏览器中手工打开相同地址。",
+                "检查开发服务器、代理和端口占用情况。",
+            ],
+        };
+    }
+    FailureDiagnosis {
+        category: if status == "blocked" {
+            "环境条件不满足"
+        } else {
+            "测试执行异常"
+        },
+        stage: if status == "blocked" {
+            "执行前环境检查阶段"
+        } else {
+            "测试执行阶段"
+        },
+        summary: if status == "blocked" {
+            "测试所需的运行环境或前置条件没有通过检查。".into()
+        } else {
+            "测试执行器报告了异常，但当前错误不属于已识别的常见类型。".into()
+        },
+        possible_causes: vec![
+            "页面事件、接口响应或测试数据没有达到用例预期。",
+            "测试脚本与当前业务页面结构不一致。",
+            "运行环境、依赖或前置条件存在异常。",
+        ],
+        troubleshooting_steps: vec![
+            "先阅读完整技术详情和调用栈。",
+            "结合失败截图定位最后成功完成的页面步骤。",
+            "查看原始命令输出并优先处理最早出现的错误。",
+        ],
+    }
+}
+
 fn collect_playwright_specs(value: &Value, root: &Path, output: &mut Vec<TestScenarioResult>) {
     if let Some(specs) = value.get("specs").and_then(Value::as_array) {
         for spec in specs {
@@ -3288,12 +3667,7 @@ fn collect_playwright_specs(value: &Value, root: &Path, output: &mut Vec<TestSce
                     .iter()
                     .filter_map(|item| item.get("duration").and_then(Value::as_i64))
                     .sum();
-                let error_message = last
-                    .get("error")
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                let error_message = playwright_error_detail(&last);
                 let artifacts = last
                     .get("attachments")
                     .and_then(Value::as_array)
@@ -3525,11 +3899,11 @@ fn execute_project(
     if process_state.is_cancelled(run_id) {
         return Ok(cancelled_execution());
     }
-    let combined = format!(
+    let combined = clean_test_output(&format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
+    ));
     let mut scenarios = Vec::new();
     if let Ok(value) = fs::read_to_string(&raw_path)
         .and_then(|content| serde_json::from_str::<Value>(&content).map_err(std::io::Error::other))
@@ -3718,6 +4092,8 @@ fn build_structured_report(run: &TestRun) -> String {
     if !failures.is_empty() {
         lines.extend([String::new(), "## 问题场景详情".into(), String::new()]);
         for (index, item) in failures.iter().enumerate() {
+            let technical_details = detailed_test_error(&item.error_message, &run.output_excerpt);
+            let diagnosis = diagnose_test_failure(&technical_details, &item.status);
             lines.push(format!("### {}. {}", index + 1, item.title));
             lines.push(String::new());
             lines.push(format!(
@@ -3730,13 +4106,27 @@ fn build_structured_report(run: &TestRun) -> String {
             ));
             lines.push(format!("- 测试目的：{}", item.purpose));
             lines.push(format!("- 耗时：{} ms", item.duration_ms));
-            if !item.error_message.is_empty() {
+            lines.extend([
+                format!("- 错误分类：{}", diagnosis.category),
+                format!("- 发生阶段：{}", diagnosis.stage),
+                format!("- 具体问题：{}", diagnosis.summary),
+                String::new(),
+                "可能原因（根据错误特征推测）：".into(),
+            ]);
+            for cause in &diagnosis.possible_causes {
+                lines.push(format!("- {cause}"));
+            }
+            lines.extend([String::new(), "建议排查顺序：".into()]);
+            for (step_index, step) in diagnosis.troubleshooting_steps.iter().enumerate() {
+                lines.push(format!("{}. {step}", step_index + 1));
+            }
+            if !technical_details.is_empty() {
                 lines.extend([
                     String::new(),
-                    "错误信息：".into(),
+                    "完整技术详情：".into(),
                     String::new(),
                     "```text".into(),
-                    item.error_message.clone(),
+                    technical_details,
                     "```".into(),
                 ]);
             }
@@ -4127,11 +4517,28 @@ fn pdf_html(run: &TestRun) -> String {
             .iter()
             .map(|value| format!("<li>{}</li>", html_escape(value)))
             .collect::<String>();
-        scenarios.push_str(&format!("<section class=\"scenario {}\"><header><span>{:02}</span><h2>{}</h2><b>{}</b></header><p class=\"purpose\">{}</p>{}<div class=\"columns\"><div><h3>测试步骤</h3><ol>{}</ol></div><div><h3>验证内容</h3><ul>{}</ul></div></div>{}</section>",item.status,index+1,html_escape(&item.title),status_label,html_escape(&item.purpose),if item.error_message.is_empty(){String::new()}else{format!("<pre>{}</pre>",html_escape(&item.error_message))},steps,checks,screenshots));
+        let diagnosis_html = if item.status == "failed" || item.status == "blocked" {
+            let technical_details = detailed_test_error(&item.error_message, &run.output_excerpt);
+            let diagnosis = diagnose_test_failure(&technical_details, &item.status);
+            let causes = diagnosis
+                .possible_causes
+                .iter()
+                .map(|value| format!("<li>{}</li>", html_escape(value)))
+                .collect::<String>();
+            let troubleshooting = diagnosis
+                .troubleshooting_steps
+                .iter()
+                .map(|value| format!("<li>{}</li>", html_escape(value)))
+                .collect::<String>();
+            format!("<div class=\"diagnosis\"><h3>{}</h3><p>{}</p><p class=\"stage\">发生阶段：{}</p><div class=\"columns\"><div><h3>可能原因（推测）</h3><ul>{}</ul></div><div><h3>建议排查顺序</h3><ol>{}</ol></div></div>{}</div>",html_escape(diagnosis.category),html_escape(&diagnosis.summary),html_escape(diagnosis.stage),causes,troubleshooting,if technical_details.is_empty(){String::new()}else{format!("<h3>完整技术详情</h3><pre>{}</pre>",html_escape(&technical_details))})
+        } else {
+            String::new()
+        };
+        scenarios.push_str(&format!("<section class=\"scenario {}\"><header><span>{:02}</span><h2>{}</h2><b>{}</b></header><p class=\"purpose\">{}</p>{}<div class=\"columns\"><div><h3>测试步骤</h3><ol>{}</ol></div><div><h3>验证内容</h3><ul>{}</ul></div></div>{}</section>",item.status,index+1,html_escape(&item.title),status_label,html_escape(&item.purpose),diagnosis_html,steps,checks,screenshots));
     }
     format!(
         r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
-@page{{size:A4;margin:16mm 14mm}}*{{box-sizing:border-box}}body{{font-family:"Microsoft YaHei","Segoe UI",sans-serif;color:#202535;font-size:10.5pt;line-height:1.65;margin:0}}.cover{{padding:18px 20px;border:1px solid #dce1eb;border-radius:12px;background:#f7f8fc;margin-bottom:15px}}.eyebrow{{color:#6757d9;letter-spacing:2px;font-size:8pt}}h1{{margin:6px 0 3px;font-size:22pt}}.meta{{color:#697084}}.summary{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}}.summary div{{padding:10px;border:1px solid #dce1eb;border-radius:8px;text-align:center}}.summary b{{display:block;font-size:17pt}}.scenario{{break-inside:avoid;margin:0 0 12px;border:1px solid #dce1eb;border-radius:10px;overflow:hidden}}.scenario.failed,.scenario.blocked{{border-color:#ef9298}}.scenario header{{display:flex;align-items:center;gap:9px;padding:10px 12px;background:#f6f7fb}}.scenario header span{{width:26px;height:26px;border-radius:7px;background:#ece9ff;color:#6757d9;text-align:center;line-height:26px}}.scenario h2{{font-size:12.5pt;margin:0;flex:1}}.scenario header b{{color:#4ba778}}.scenario.failed header b,.scenario.blocked header b{{color:#d94b56}}.purpose{{margin:10px 12px;color:#596174}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px}}h3{{font-size:10pt;margin:3px 0}}ol,ul{{margin:4px 0;padding-left:20px}}pre{{margin:0 12px 10px;padding:9px;border-radius:7px;background:#fff0f1;color:#8c2530;white-space:pre-wrap;word-break:break-word}}figure{{margin:8px 12px 12px;break-inside:avoid}}img{{display:block;max-width:100%;max-height:220mm;border:1px solid #dce1eb;border-radius:7px}}figcaption{{color:#697084;font-size:8pt;margin-top:4px}}footer{{margin-top:15px;border-top:1px solid #dce1eb;padding-top:8px;color:#697084;font-size:8pt}}</style></head><body>
+@page{{size:A4;margin:16mm 14mm}}*{{box-sizing:border-box}}body{{font-family:"Microsoft YaHei","Segoe UI",sans-serif;color:#202535;font-size:10.5pt;line-height:1.65;margin:0}}.cover{{padding:18px 20px;border:1px solid #dce1eb;border-radius:12px;background:#f7f8fc;margin-bottom:15px}}.eyebrow{{color:#6757d9;letter-spacing:2px;font-size:8pt}}h1{{margin:6px 0 3px;font-size:22pt}}.meta{{color:#697084}}.summary{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}}.summary div{{padding:10px;border:1px solid #dce1eb;border-radius:8px;text-align:center}}.summary b{{display:block;font-size:17pt}}.scenario{{break-inside:avoid;margin:0 0 12px;border:1px solid #dce1eb;border-radius:10px;overflow:hidden}}.scenario.failed,.scenario.blocked{{border-color:#ef9298}}.scenario header{{display:flex;align-items:center;gap:9px;padding:10px 12px;background:#f6f7fb}}.scenario header span{{width:26px;height:26px;border-radius:7px;background:#ece9ff;color:#6757d9;text-align:center;line-height:26px}}.scenario h2{{font-size:12.5pt;margin:0;flex:1}}.scenario header b{{color:#4ba778}}.scenario.failed header b,.scenario.blocked header b{{color:#d94b56}}.purpose{{margin:10px 12px;color:#596174}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px}}.diagnosis{{margin:8px 12px 12px;padding:10px;border:1px solid #efb0b5;border-radius:8px;background:#fff8f8}}.diagnosis>.columns{{padding:5px 0 0}}.diagnosis .stage{{color:#697084}}h3{{font-size:10pt;margin:3px 0}}ol,ul{{margin:4px 0;padding-left:20px}}pre{{margin:0 12px 10px;padding:9px;border-radius:7px;background:#fff0f1;color:#8c2530;white-space:pre-wrap;word-break:break-word}}.diagnosis pre{{margin:5px 0 0}}figure{{margin:8px 12px 12px;break-inside:avoid}}img{{display:block;max-width:100%;max-height:220mm;border:1px solid #dce1eb;border-radius:7px}}figcaption{{color:#697084;font-size:8pt;margin-top:4px}}footer{{margin-top:15px;border-top:1px solid #dce1eb;padding-top:8px;color:#697084;font-size:8pt}}</style></head><body>
 <section class="cover"><div class="eyebrow">TEST REPORT</div><h1>{}</h1><div class="meta">{} · {} · {}</div><div class="summary"><div><span>结果</span><b>{}</b></div><div><span>场景</span><b>{}</b></div><div><span>通过</span><b>{}</b></div><div><span>失败</span><b>{}</b></div></div><div class="meta">环境：{}<br>项目目录：{}</div></section>{}<footer>由星枢 ASTRION 导出 · {}</footer></body></html>"#,
         html_escape(&run.menu_name),
         html_escape(&run.project),
@@ -4316,8 +4723,25 @@ fn exported_markdown_path(output_dir: &Path, run: &TestRun) -> PathBuf {
 fn write_exported_markdown(output_dir: &Path, run: &TestRun) -> Result<PathBuf, String> {
     fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
     let output_path = exported_markdown_path(output_dir, run);
-    let content = if run.report_markdown.trim().is_empty() {
+    let content = if !run.scenario_results.is_empty() || run.report_markdown.trim().is_empty() {
         build_structured_report(run)
+    } else if run.status != "passed" && !run.report_markdown.contains("## 异常诊断") {
+        let technical_details = detailed_test_error(&run.error_message, &run.output_excerpt);
+        let diagnosis = diagnose_test_failure(&technical_details, &run.status);
+        let causes = diagnosis
+            .possible_causes
+            .iter()
+            .map(|cause| format!("- {cause}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let steps = diagnosis
+            .troubleshooting_steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| format!("{}. {step}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{}\n\n## 异常诊断\n\n- 错误分类：{}\n- 发生阶段：{}\n- 具体问题：{}\n\n### 可能原因（根据错误特征推测）\n\n{}\n\n### 建议排查顺序\n\n{}\n\n### 完整技术详情\n\n```text\n{}\n```",run.report_markdown.trim_end(),diagnosis.category,diagnosis.stage,diagnosis.summary,causes,steps,technical_details)
     } else {
         run.report_markdown.clone()
     };
@@ -4403,14 +4827,15 @@ pub fn open_test_report_pdf(app: tauri::AppHandle, path: String) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::{
-        app_menus, app_static_report, append_remediation, canonical_exported_pdf, client_menus,
-        client_report_status, complete_pdf_size, create_case_file, display_path,
-        dynamic_pages_from_response, existing_exported_pdf, filter_test_titles,
-        legacy_report_scenarios, pdf_html, persist_screenshot_artifacts, project_menus,
-        recover_incomplete_test_runs, run_by_id, save_run, scenario_titles_for_menu_and_suite,
-        source_business_scenarios, static_scenarios, strip_json_comments,
-        visible_local_router_pages, write_exported_markdown, TestArtifact, TestCapabilities,
-        TestMenu, TestProcessState, TestRun, TestScenarioResult, COMMON_REAL_SUITE_ID,
+        app_menus, app_static_report, append_remediation, canonical_exported_pdf,
+        clean_test_output, client_menus, client_report_status, complete_pdf_size, create_case_file,
+        diagnose_test_failure, display_path, dynamic_pages_from_response, existing_exported_pdf,
+        filter_test_titles, legacy_report_scenarios, pdf_html, persist_screenshot_artifacts,
+        playwright_error_detail, project_menus, recover_incomplete_test_runs, run_by_id, save_run,
+        scenario_titles_for_menu_and_suite, source_business_scenarios, static_scenarios,
+        strip_json_comments, visible_local_router_pages, write_exported_markdown, TestArtifact,
+        TestCapabilities, TestCaseGenerationJob, TestCaseGenerationState, TestMenu,
+        TestProcessState, TestRun, TestScenarioResult, COMMON_REAL_SUITE_ID,
     };
     use crate::database::DatabaseState;
     use std::path::Path;
@@ -4466,6 +4891,34 @@ mod tests {
         let value = strip_json_comments("{\"url\":\"http://localhost\",// note\n\"ok\":true}");
         assert!(value.contains("http://localhost"));
         assert!(!value.contains("note"));
+    }
+
+    #[test]
+    fn case_generation_state_lists_active_jobs_and_reuses_the_same_business_job() {
+        let state = TestCaseGenerationState::default();
+        let job = TestCaseGenerationJob {
+            id: "generation-1".into(),
+            project_path: r"F:\TB-project\client".into(),
+            menu_id: "system-post".into(),
+            menu_name: "岗位管理".into(),
+            status: "queued".into(),
+            progress_percent: 3,
+            progress_message: "正在准备".into(),
+            error_message: String::new(),
+            generated_spec_path: None,
+            created_at: "2026-09-04T08:00:00Z".into(),
+            finished_at: None,
+        };
+        state.insert(job.clone()).unwrap();
+
+        assert_eq!(state.list().unwrap()[0].id, job.id);
+        assert_eq!(
+            state
+                .active_for(r"f:\tb-project\client", "system-post")
+                .unwrap()
+                .map(|item| item.id),
+            Some(job.id)
+        );
     }
 
     #[test]
@@ -4609,6 +5062,29 @@ mod tests {
         assert!(
             !append_remediation("# 通过".into(), "案例分享", "client", true).contains("整改建议")
         );
+    }
+
+    #[test]
+    fn playwright_error_keeps_stack_and_removes_terminal_colors() {
+        let result = serde_json::json!({
+            "error": {
+                "message": "\u{1b}[31mTest timeout of 60000ms exceeded.\u{1b}[39m",
+                "location": { "file": "related.spec.js", "line": 42, "column": 8 },
+                "stack": "Test timeout of 60000ms exceeded.\n    at related.spec.js:42:8"
+            }
+        });
+        let detail = playwright_error_detail(&result);
+        let diagnosis = diagnose_test_failure(&detail, "failed");
+
+        assert!(!detail.contains("[31m"));
+        assert!(detail.contains("related.spec.js:42:8"));
+        assert_eq!(diagnosis.category, "执行超时");
+        assert!(diagnosis.summary.contains("1 分钟"));
+        assert!(diagnosis
+            .possible_causes
+            .iter()
+            .any(|cause| cause.contains("Token")));
+        assert_eq!(clean_test_output("�[31m失败�[39m\r\n详情"), "失败\n详情");
     }
 
     #[cfg(windows)]
@@ -4989,6 +5465,8 @@ mod tests {
         assert!(html.find("失败场景").unwrap() < html.find("通过场景").unwrap());
         assert!(html.contains("data:image/png;base64,"));
         assert!(html.contains("按钮没有响应"));
+        assert!(html.contains("测试执行异常"));
+        assert!(html.contains("可能原因（推测）"));
         let reports = root.join("reports");
         let markdown = write_exported_markdown(&reports, &run).unwrap();
         let markdown_content = std::fs::read_to_string(&markdown).unwrap();
@@ -4998,6 +5476,9 @@ mod tests {
         );
         assert!(markdown_content.contains("测试执行报告"));
         assert!(markdown_content.contains("按钮没有响应"));
+        assert!(markdown_content.contains("错误分类"));
+        assert!(markdown_content.contains("可能原因（根据错误特征推测）"));
+        assert!(markdown_content.contains("建议排查顺序"));
         assert!(markdown_content.contains("failure.png"));
         assert!(existing_exported_pdf(&reports, &run).is_none());
         let pdf = super::exported_pdf_path(&reports, &run);

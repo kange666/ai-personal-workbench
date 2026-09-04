@@ -142,7 +142,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
 <template>
   <div class="view tapd-automation-view">
     <header class="page-header">
-      <div><h1>自动处理</h1><p>查看自动队列、执行过程与人工确认状态</p></div>
+      <div><h1>自动处理</h1></div>
       <div class="automation-actions">
         <RouterLink class="button secondary link-button" to="/tapd">查看缺陷</RouterLink>
         <button class="button secondary" @click="rulesOpen=true">配置规则</button>
@@ -160,7 +160,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
     </section>
 
     <section class="panel queue-section">
-      <header><div><b>自动处理队列</b><p>展示触发原因、优先级、截止日期、执行方式和耗时，便于判断下一项工作。</p></div><div class="queue-filters"><select v-model="workspaceFilter"><option value="all">全部项目</option><option v-for="project in projects" :key="project.workspaceId" :value="project.workspaceId">{{ project.workspaceName }}</option></select><select v-model="queueFilter"><option value="active">排队与执行中</option><option value="review">待人工确认</option><option value="failed">执行失败</option><option value="archived">已归档</option><option value="all">全部记录</option></select></div></header>
+      <header><div><b>自动处理队列</b></div><div class="queue-filters"><select v-model="workspaceFilter"><option value="all">全部项目</option><option v-for="project in projects" :key="project.workspaceId" :value="project.workspaceId">{{ project.workspaceName }}</option></select><select v-model="queueFilter"><option value="active">排队与执行中</option><option value="review">待人工确认</option><option value="failed">执行失败</option><option value="archived">已归档</option><option value="all">全部记录</option></select></div></header>
       <div class="queue-head"><span>项目 / 缺陷</span><span>优先级 / 截止</span><span>触发原因</span><span>执行方式</span><span>状态 / 耗时</span><span>操作</span></div>
       <div v-for="job in visibleJobs" :key="job.id" class="queue-row">
         <span><b>{{ projectMap.get(job.workspaceId)?.workspaceName || "未知项目" }}</b><small>{{ itemMap.get(job.itemKey)?.title || `缺陷 #${job.itemId}` }}</small><small>#{{ job.itemId }} · {{ job.repositoryPath.replace(/^.*[\\/]/, "") }}</small></span>
@@ -175,7 +175,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
 
     <div v-if="rulesOpen" class="activity-backdrop" @click.self="rulesOpen=false">
       <aside class="activity-drawer panel automation-rule-drawer">
-        <header><div><small>自动处理</small><h2>配置规则</h2><p>保存前会预览当前命中数量；项目存在未提交修改时自动降级为手工开始。</p></div><button class="icon-button" @click="rulesOpen=false">×</button></header>
+        <header><div><small>自动处理</small><h2>配置规则</h2><p>保存前预览命中数量；脏工作区只入队</p></div><button class="icon-button" @click="rulesOpen=false">×</button></header>
         <section class="rule-drawer-body">
           <div class="rule-drawer-title"><b>项目规则</b><RouterLink class="text-link" to="/tapd">管理项目 →</RouterLink></div>
           <div v-if="!projects.length" class="panel-empty">请先在 TAPD 工作中添加并启用项目。</div>
@@ -192,7 +192,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
             <footer><small v-if="project.lastError" class="rule-error">{{ project.lastError }}</small><span v-else>最近同步：{{ formatTime(project.lastSyncedAt) }}</span><div><button class="button secondary" :disabled="loading" @click="previewRule(project)">预览命中</button><button class="button primary" :disabled="loading || !drafts[project.workspaceId]?.completionStatus.trim()" @click="saveRule(project)">保存规则</button></div></footer>
           </article>
         </section>
-        <section class="safety-rules"><b>固定安全规则</b><ol><li><strong>只处理缺陷</strong><span>不读取任务、需求和其他信息。</span></li><li><strong>只处理负责人范围</strong><span>每个项目按配置的负责人筛选。</span></li><li><strong>串行执行</strong><span>避免多个 Codex 同时修改同一工作区。</span></li><li><strong>脏工作区降级</strong><span>检测到已有修改时只入队，不自动执行。</span></li><li><strong>测试门槛</strong><span>配置测试命令的项目必须测试通过才可确认。</span></li><li><strong>不操作 Git 发布</strong><span>不会自动提交、推送、重置、清理或删除。</span></li></ol></section>
+        <section class="safety-rules"><details><summary>固定安全规则</summary><p>仅处理负责人范围内的缺陷；同一工作区串行；脏工作区只入队；不操作 Git 发布。</p></details><p><strong>测试门槛</strong><span>配置测试命令的项目必须测试通过才可确认。</span></p></section>
       </aside>
     </div>
   </div>
@@ -204,7 +204,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
 .automation-rule-drawer{width:min(680px,100vw);padding-bottom:0}.rule-drawer-body{padding:16px;display:grid;gap:12px}.rule-drawer-title,.project-rule>header,.project-rule>footer{display:flex;align-items:center;justify-content:space-between;gap:14px}.project-rule{min-width:0;padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.project-rule header>div{display:grid;gap:4px}.project-rule header span,.project-rule footer span{color:var(--muted);font-size:10px}.project-rule header em{font-style:normal;font-size:10px;padding:5px 8px;border-radius:999px;background:var(--surface-2);color:var(--muted)}.project-rule header em.enabled{color:var(--success);background:color-mix(in srgb,var(--success) 12%,transparent)}.project-rule footer{min-height:36px}.project-rule footer>div{display:flex;gap:8px;margin-left:auto}
 .rule-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin:15px 0}.rule-grid>label,.rule-grid fieldset{min-width:0}.rule-grid>label{display:grid;gap:7px;color:var(--muted)}.rule-grid select,.rule-grid input:not([type=checkbox]),.queue-filters select{width:100%;min-width:0;height:38px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:0 10px}.rule-grid fieldset{min-height:58px;border:1px solid var(--line);border-radius:9px;display:flex;align-items:center;gap:16px;padding:8px 12px}.rule-grid fieldset label{display:flex;align-items:center;gap:6px}.rule-grid legend{padding:0 6px;color:var(--muted)}.rule-grid .rule-toggle{min-height:58px;display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text)}.rule-error{color:var(--danger)}.rule-preview{margin:4px 0 14px;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);display:grid;gap:7px}.rule-preview>span{color:var(--muted);line-height:1.55}.rule-preview ul{margin:2px 0 0;padding:0;list-style:none;display:grid;gap:6px}.rule-preview li{display:grid;gap:3px;padding-top:7px;border-top:1px solid var(--line)}.rule-preview small{color:var(--muted)}
 .queue-filters{flex:0 0 auto}.queue-filters select{width:auto;max-width:180px}.queue-head,.queue-row{display:grid;grid-template-columns:minmax(210px,1.55fr) 105px minmax(110px,.8fr) minmax(120px,.85fr) 120px 92px;gap:12px;align-items:center;padding-left:16px;padding-right:16px}.queue-head{height:40px;color:var(--muted);font-size:10px;border-bottom:1px solid var(--line);background:var(--surface-2)}.queue-row{min-height:78px;border-bottom:1px solid var(--line)}.queue-row>span{min-width:0;display:grid;gap:4px}.queue-row small{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.queue-row small.overdue,.queue-row .queue-error{color:var(--danger)}.queue-row em{display:inline-flex;width:max-content;font-style:normal;border-radius:999px;padding:4px 8px;background:var(--surface-2)}.queue-row em.running{color:var(--primary)}.queue-row em.failed{color:var(--danger)}.queue-row em.completed{color:var(--success)}.queue-section>.panel-empty{margin:0;padding:42px 16px}
-.safety-rules{padding:18px 20px 22px;border-top:1px solid var(--line);background:var(--surface-2)}.safety-rules ol{counter-reset:rule;list-style:none;padding:0;margin:14px 0 0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.safety-rules li{counter-increment:rule;display:grid;grid-template-columns:22px 1fr;column-gap:9px}.safety-rules li::before{content:counter(rule);width:22px;height:22px;display:grid;place-items:center;border-radius:7px;background:var(--primary-soft);color:var(--primary);font-size:10px}.safety-rules strong,.safety-rules span{grid-column:2}.safety-rules span{color:var(--muted);font-size:10px;line-height:1.55;margin-top:3px}
+.safety-rules{padding:18px 20px 22px;border-top:1px solid var(--line);background:var(--surface-2)}.safety-rules details summary{cursor:pointer;font-weight:700;color:var(--text)}.safety-rules details p,.safety-rules>p{margin:10px 0 0;color:var(--muted);line-height:1.6}.safety-rules>p{display:flex;gap:8px}.safety-rules>p strong{color:var(--text)}
 @media(max-width:1180px){.automation-summary{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:640px){.rule-grid,.safety-rules ol{grid-template-columns:1fr}.queue-section{overflow-x:auto}}
+@media(max-width:640px){.rule-grid{grid-template-columns:1fr}.queue-section{overflow-x:auto}}
 </style>

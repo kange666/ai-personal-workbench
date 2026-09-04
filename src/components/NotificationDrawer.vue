@@ -64,7 +64,7 @@ async function review(decision:"accepted"|"follow_up") {
       </section>
       <section v-if="!isTapdItem && !isJenkinsPublish" class="notification-detail-section notification-review-section">
         <h3>结果处理</h3>
-        <p>这里只记录你是否认可结果，不会自动创建每日任务，也不会自动提交代码。</p>
+        <p>仅记录处理结论</p>
         <textarea v-model="reviewNote" rows="3" placeholder="可选：记录需要继续处理的地方"></textarea>
         <div><button class="button secondary" :disabled="loading" @click="review('follow_up')">需要继续处理</button><button class="button primary" :disabled="loading" @click="review('accepted')">结果可用</button></div>
         <small v-if="notification.reviewStatus!=='pending'">当前结论：{{ notification.reviewStatus==='accepted'?'结果可用':'需要继续处理' }}</small>

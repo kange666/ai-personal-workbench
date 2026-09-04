@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { isRegistered as isShortcutRegistered, register as registerShortcut, unregister as unregisterShortcut } from "@tauri-apps/plugin-global-shortcut";
 import { useWorkbenchStore } from "../stores/workbench";
-import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, startRepositoryProject, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
+import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestCaseGenerations, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestCaseGenerationJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
 import appLogoWarm from "../assets/app-logo-warm.png";
@@ -59,6 +59,8 @@ const windowMaximized = ref(false);
 const activeTestRuns = ref<TestRun[]>([]);
 const activeTapdJobs = ref<TapdCodexJob[]>([]);
 const allTestRuns = ref<TestRun[]>([]);
+const allTestCaseGenerations = ref<TestCaseGenerationJob[]>([]);
+const activeTestCaseGenerations = ref<TestCaseGenerationJob[]>([]);
 const allTapdJobs = ref<TapdCodexJob[]>([]);
 const activeJenkinsPublishes = ref<JenkinsPublishRecord[]>([]);
 const runningProjects = ref<RunningProjectProcess[]>([]);
@@ -67,7 +69,6 @@ const todayWorkSessions = ref<WorkSession[]>([]);
 const todayWorkSummary = ref<WorkSummary>({ startDate:"", endDate:"", totalMinutes:0, estimatedMinutes:0, manualMinutes:0, hasManualCorrections:false, byProject:[], byType:[], daily:[] });
 const railNow = ref(Date.now());
 const recentActivitiesOpen = ref(window.localStorage.getItem("workbench-right-rail-recent-open") === "true");
-const projectLaunchPath = ref("");
 const projectActionPath = ref("");
 const projectActionMessage = ref("");
 const pageLoading = ref(true);
@@ -87,11 +88,6 @@ const todayIso = new Date().toLocaleDateString("sv-SE");
 const todayDay = new Date().getDate();
 const todayAlmanac = computed(() => getAlmanac(todayIso));
 const pageLoadingTitle = computed(() => String(router.currentRoute.value.meta.title || "工作数据"));
-const runningProjectPaths = computed(() => new Set(runningProjects.value.map(item => item.projectPath.toLocaleLowerCase())));
-const startableProjects = computed(() => repositoryAssets.value
-  .filter(item => !item.isHidden && !runningProjectPaths.value.has(item.path.toLocaleLowerCase()))
-  .sort((left,right) => Number(right.isPinned)-Number(left.isPinned) || left.name.localeCompare(right.name,"zh-CN")));
-const repositoryByPath = computed(() => new Map(repositoryAssets.value.map(item => [item.path.toLocaleLowerCase(),item])));
 const latestWorkSession = computed(() => [...todayWorkSessions.value].sort((left,right) => right.endTime.localeCompare(left.endTime))[0]);
 const currentWorkIsFresh = computed(() => {
   const session=latestWorkSession.value;
@@ -109,6 +105,16 @@ const healthSummary = computed(() => healthLoading.value ? "检查中" : healthI
 const unreadCount = computed(() => notifications.value.filter(item => !item.isRead).length);
 const pendingReviewCount = computed(() => notifications.value.filter(item => !["tapd_item","jenkins_publish"].includes(item.kind) && item.reviewStatus === "pending").length);
 const activeOperations = computed(() => [
+  ...activeTestCaseGenerations.value.map(job => ({
+    id:`test-case:${job.id}`,
+    kind:"test" as const,
+    title:`生成 ${job.menuName} 专属用例`,
+    detail:job.progressMessage,
+    status:job.status === "queued" ? "等待生成" : "后台生成中",
+    href:{ path:"/testing", query:{ project:job.projectPath } },
+    progressPercent:job.progressPercent,
+    etaText:"可继续操作",
+  })),
   ...activeTestRuns.value.map(run => {
     const progress=estimateTestRunProgress(run,allTestRuns.value,railNow.value);
     return {
@@ -144,6 +150,7 @@ const railIssues = computed(() => {
   const latestTests=new Map<string,TestRun>();
   for (const run of [...allTestRuns.value].sort((left,right) => right.startedAt.localeCompare(left.startedAt))) if (!latestTests.has(run.menuId)) latestTests.set(run.menuId,run);
   for (const run of latestTests.values()) if (["failed","blocked","error"].includes(run.status)) issues.push({ id:`test:${run.id}`, title:`${run.menuName} 测试未通过`, detail:run.errorMessage || `${run.failedCount} 个场景失败`, tone:"danger", to:`/testing?run=${run.id}` });
+  for (const job of allTestCaseGenerations.value.filter(item => item.status === "failed").slice(0,3)) issues.push({ id:`test-case:${job.id}`, title:`${job.menuName} 专属用例生成失败`, detail:job.errorMessage || "请检查 Codex CLI 状态", tone:"danger", to:{ path:"/testing", query:{ project:job.projectPath } } });
   for (const job of [...allTapdJobs.value].filter(item => item.status === "failed").sort((left,right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0,3)) issues.push({ id:`tapd:${job.id}`, title:`TAPD 缺陷 ${job.itemKey} 处理失败`, detail:job.errorMessage || "可进入自动处理查看日志", tone:"danger", to:"/tapd-automation" });
   if (emailStatus.value.state === "error") issues.push({ id:"email", title:"邮件通知异常", detail:emailStatus.value.lastError || "请检查邮箱配置", tone:"warning", to:"/settings" });
   return issues.sort((left,right) => Number(right.tone === "danger")-Number(left.tone === "danger"));
@@ -282,15 +289,6 @@ function formatRailActivityTime(value:string) {
   if (minutes < 60) return `${minutes}分钟前`;
   if (minutes < 1_440) return `${Math.floor(minutes/60)}小时前`;
   return new Intl.DateTimeFormat("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(timestamp));
-}
-function projectGitSummary(path:string) {
-  const asset=repositoryByPath.value.get(path.toLocaleLowerCase());
-  if (!asset) return "Git 状态读取中";
-  const states=[asset.defaultBranch || "无分支"];
-  if (asset.changedFileCount) states.push(`${asset.changedFileCount} 个修改`);
-  if (asset.aheadCount) states.push(`领先 ${asset.aheadCount}`);
-  if (asset.behindCount) states.push(`落后 ${asset.behindCount}`);
-  return states.join(" · ");
 }
 function openSearch() { searchOpen.value = true; }
 function resetCockpitIdle() {
@@ -480,9 +478,11 @@ function isTopbarInteractiveTarget(target:HTMLElement) {
 async function loadActiveOperations() {
   if (!isTauriRuntime()) return;
   railNow.value=Date.now();
-  const [testResult,tapdResult,jenkinsResult,projectsResult] = await Promise.allSettled([listTestRuns(),listTapdCodexJobs(),listJenkinsPublishRecords(),listRunningRepositoryProjects()]);
+  const [testResult,generationResult,tapdResult,jenkinsResult,projectsResult] = await Promise.allSettled([listTestRuns(),listTestCaseGenerations(),listTapdCodexJobs(),listJenkinsPublishRecords(),listRunningRepositoryProjects()]);
   if (testResult.status === "fulfilled") { allTestRuns.value=testResult.value; activeTestRuns.value=testResult.value.filter(item => item.status === "queued" || item.status === "running"); }
   else console.error("读取正在执行的测试失败",testResult.reason);
+  if (generationResult.status === "fulfilled") { allTestCaseGenerations.value=generationResult.value; activeTestCaseGenerations.value=generationResult.value.filter(item => item.status === "queued" || item.status === "running"); }
+  else console.error("读取正在生成的专属用例失败",generationResult.reason);
   if (tapdResult.status === "fulfilled") { allTapdJobs.value=tapdResult.value; activeTapdJobs.value=tapdResult.value.filter(item => item.status === "queued" || item.status === "running"); }
   else console.error("读取正在处理的 TAPD 缺陷失败",tapdResult.reason);
   if (jenkinsResult.status === "fulfilled") activeJenkinsPublishes.value=jenkinsResult.value.filter(item => item.status === "queued" || item.status === "running");
@@ -502,20 +502,7 @@ async function loadProjectOptions() {
   if (!isTauriRuntime()) return;
   try {
     repositoryAssets.value=await listRepositoryAssets();
-    if (projectLaunchPath.value && !startableProjects.value.some(item => item.path === projectLaunchPath.value)) projectLaunchPath.value="";
   } catch (cause) { console.error("读取可启动项目失败",cause); }
-}
-async function startRailProject() {
-  if (!projectLaunchPath.value || projectActionPath.value) return;
-  projectActionPath.value=projectLaunchPath.value;
-  projectActionMessage.value="";
-  try {
-    const result=await startRepositoryProject(projectLaunchPath.value);
-    projectActionMessage.value=result.message || `${result.projectName} 已启动。`;
-    projectLaunchPath.value="";
-    await Promise.all([loadActiveOperations(),loadProjectOptions()]);
-  } catch (cause) { projectActionMessage.value=`启动失败：${String(cause)}`; }
-  finally { projectActionPath.value=""; }
 }
 async function stopRailProject(project:RunningProjectProcess) {
   if (projectActionPath.value) return;
@@ -527,9 +514,6 @@ async function stopRailProject(project:RunningProjectProcess) {
     await Promise.all([loadActiveOperations(),loadProjectOptions()]);
   } catch (cause) { projectActionMessage.value=`停止失败：${String(cause)}`; }
   finally { projectActionPath.value=""; }
-}
-function openProjectGit(project:RunningProjectProcess) {
-  void router.push({ path:"/projects", query:{ project:project.projectPath, tab:"git" } });
 }
 function prepareWindowDragging(event:MouseEvent) {
   if (!isTauriRuntime() || event.button !== 0) return;
@@ -732,7 +716,7 @@ onBeforeUnmount(() => {
       <div class="top-runtime" @focusout="closeHealthOnBlur">
         <button class="top-runtime-status" :class="{ warning:healthIssueCount>0, loading:healthLoading }" title="查看本地数据与连接状态" @click="healthOpen=!healthOpen"><i></i><span>{{ healthSummary }}</span></button>
         <section v-if="healthOpen" class="system-health-popover panel">
-          <header><div><b>连接与数据健康</b><small>只做本地检查，不上传密钥或业务数据</small></div><button class="text-button" :disabled="healthLoading" @click="loadSystemHealth">{{ healthLoading ? '检查中…' : '重新检查' }}</button></header>
+          <header><div><b>连接与数据健康</b><small>仅检查本机状态</small></div><button class="text-button" :disabled="healthLoading" @click="loadSystemHealth">{{ healthLoading ? '检查中…' : '重新检查' }}</button></header>
           <div class="system-health-list"><article v-for="item in healthItems" :key="item.label" :class="item.state"><i></i><span><b>{{ item.label }}</b><small>{{ item.detail }}</small></span></article></div>
           <footer><span>{{ healthUpdatedAt ? `${notificationTime(healthUpdatedAt)} 更新` : '尚未完成检查' }}</span><RouterLink to="/settings" @click="healthOpen=false">打开设置</RouterLink></footer>
         </section>
@@ -742,7 +726,7 @@ onBeforeUnmount(() => {
           <i class="header-icon-box"><HeaderIcon name="quota" /></i><span><small>剩余用量</small><b>{{ remainingText }}</b></span><em class="disclosure-icon" aria-hidden="true"></em>
         </button>
         <section v-if="quotaOpen" class="quota-popover panel">
-          <header><div><b>Codex 剩余用量</b><small>{{ quotaFreshnessText }} · 读取本地 Codex 原始额度事件</small></div><button class="icon-button" title="关闭" @click="quotaOpen=false">×</button></header>
+          <header><div><b>Codex 剩余用量</b><small>来源：本地 Codex 额度记录</small></div><button class="icon-button" title="关闭" @click="quotaOpen=false">×</button></header>
           <div v-if="quotaWindows.length" class="quota-window-list">
             <article v-for="(item,index) in quotaWindows" :key="index">
               <div><b>{{ quotaPeriod(item.windowMinutes) }}</b><span>{{ Math.round(item.remainingPercent) }}%</span><small>{{ quotaReset(item.resetsAt) }}</small></div>
@@ -751,7 +735,7 @@ onBeforeUnmount(() => {
           </div>
           <p v-else class="quota-empty">没有未过期的额度快照。使用一次 Codex 后刷新即可读取，工作台不会继续显示旧周期额度。</p>
           <div class="quota-reset-credit">
-            <span><b>可用额度重置</b><small>读取当前 Codex 账户的本地状态</small></span>
+            <span><b>可用额度重置</b></span>
             <strong v-if="quota.resetCreditsAvailable !== undefined">{{ quota.resetCreditsAvailable }} 次</strong>
             <em v-else>暂未读取到</em>
           </div>
@@ -792,43 +776,41 @@ onBeforeUnmount(() => {
       </Transition>
     </main>
     <aside class="ai-rail work-status-rail">
-      <div class="ai-rail-title"><span class="work-status-mark">●</span><div><b>工作状态</b><small>项目与自动化运行状态</small></div><i>{{ workStatusCount }}</i></div>
-      <section class="rail-almanac"><small>今日黄历 · {{ todayAlmanac.lunarDate }}</small><div class="rail-almanac-main"><b>{{ todayDay }}</b><span><strong>{{ todayAlmanac.duty }} · {{ todayAlmanac.luck }}</strong><em>{{ todayAlmanac.ganZhi }}</em></span></div><p>{{ todayAlmanac.heavenlyGod }}值日 · {{ todayAlmanac.clash }} · {{ todayAlmanac.sha }}</p><div class="rail-almanac-yiji"><span><i>宜</i>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</span><span><i>忌</i>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</span></div><RouterLink class="button secondary small link-button" :to="`/calendar?date=${todayIso}`">查看详细黄历</RouterLink></section>
+      <div class="ai-rail-title"><span class="work-status-mark">●</span><div><b>工作状态</b></div><i>{{ workStatusCount }}</i></div>
+      <section class="rail-almanac">
+        <div class="rail-almanac-main"><b>{{ todayDay }}</b><span><span class="rail-almanac-heading"><strong>{{ todayAlmanac.duty }} · {{ todayAlmanac.luck }}</strong><small>{{ todayAlmanac.lunarDate }}</small></span><em>{{ todayAlmanac.heavenlyGod }}值日 · {{ todayAlmanac.clash }} · {{ todayAlmanac.sha }}</em><span class="rail-almanac-yiji"><span><i>宜</i>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</span><span><i>忌</i>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</span></span><RouterLink class="rail-almanac-link" :to="`/calendar?date=${todayIso}`">查看详细黄历 ›</RouterLink></span></div>
+      </section>
       <section class="rail-work-session">
-        <header class="rail-section-header"><span><i></i><b>当前工作区间</b></span><em>{{ currentWorkIsFresh ? '估算进行中' : '今日' }}</em></header>
-        <div v-if="latestWorkSession" class="rail-work-session-main"><b>{{ latestWorkSession.project }}</b><span>{{ latestWorkSession.workType }} · {{ latestWorkSession.startTime }}—{{ latestWorkSession.endTime }}</span><small>{{ latestWorkSession.source === 'manual' ? '手工记录' : '估算工时' }}</small></div>
-        <div v-else class="rail-work-session-main empty"><b>{{ runningProjects[0]?.projectName || '尚未识别到工作区间' }}</b><span>{{ runningProjects.length ? '项目正在运行，等待本地活动形成估算工时。' : '开始 Codex、Git、任务或测试活动后自动估算。' }}</span></div>
-        <div class="rail-work-session-metrics"><span><small>今日工时</small><b>{{ formatRailMinutes(todayWorkSummary.totalMinutes) }}</b></span><span><small>当前区间</small><b>{{ latestWorkSession ? formatRailMinutes(latestWorkSession.durationMinutes) : '—' }}</b></span></div>
-        <RouterLink class="rail-inline-link" to="/work-records">查看与修正工时 →</RouterLink>
+        <header class="rail-section-header"><span><i></i><b>当前工作</b></span><em>{{ currentWorkIsFresh ? '进行中' : '今日' }}</em></header>
+        <div class="rail-work-card">
+          <div v-if="latestWorkSession" class="rail-work-session-main"><b>{{ latestWorkSession.project }}</b><span>{{ latestWorkSession.startTime }}—{{ latestWorkSession.endTime }}</span><small>{{ latestWorkSession.source === 'manual' ? '手工记录' : '估算中' }}</small></div>
+          <div v-else class="rail-work-session-main empty"><b>{{ runningProjects[0]?.projectName || '尚未识别到工作区间' }}</b><span>有本地活动后自动估算</span></div>
+          <div class="rail-work-session-metrics"><span><small>今日工时</small><b>{{ formatRailMinutes(todayWorkSummary.totalMinutes) }}</b></span><span><small>当前区间</small><b>{{ latestWorkSession ? formatRailMinutes(latestWorkSession.durationMinutes) : '—' }}</b></span><RouterLink class="rail-inline-link" to="/work-records">修正 ›</RouterLink></div>
+        </div>
       </section>
       <section v-if="runningProjects.length" class="rail-projects">
-        <header><span><i></i><b>正在运行的项目</b></span><em>{{ runningProjects.length }}</em></header>
+        <header><span><i></i><b>项目运行</b></span><em>{{ runningProjects.length }}</em></header>
         <article v-for="project in runningProjects" :key="project.projectPath" class="rail-project-card">
-          <div><b :title="project.projectName">{{ project.projectName }}</b><small>{{ project.status === 'starting' ? '正在启动' : '运行中' }}<template v-if="project.localUrl"> · {{ project.localUrl }}</template></small><em>{{ projectGitSummary(project.projectPath) }}</em></div>
-          <span class="rail-project-actions"><button :disabled="Boolean(projectActionPath)" @click="stopRailProject(project)">{{ projectActionPath === project.projectPath ? '停止中…' : '停止' }}</button><button @click="openProjectGit(project)">Git 操作</button></span>
+          <div><b :title="project.projectName">{{ project.projectName }}</b><small>{{ project.status === 'starting' ? '正在启动' : '运行中' }}<template v-if="project.localUrl"> · {{ project.localUrl }}</template></small></div>
+          <button class="rail-project-stop" :disabled="Boolean(projectActionPath)" @click="stopRailProject(project)">{{ projectActionPath === project.projectPath ? '停止中…' : '停止' }}</button>
         </article>
-        <div class="rail-project-launch"><select v-model="projectLaunchPath" aria-label="选择要启动的项目"><option value="">选择项目…</option><option v-for="project in startableProjects" :key="project.path" :value="project.path">{{ project.name }}</option></select><button :disabled="!projectLaunchPath || Boolean(projectActionPath)" @click="startRailProject">{{ projectActionPath === projectLaunchPath && projectLaunchPath ? '启动中…' : '启动' }}</button></div>
         <p v-if="projectActionMessage" class="rail-project-message">{{ projectActionMessage }}</p>
       </section>
       <section v-if="activeOperations.length" class="rail-running">
         <header><span><i></i><b>正在执行</b></span><em>{{ activeOperations.length }}</em></header>
         <RouterLink v-for="item in activeOperations" :key="item.id" class="rail-running-item" :to="item.href">
-          <span class="rail-running-item-head"><i :class="item.kind">{{ item.kind === 'test' ? '测试' : item.kind === 'jenkins' ? '发布' : 'TAPD' }}</i><em>{{ item.status }}</em></span>
-          <b :title="item.title">{{ item.title }}</b>
-          <small :title="item.detail">{{ item.detail }}</small>
+          <span class="rail-running-item-head"><i :class="item.kind">{{ item.kind === 'test' ? '测试' : item.kind === 'jenkins' ? '发布' : 'TAPD' }}</i><b :title="item.title">{{ item.title }}</b><em>{{ item.status }}</em></span>
           <span class="rail-running-progress" :class="{ determinate:item.progressPercent !== undefined }" :role="item.progressPercent !== undefined ? 'progressbar' : undefined" :aria-valuenow="item.progressPercent" aria-valuemin="0" aria-valuemax="100"><i :style="item.progressPercent !== undefined ? { width:`${item.progressPercent}%` } : undefined"></i></span>
           <span v-if="item.progressPercent !== undefined || item.etaText" class="rail-running-estimate"><b v-if="item.progressPercent !== undefined">{{ item.progressPercent }}%</b><em>{{ item.etaText }}</em></span>
         </RouterLink>
-        <p>任务完成后会自动从这里移出。</p>
       </section>
       <section v-if="railIssues.length" class="rail-issues">
         <header class="rail-section-header"><span><i></i><b>异常状态</b></span><em>{{ railIssues.length }}</em></header>
-        <RouterLink v-for="issue in railIssues.slice(0,4)" :key="issue.id" class="rail-issue" :class="issue.tone" :to="issue.to"><i></i><span><b>{{ issue.title }}</b><small>{{ issue.detail }}</small></span><em>›</em></RouterLink>
-        <p v-if="railIssues.length > 4">还有 {{ railIssues.length - 4 }} 项，请进入对应页面查看。</p>
+        <div class="rail-issue-list"><RouterLink v-for="issue in railIssues.slice(0,2)" :key="issue.id" class="rail-issue" :class="issue.tone" :to="issue.to" :title="issue.detail"><i></i><span><b>{{ issue.title }}</b></span><em>›</em></RouterLink><p v-if="railIssues.length > 2"><b>另有 {{ railIssues.length - 2 }} 项</b><span> · 点击上方异常进入对应页面</span></p></div>
       </section>
       <section class="rail-recent">
-        <button class="rail-recent-toggle" :aria-expanded="recentActivitiesOpen" @click="recentActivitiesOpen=!recentActivitiesOpen"><span><i></i><b>最近活动</b></span><em>{{ recentActivitiesOpen ? '收起' : `${recentActivities.length} 条 · 展开` }}</em></button>
-        <div v-if="recentActivitiesOpen" class="rail-recent-list"><RouterLink v-for="activity in recentActivities" :key="activity.id" :to="activity.to"><i :class="activity.tone"></i><span><b>{{ activity.title }}</b><small>{{ activity.detail }} · {{ formatRailActivityTime(activity.at) }}</small></span></RouterLink><p v-if="!recentActivities.length">暂时没有新的运行、测试或完成记录。</p></div>
+        <button class="rail-recent-toggle" :aria-expanded="recentActivitiesOpen" @click="recentActivitiesOpen=!recentActivitiesOpen"><span><i></i><b>最近活动</b></span><em>{{ recentActivities.length }} 条 · {{ recentActivitiesOpen ? '收起' : '全部' }} ›</em></button>
+        <div class="rail-recent-list"><RouterLink v-for="activity in recentActivities.slice(0,recentActivitiesOpen ? 5 : 2)" :key="activity.id" :to="activity.to"><i :class="activity.tone"></i><span><b>{{ activity.title }}</b><small>{{ formatRailActivityTime(activity.at) }}</small></span></RouterLink><p v-if="!recentActivities.length">暂时没有新的运行、测试或完成记录。</p></div>
       </section>
     </aside>
     <TaskEditor :open="editorOpen" @close="editorOpen = false" @save="store.addTask" />

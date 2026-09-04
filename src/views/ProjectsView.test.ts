@@ -71,7 +71,10 @@ beforeEach(() => {
   backend.pushGitRepository.mockResolvedValue({ message: "推送完成。", output: "", commitHash: "abcdef123456" });
   backend.openRepositoryInEditor.mockResolvedValue(undefined);
 });
-afterEach(() => { wrapper?.unmount(); });
+afterEach(() => {
+  wrapper?.unmount();
+  vi.useRealTimers();
+});
 
 describe("项目资产列表操作", () => {
   it("移除 CSV，并按启动、Git、打开项目排列；打开编辑器不展开项目详情", async () => {
@@ -93,7 +96,7 @@ describe("项目资产列表操作", () => {
     expect(chevron.attributes("aria-hidden")).toBe("true");
     await wrapper.get(".branch-picker-trigger").trigger("click");
     await flushPromises();
-    expect(wrapper.get('[role="dialog"]').text()).toContain("工作区干净");
+    expect(wrapper.get('[role="dialog"]').text()).toContain("当前分支");
     expect(backend.switchGitRepositoryBranch).not.toHaveBeenCalled();
     expect(backend.fetchGitRepository).not.toHaveBeenCalled();
     expect(backend.getRepositoryAssetDetails).not.toHaveBeenCalled();
@@ -144,6 +147,29 @@ describe("项目资产列表操作", () => {
     await wrapper.get(".open-project").trigger("click");
     await flushPromises();
     expect(wrapper.get(".scan-message.error").text()).toContain("未找到 VS Code");
+  });
+
+  it("操作成功或失败提示显示 3 秒后自动关闭", async () => {
+    vi.useFakeTimers();
+    await renderView();
+
+    await wrapper.get(".open-project").trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".scan-message").text()).toContain("已请求使用 VS Code 打开");
+    vi.advanceTimersByTime(2999);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".scan-message").exists()).toBe(true);
+    vi.advanceTimersByTime(1);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".scan-message").exists()).toBe(false);
+
+    backend.openRepositoryInEditor.mockRejectedValueOnce(new Error("未找到 VS Code"));
+    await wrapper.get(".open-project").trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".scan-message.error").text()).toContain("未找到 VS Code");
+    vi.advanceTimersByTime(3000);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".scan-message").exists()).toBe(false);
   });
 
   it("项目抽屉不显示英文标识，并按指定顺序单行展示头部操作", async () => {

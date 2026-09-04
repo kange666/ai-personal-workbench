@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 const CREDENTIAL_SERVICE: &str = "ai-personal-workbench";
@@ -1233,7 +1233,9 @@ fn write_http_response(stream: &mut TcpStream, status: &str, body: &[u8]) -> std
         "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
-    stream.write_all(body)
+    stream.write_all(body)?;
+    stream.flush()?;
+    stream.shutdown(Shutdown::Write)
 }
 
 fn serve_export_request(state: &DatabaseState, mut stream: TcpStream) {

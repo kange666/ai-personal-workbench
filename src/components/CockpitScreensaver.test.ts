@@ -53,13 +53,15 @@ describe("CockpitScreensaver",()=>{
     expect(wrapper.find(".running-panel").text()).toContain("项目 · 个人工作台");
     expect(wrapper.find(".running-panel").text()).toContain("测试 · 接口回归");
     expect(wrapper.find(".running-panel").text()).toContain("自动处理 · TAPD #415");
+    expect(wrapper.get(".project-running-item").find("u").exists()).toBe(false);
+    expect(wrapper.findAll(".animated-running-item")).toHaveLength(2);
     expect(wrapper.text()).not.toContain("视频");
     expect(wrapper.find(".cockpit-analytics > .timeline-panel").exists()).toBe(true);
     expect(wrapper.find(".cockpit-screen > .timeline-panel").exists()).toBe(false);
     expect(wrapper.find(".cockpit-status").exists()).toBe(false);
     expect(wrapper.find(".cockpit-exit-hint").exists()).toBe(false);
     expect(wrapper.findAll(".cockpit-panel > header > h2")).toHaveLength(7);
-    expect(wrapper.find(".pulse-panel > header > .pulse-meta").text()).toContain("相对趋势 · 悬浮查看实际值");
+    expect(wrapper.find(".pulse-panel > header > .pulse-meta").text()).toContain("相对趋势");
     const pulseHits=wrapper.findAll(".pulse-hit");
     await pulseHits[0].trigger("mouseenter");
     expect(wrapper.get(".pulse-tooltip").classes()).toContain("edge-left");
@@ -85,7 +87,7 @@ describe("CockpitScreensaver",()=>{
     const wrapper=mount(CockpitScreensaver,{props:{quota:{available:false,freshness:"",selectionReason:""},notifications:[],runningProjects:[],testRuns:[],tapdJobs:[]}});await flushPromises();
     expect(wrapper.findAll(".running-panel>div>button")).toHaveLength(0);
     expect(wrapper.find(".running-panel").text()).toContain("系统空闲");
-    expect(wrapper.find(".running-panel").text()).not.toContain("暂无运行");
+    expect(wrapper.find(".running-panel").text()).toContain("暂无运行任务");
     wrapper.unmount();vi.useRealTimers();
   });
 

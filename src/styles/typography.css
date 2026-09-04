@@ -208,11 +208,11 @@
 :root:is([data-font-size="large"], [data-font-size="extra-large"]) .publish-button { margin-top: 31px; }
 :root:is([data-font-size="large"], [data-font-size="extra-large"]) .deployment-history-filters { flex-wrap: wrap; }
 :root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-docs-view > .page-header { flex: 0 0 auto; }
-:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-docs-layout { grid-template-columns: minmax(180px, .65fr) minmax(260px, 1fr) minmax(320px, 1.35fr); overflow-x: auto; }
-:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-docs-layout.source-collapsed { grid-template-columns: 0 minmax(260px, 1fr) minmax(320px, 1.6fr); }
-:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.api-source-panel, .api-endpoint-panel, .api-detail-panel) > header { flex-shrink: 0; flex-wrap: wrap; }
+/* 接口文档现为“接口树 + 详情”两栏，大字号下也必须保持两栏，避免旧三栏规则留下空白列。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-docs-layout { grid-template-columns: minmax(270px, 300px) minmax(0, 1fr); overflow-x: hidden; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.api-endpoint-panel, .api-detail-panel) > header { flex-shrink: 0; flex-wrap: wrap; }
 :root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-detail-panel > header > div { min-width: 0; max-width: 100%; flex-wrap: wrap; }
-:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.api-detail-panel h2, .api-path-copy code, .api-source-list b) { overflow-wrap: anywhere; white-space: normal; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.api-detail-panel h2, .api-path-copy code) { overflow-wrap: anywhere; white-space: normal; }
 :root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-path-copy { min-width: 0; text-align: left; }
 :root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-path-copy span { flex-shrink: 0; }
 :root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-channel-switch { height: auto; min-height: 72px; }

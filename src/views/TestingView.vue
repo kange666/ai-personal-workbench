@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { cancelTestRun, getTestCaseGeneration, getTestRun, isTauriRuntime, listFeatureParity, listTestMenus, listTestProjects, listTestRuns, listTestScenarios, listTestSuites, listToolchains, listWeeklyAudits, preflightTest, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestCaseGeneration, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestCaseGenerationJob, type TestMenu, type TestPreflight, type TestProject, type TestRecommendation, type TestRun, type TestScenario, type TestSuite, type TestMode, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
+import { cancelTestRun, getTestCaseGeneration, getTestRun, isTauriRuntime, listFeatureParity, listTestCaseGenerations, listTestMenus, listTestProjects, listTestRuns, listTestScenarios, listTestSuites, listToolchains, listWeeklyAudits, preflightTest, readTestReport, recommendTestsFromGit, runWeeklyAudit, saveFeatureParityReview, scanToolchains, startTestCaseGeneration, startTestRun, syncFeatureParity, type FeatureParity, type RegressionEvidence, type StartTestOptions, type TestCaseGenerationJob, type TestMenu, type TestPreflight, type TestProject, type TestRecommendation, type TestRun, type TestScenario, type TestSuite, type TestMode, type ToolchainInventory, type WeeklyAudit } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
 import { readTestingMenuCache, writeTestingMenuCache } from "../utils/testingCenterCache";
 import TestReportDialog from "../components/TestReportDialog.vue";
@@ -72,6 +72,8 @@ const selectedScenarios = ref<string[]>([]);
 const testSuites = ref<TestSuite[]>([]);
 const selectedTestSuiteId = ref<TestSuite["id"]>("common-real");
 const caseGeneration = ref<TestCaseGenerationJob | null>(null);
+const monitoredGenerationIds = new Set<string>();
+let testingViewMounted = true;
 const preflight = ref<TestPreflight | null>(null);
 const scenarioLoading = ref(false);
 const selectedRecommendations = ref<string[]>([]);
@@ -112,7 +114,12 @@ const stats = computed(() => ({
 const selectedProject = computed(() => projects.value.find((item) => item.path === selectedProjectPath.value));
 const selectedTestSuite = computed(() => testSuites.value.find((item) => item.id === selectedTestSuiteId.value));
 const dedicatedTestSuite = computed(() => testSuites.value.find((item) => item.kind === "dedicated"));
-const generatingDedicatedCase = computed(() => ["queued", "running"].includes(caseGeneration.value?.status || ""));
+const currentCaseGeneration = computed(() => configuring.value && caseGeneration.value
+  && caseGeneration.value.menuId === configuring.value.id
+  && normalizedProjectPath(caseGeneration.value.projectPath) === normalizedProjectPath(selectedProjectPath.value)
+  ? caseGeneration.value
+  : null);
+const generatingDedicatedCase = computed(() => ["queued", "running"].includes(currentCaseGeneration.value?.status || ""));
 const parityDomains = computed(() => ["全部领域", ...new Set(parities.value.map(item=>item.domain).filter(Boolean))]);
 const parityStats = computed(() => ({
   total: parities.value.length,
@@ -206,33 +213,66 @@ async function openConfig(menu: TestMenu) {
   createCaseFile.value = false;
   selectedTestSuiteId.value = "common-real";
   testSuites.value = [];
-  caseGeneration.value = null;
+  if (caseGeneration.value?.menuId !== menu.id
+    || normalizedProjectPath(caseGeneration.value.projectPath) !== normalizedProjectPath(selectedProjectPath.value)) caseGeneration.value = null;
   const values = availableModes(menu);
   mode.value = menu.hasCaseFile && values.includes("mock") ? "mock" : "source-style";
   account.value = ""; token.value = ""; useEnvironmentToken.value = true; confirmedRealWrite.value = false; error.value = ""; message.value = "";
+  const generationLookup = isTauriRuntime() ? listTestCaseGenerations() : Promise.resolve([] as TestCaseGenerationJob[]);
   await loadScenarios();
+  try {
+    const matching = (await generationLookup).find(job => job.menuId === menu.id
+      && normalizedProjectPath(job.projectPath) === normalizedProjectPath(selectedProjectPath.value));
+    if (configuring.value?.id === menu.id && matching) {
+      caseGeneration.value = matching;
+      if (["queued", "running"].includes(matching.status)) void monitorDedicatedCase(matching);
+    }
+  } catch { /* 生成状态读取失败不影响测试配置。 */ }
+}
+
+async function monitorDedicatedCase(initialJob: TestCaseGenerationJob) {
+  if (monitoredGenerationIds.has(initialJob.id)) return;
+  monitoredGenerationIds.add(initialJob.id);
+  let latest = initialJob;
+  try {
+    while (testingViewMounted && ["queued", "running"].includes(latest.status)) {
+      await wait(650);
+      if (!testingViewMounted) return;
+      latest = await getTestCaseGeneration(initialJob.id);
+      if (caseGeneration.value?.id === latest.id) caseGeneration.value = latest;
+    }
+    if (!testingViewMounted) return;
+    if (latest.status === "completed") {
+      message.value = `${latest.menuName} 专属用例已在后台生成并通过校验，可以重新打开测试配置使用。`;
+      if (configuring.value?.id === latest.menuId
+        && normalizedProjectPath(latest.projectPath) === normalizedProjectPath(selectedProjectPath.value)) {
+        selectedTestSuiteId.value = "dedicated-real";
+        await loadScenarios();
+      }
+    } else {
+      error.value = `${latest.menuName} 专属用例生成失败：${latest.errorMessage || "请检查 Codex CLI 状态。"}`;
+    }
+  } catch (cause) {
+    if (testingViewMounted) error.value = `读取专属用例生成进度失败：${String(cause)}`;
+  } finally {
+    monitoredGenerationIds.delete(initialJob.id);
+    window.dispatchEvent(new CustomEvent("workbench-active-operations-changed"));
+  }
 }
 
 async function generateDedicatedCase() {
   if (!configuring.value || generatingDedicatedCase.value || loading.value || !isTauriRuntime()) return;
   error.value = ""; message.value = "";
   const originalMenuId = configuring.value.id;
-  const originalRoute = configuring.value.route;
+  const originalMenuName = configuring.value.name;
+  const projectPath = selectedProjectPath.value;
+  configuring.value = null;
+  message.value = `${originalMenuName} 专属用例正在转入后台生成，右侧“正在执行”会显示实时进度。`;
   try {
-    caseGeneration.value = await startTestCaseGeneration(selectedProjectPath.value, originalMenuId);
-    while (caseGeneration.value && ["queued", "running"].includes(caseGeneration.value.status)) {
-      await wait(650);
-      caseGeneration.value = await getTestCaseGeneration(caseGeneration.value.id);
-    }
-    if (!caseGeneration.value || caseGeneration.value.status !== "completed") {
-      throw new Error(caseGeneration.value?.errorMessage || "专属用例生成失败，请查看 Codex CLI 状态。");
-    }
-    await refreshSelectedProject();
-    const refreshed = menus.value.find(item => item.id === originalMenuId || item.route === originalRoute);
-    if (refreshed) configuring.value = refreshed;
-    selectedTestSuiteId.value = "dedicated-real";
-    await loadScenarios();
-    message.value = `${caseGeneration.value.menuName} 专属用例已生成并通过校验，已自动切换到专属场景。`;
+    const started = await startTestCaseGeneration(projectPath, originalMenuId);
+    caseGeneration.value = started;
+    window.dispatchEvent(new CustomEvent("workbench-active-operations-changed"));
+    void monitorDedicatedCase(started);
   } catch (cause) {
     error.value = String(cause);
   }
@@ -480,11 +520,12 @@ onMounted(async () => {
   } catch (cause) { error.value = String(cause); }
   finally { loading.value = false; }
 });
+onBeforeUnmount(() => { testingViewMounted = false; });
 </script>
 
 <template>
   <div class="view testing-view">
-    <header class="page-header testing-page-header"><div><div class="testing-title-row"><h1>测试中心</h1><select v-model="selectedProjectPath" :disabled="loading || projectLoading || projectRefreshing" @change="refreshSelectedProject"><option v-if="!projects.length" value="">项目资产中暂无项目</option><option v-for="item in projects" :key="item.path" :value="item.path">{{ item.name }} · {{ item.projectKind }}</option></select></div><p>选择项目资产中的本地项目，分层记录静态、接口与浏览器测试证据</p></div><div><button class="button secondary" :disabled="loading || projectLoading || projectRefreshing" @click="manualRefresh">↻ 刷新项目、矩阵与报告</button></div></header>
+    <header class="page-header testing-page-header"><div><div class="testing-title-row"><h1>测试中心</h1><select v-model="selectedProjectPath" :disabled="loading || projectLoading || projectRefreshing" @change="refreshSelectedProject"><option v-if="!projects.length" value="">项目资产中暂无项目</option><option v-for="item in projects" :key="item.path" :value="item.path">{{ item.name }} · {{ item.projectKind }}</option></select></div><p>按项目记录静态、接口与浏览器测试证据</p></div><div><button class="button secondary" :disabled="loading || projectLoading || projectRefreshing" @click="manualRefresh">↻ 刷新项目、矩阵与报告</button></div></header>
     <div v-if="projectLoading" class="project-switch-loading" role="status" aria-live="polite">
       <div class="project-switch-loading-card">
         <i class="project-switch-spinner"></i>
@@ -496,7 +537,7 @@ onMounted(async () => {
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
     <div class="testing-tabs"><button :class="{active:activeSection==='menus'}" @click="activeSection='menus'">功能 / 页面测试</button><button :class="{active:activeSection==='history'}" @click="activeSection='history'">测试历史</button><button :class="{active:activeSection==='parity'}" @click="activeSection='parity'">PC / APP 对照矩阵</button><button :class="{active:activeSection==='audit'}" @click="activeSection='audit'">系统周检与工具链</button></div>
     <section v-if="activeSection==='menus'" class="metric-grid testing-metrics testing-metrics-v2"><article class="clickable-card" @click="statusFilter='all'"><span>功能 / 页面</span><b>{{ stats.total }}</b><p>点击查看全部</p></article><article class="clickable-card" @click="statusFilter='tested'"><span>已有报告</span><b>{{ stats.tested }}</b><p>点击筛选已测试</p></article><article class="clickable-card" @click="statusFilter='passed'"><span>最近通过</span><b>{{ stats.passed }}</b><p class="success-text">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='failed'"><span>最近未通过</span><b>{{ stats.failed }}</b><p :class="stats.failed ? 'warning-text' : ''">● 点击筛选</p></article><article class="clickable-card" @click="statusFilter='blocked'"><span>环境 / 执行问题</span><b>{{ stats.blocked }}</b><p :class="stats.blocked ? 'warning-text' : ''">● 点击筛选</p></article></section>
-    <section v-if="activeSection==='menus' && recommendations.length" class="panel test-recommendations"><header><div><b>根据 Git 变更推荐测试</b><p>只推荐与当前项目页面源码直接关联的测试；可勾选多项顺序执行。</p></div><div class="recommendation-actions"><span>{{ recommendations.length }} 项</span><button class="button primary small" :disabled="batchRunning || !selectedRecommendations.length" @click="runRecommendedBatch">{{ batchRunning ? '执行中…' : `执行已选 ${selectedRecommendations.length} 项` }}</button></div></header><div><article v-for="item in recommendations.slice(0,8)" :key="item.menuId"><input v-model="selectedRecommendations" type="checkbox" :value="item.menuId"><span class="project-badge">{{ item.project }}</span><div><b>{{ item.menuName }}</b><small>{{ item.reason }} · {{ item.changedFiles.slice(0,2).join('、') }}</small></div><button class="button secondary small" @click="openRecommendation(item)">配置</button></article></div></section>
+    <section v-if="activeSection==='menus' && recommendations.length" class="panel test-recommendations"><header><div><b title="只推荐与当前项目页面源码直接关联的测试，可多选顺序执行">根据 Git 变更推荐测试</b></div><div class="recommendation-actions"><span>{{ recommendations.length }} 项</span><button class="button primary small" :disabled="batchRunning || !selectedRecommendations.length" @click="runRecommendedBatch">{{ batchRunning ? '执行中…' : `执行已选 ${selectedRecommendations.length} 项` }}</button></div></header><div><article v-for="item in recommendations.slice(0,8)" :key="item.menuId"><input v-model="selectedRecommendations" type="checkbox" :value="item.menuId"><span class="project-badge">{{ item.project }}</span><div><b>{{ item.menuName }}</b><small>{{ item.reason }} · {{ item.changedFiles.slice(0,2).join('、') }}</small></div><button class="button secondary small" @click="openRecommendation(item)">配置</button></article></div></section>
     <div v-if="activeSection==='menus' && recommendationsLoading" class="deferred-inline-loading" role="status"><i></i>测试列表已可用，正在后台分析 Git 变更推荐…</div>
     <section v-if="activeSection==='menus'" class="panel testing-panel">
       <div class="testing-toolbar testing-toolbar-v2"><label>⌕<input v-model="query" placeholder="搜索功能名称、路由或源码路径"></label><select v-model="statusFilter"><option value="all">全部状态</option><option value="tested">已测试</option><option value="untested">未测试</option><option value="passed">最近通过</option><option value="failed">最近未通过</option><option value="blocked">环境 / 执行问题</option></select><select v-model="typeFilter"><option value="all">全部能力</option><option value="functional">已有功能用例</option><option value="style">页面 / 样式检查</option></select></div>
@@ -505,7 +546,7 @@ onMounted(async () => {
     </section>
 
     <section v-else-if="activeSection==='history'" class="panel test-history-panel">
-      <header><div><small>REGRESSION HISTORY</small><h2>测试历史与回归</h2><p>同一项目的每次执行独立保留；环境阻塞与业务失败分开显示。</p></div><span>{{ runs.length }} 条记录</span></header>
+      <header><div><small>REGRESSION HISTORY</small><h2>测试历史与回归</h2><p>环境阻塞与测试失败分开记录</p></div><span>{{ runs.length }} 条记录</span></header>
       <div class="history-table-wrap"><table><thead><tr><th>时间</th><th>功能 / 页面</th><th>测试类型</th><th>结果</th><th>场景</th><th>耗时</th><th></th></tr></thead><tbody><tr v-for="run in runs" :key="run.id"><td>{{ new Date(run.startedAt).toLocaleString('zh-CN') }}</td><td><b>{{ run.menuName }}</b><small>{{ run.project }}</small></td><td>{{ modeLabel(run.mode) }}</td><td><span class="test-status" :class="run.status">{{ run.status==='passed'?'通过':run.status==='failed'?'未通过':run.status==='blocked'?'环境阻塞':run.status==='error'?'执行异常':run.status==='cancelled'?'已取消':'执行中' }}</span></td><td>{{ run.passedCount }} / {{ run.totalCount }} 通过</td><td>{{ run.durationMs < 1000 ? `${run.durationMs} ms` : `${(run.durationMs/1000).toFixed(1)} 秒` }}</td><td><button class="text-button" @click="openRun(run)">查看报告</button></td></tr></tbody></table><div v-if="!runs.length" class="empty-state"><b>当前项目还没有测试记录</b><p>运行一次页面测试后，历史结果会显示在这里。</p></div></div>
     </section>
 
@@ -524,12 +565,12 @@ onMounted(async () => {
 
     <section v-else class="audit-layout lazy-data-panel">
       <div v-if="auditLoading" class="deferred-panel-loading" role="status"><i></i><b>正在读取周检和工具链</b><span>这些检查只在打开当前标签时加载。</span></div>
-      <article class="panel weekly-audit-panel"><header><div><small>WEEKLY ACCEPTANCE</small><h2>每周整体检查</h2><p>每周一 09:00 后自动执行；程序未运行时，下次启动自动补跑。</p></div><button class="button primary" :disabled="loading" @click="runAudit">{{ loading?'检查中…':'立即重新检查' }}</button></header><template v-if="audits[0]"><div class="audit-summary"><b :class="audits[0].status">{{ audits[0].status==='passed'?'全部通过':audits[0].status==='attention'?'有待确认项':'存在失败项' }}</b><span>{{ audits[0].weekStart }} 开始的一周</span><em v-if="audits[0].catchUpRun">漏跑补偿</em></div><div class="audit-checks"><article v-for="item in audits[0].checks" :key="item.checkType" :class="item.status"><i>{{ item.status==='passed'?'✓':item.status==='attention'?'!':'×' }}</i><div><b>{{ item.target }}</b><p>{{ item.summary }}</p></div></article></div><p class="audit-boundary">{{ audits[0].summary }}</p></template><div v-else class="empty-state"><b>本周周检尚未执行</b><p>到计划时间会自动运行，也可以现在手工执行。</p></div></article>
-      <article class="panel toolchain-panel"><header><div><small>TOOLCHAIN</small><h2>工具链冲突</h2><p>只读检查 PATH 顺序和版本，不自动卸载或改环境变量。</p></div><button class="button secondary" :disabled="loading" @click="rescanToolchains">重新扫描</button></header><div class="tool-overview"><b>{{ toolchains.installations.length }}</b><span>检测到的入口</span><b :class="{warning:toolchains.conflicts.length}">{{ toolchains.conflicts.length }}</b><span>待人工确认</span></div><div v-if="toolchains.conflicts.length" class="conflict-list"><article v-for="item in toolchains.conflicts" :key="item.id"><header><b>{{ item.toolName }}</b><span>{{ item.conflictType==='multiple-paths'?'重复入口':'版本不一致' }}</span></header><p>{{ item.summary }}</p><small>{{ item.recommendedAction }}</small></article></div><div v-else class="empty-state compact"><b>未发现冲突</b><p>当前 PATH 中的工具入口没有明显重复或版本差异。</p></div><details class="installation-details"><summary>查看全部工具入口</summary><div v-for="item in toolchains.installations" :key="item.id"><b>{{ item.toolName }}</b><code>{{ item.version }}</code><span>#{{ item.pathPriority+1 }} · {{ item.source }}</span><small>{{ item.executablePath }}</small></div></details></article>
+      <article class="panel weekly-audit-panel"><header><div><small>WEEKLY ACCEPTANCE</small><h2>每周整体检查</h2><p>每周一 09:00 自动执行，错过时下次启动补跑</p></div><button class="button primary" :disabled="loading" @click="runAudit">{{ loading?'检查中…':'立即重新检查' }}</button></header><template v-if="audits[0]"><div class="audit-summary"><b :class="audits[0].status">{{ audits[0].status==='passed'?'全部通过':audits[0].status==='attention'?'有待确认项':'存在失败项' }}</b><span>{{ audits[0].weekStart }} 开始的一周</span><em v-if="audits[0].catchUpRun">漏跑补偿</em></div><div class="audit-checks"><article v-for="item in audits[0].checks" :key="item.checkType" :class="item.status"><i>{{ item.status==='passed'?'✓':item.status==='attention'?'!':'×' }}</i><div><b>{{ item.target }}</b><p>{{ item.summary }}</p></div></article></div><p class="audit-boundary">{{ audits[0].summary }}</p></template><div v-else class="empty-state"><b>本周周检尚未执行</b><p>到计划时间会自动运行，也可以现在手工执行。</p></div></article>
+      <article class="panel toolchain-panel"><header><div><small>TOOLCHAIN</small><h2>工具链冲突</h2><p>仅检查 PATH，不修改环境变量</p></div><button class="button secondary" :disabled="loading" @click="rescanToolchains">重新扫描</button></header><div class="tool-overview"><b>{{ toolchains.installations.length }}</b><span>检测到的入口</span><b :class="{warning:toolchains.conflicts.length}">{{ toolchains.conflicts.length }}</b><span>待人工确认</span></div><div v-if="toolchains.conflicts.length" class="conflict-list"><article v-for="item in toolchains.conflicts" :key="item.id"><header><b>{{ item.toolName }}</b><span>{{ item.conflictType==='multiple-paths'?'重复入口':'版本不一致' }}</span></header><p>{{ item.summary }}</p><small>{{ item.recommendedAction }}</small></article></div><div v-else class="empty-state compact"><b>未发现冲突</b><p>当前 PATH 中的工具入口没有明显重复或版本差异。</p></div><details class="installation-details"><summary>查看全部工具入口</summary><div v-for="item in toolchains.installations" :key="item.id"><b>{{ item.toolName }}</b><code>{{ item.version }}</code><span>#{{ item.pathPriority+1 }} · {{ item.source }}</span><small>{{ item.executablePath }}</small></div></details></article>
     </section>
 
     <div v-if="selectedParity" class="activity-backdrop" @click.self="selectedParity=null"><section class="panel parity-detail">
-      <header><div><small>{{ selectedParity.domain }} · PARITY REVIEW</small><h2>{{ selectedParity.featureName }}</h2><p>人工确认只记录你的判断，不会修改 client 或 APP 项目。</p></div><button class="icon-button" @click="selectedParity=null">×</button></header>
+      <header><div><small>{{ selectedParity.domain }} · PARITY REVIEW</small><h2>{{ selectedParity.featureName }}</h2><p>仅记录核对结论，不修改项目</p></div><button class="icon-button" @click="selectedParity=null">×</button></header>
       <div class="parity-paths"><article><b>PC 页面 / 配置</b><code>{{ selectedParity.pcPage || (selectedParity.parityStatus==='app-only'?'未找到对应功能':'菜单或操作配置，暂无独立页面') }}</code></article><article><b>APP 页面 / 配置</b><code>{{ selectedParity.appPage || (selectedParity.parityStatus==='pc-only'?'未找到对应功能':'菜单或操作配置，暂无独立页面') }}</code></article></div>
       <h3>匹配依据</h3><div class="parity-source-evidence"><code v-for="item in selectedParity.evidence" :key="item">{{ item }}</code></div>
       <h3>分层验证证据</h3><div class="evidence-list"><article v-for="item in selectedParity.regression" :key="`${item.platform}-${item.verificationType}`"><span class="project-badge" :class="item.platform.toLowerCase()">{{ item.platform }}</span><b>{{ item.verificationType==='static'?'静态检查':item.verificationType==='api'?'接口测试':'浏览器测试' }}</b><span class="evidence-status" :class="item.status">{{ evidenceLabel(item.status) }}</span><p>{{ item.resultSummary }}</p><code>{{ item.sourcePath || '暂无执行来源' }}</code></article></div>
@@ -537,30 +578,30 @@ onMounted(async () => {
       <footer class="parity-review"><label>核对结论<select v-model="selectedParity.parityStatus"><option value="static-aligned">已匹配，待实际测试</option><option value="confirmed">人工确认一致</option><option value="different">存在差异</option><option value="pc-only">仅 PC 存在</option><option value="app-only">仅 APP 存在</option><option value="pending">待核对</option></select></label><label class="check-row"><input v-model="selectedParity.intentionalDifference" type="checkbox">差异属于有意设计</label><button class="button primary" :disabled="loading" @click="saveParity(selectedParity)">保存人工核对</button></footer>
     </section></div>
 
-    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && !generatingDedicatedCase && (configuring = null)">
+    <div v-if="configuring" class="activity-backdrop test-dialog-backdrop" @click.self="!loading && (configuring = null)">
       <section class="panel test-config-dialog test-config-v2">
-        <header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading || generatingDedicatedCase" title="关闭弹框，测试继续在后台执行" @click="configuring = null">×</button></header>
-        <div class="test-config-body" :class="{locked:testRunning || generatingDedicatedCase}">
-          <label v-if="!configuring.hasCaseFile && mode !== 'real'" class="case-create-option"><span><input v-model="createCaseFile" type="checkbox"><b>添加测试配置</b></span><small>根据当前页面源码生成 JSON 配置；这不是 Playwright 专属脚本。真实接口专属脚本请使用下方 Codex CLI 按钮生成。</small></label>
+        <header><div><h2>测试 {{ configuring.name }}</h2><p>{{ configuring.project }} · {{ configuring.route }}</p></div><button class="icon-button" :disabled="loading" title="关闭弹框，后台任务会继续执行" @click="configuring = null">×</button></header>
+        <div class="test-config-body" :class="{locked:testRunning}">
+          <label v-if="!configuring.hasCaseFile && mode !== 'real'" class="case-create-option"><span><input v-model="createCaseFile" type="checkbox"><b>添加测试配置</b></span><small>生成页面源码检查配置；真实接口脚本请使用 Codex CLI</small></label>
           <label>测试类型<select v-model="mode"><option v-for="value in availableModes(configuring)" :key="value" :value="value">{{ modeLabel(value) }}</option></select><small v-if="!configuring.hasCaseFile && !createCaseFile && mode !== 'real'">当前没有功能用例，可执行页面源码检查，或添加测试配置后使用项目已有运行器。</small></label>
           <section v-if="mode === 'real'" class="test-suite-selector">
             <header><div><b>真实接口测试用例</b><small>公共用例始终可用；专属用例只在 Codex 生成并校验成功后显示。</small></div></header>
             <label v-for="suite in testSuites" :key="suite.id" :class="{active:selectedTestSuiteId===suite.id}"><input v-model="selectedTestSuiteId" type="radio" :value="suite.id" @change="loadScenarios"><span><b>{{ suite.name }}<em>{{ suite.kind === 'common' ? '通用只读' : '业务专属' }}</em></b><small>{{ suite.description }}</small></span></label>
             <div v-if="!dedicatedTestSuite && !generatingDedicatedCase" class="dedicated-case-empty"><div><b>还没有 {{ configuring.name }} 专属用例</b><small>点击后由 Codex CLI 阅读当前页面源码和接口，只生成该业务的 Playwright 脚本；通过校验后才会加入列表。</small></div><button class="button secondary" type="button" @click="generateDedicatedCase">用 Codex CLI 生成专属用例</button></div>
           </section>
-          <section v-if="caseGeneration && generatingDedicatedCase" class="case-generation-progress"><header><b><i></i>正在生成 {{ caseGeneration.menuName }} 专属用例</b><span>{{ caseGeneration.progressPercent }}%</span></header><div class="generation-progress-track"><i :style="{width:`${caseGeneration.progressPercent}%`}"></i></div><p>{{ caseGeneration.progressMessage }}</p><small>正在后台调用已登录的 Codex CLI；生成后还会执行 Playwright 场景收集校验。</small></section>
-          <section v-else-if="caseGeneration?.status === 'completed'" class="case-generation-progress completed"><header><b>✓ 专属用例已生成并通过校验</b><span>100%</span></header><p>{{ caseGeneration.generatedSpecPath }}</p></section>
-          <section class="scenario-selector"><header><div><b>测试场景</b><small>已按当前功能的测试配置和业务能力筛选，默认全选。</small></div><label><input type="checkbox" :checked="selectedScenarios.length === scenarios.length && scenarios.length > 0" @change="onToggleAllScenarios">全选</label></header><div v-if="scenarioLoading" class="scenario-empty">正在读取项目测试场景…</div><label v-for="item in scenarios" v-else :key="item.id"><input v-model="selectedScenarios" type="checkbox" :value="item.title"><span><b>{{ item.title }}</b><small>{{ item.description }}</small></span></label><div v-if="!scenarioLoading && !scenarios.length" class="scenario-empty">当前测试类型没有可识别的场景，请检查项目运行器。</div></section>
+          <section v-if="currentCaseGeneration && generatingDedicatedCase" class="case-generation-progress"><header><b><i></i>正在后台生成 {{ currentCaseGeneration.menuName }} 专属用例</b><span>{{ currentCaseGeneration.progressPercent }}%</span></header><div class="generation-progress-track"><i :style="{width:`${currentCaseGeneration.progressPercent}%`}"></i></div><p>{{ currentCaseGeneration.progressMessage }}</p><small>生成后执行 Playwright 场景收集校验</small></section>
+          <section v-else-if="currentCaseGeneration?.status === 'completed'" class="case-generation-progress completed"><header><b>✓ 专属用例已生成并通过校验</b><span>100%</span></header><p>{{ currentCaseGeneration.generatedSpecPath }}</p></section>
+          <section class="scenario-selector"><header><div><b>测试场景</b><small></small></div><label><input type="checkbox" :checked="selectedScenarios.length === scenarios.length && scenarios.length > 0" @change="onToggleAllScenarios">全选</label></header><div v-if="scenarioLoading" class="scenario-empty">正在读取项目测试场景…</div><label v-for="item in scenarios" v-else :key="item.id"><input v-model="selectedScenarios" type="checkbox" :value="item.title"><span><b>{{ item.title }}</b><small>{{ item.description }}</small></span></label><div v-if="!scenarioLoading && !scenarios.length" class="scenario-empty">当前测试类型没有可识别的场景，请检查项目运行器。</div></section>
           <div v-if="mode === 'real'" class="real-test-warning"><b>{{ selectedTestSuite?.readOnly ? '公共用例为只读测试' : '专属真实接口写入提醒' }}</b><p>{{ selectedTestSuite?.readOnly ? '只检查登录态、真实接口响应、查询、重置和页面稳定性，不提交新增、修改或删除请求。' : '专属用例可能创建、修改或删除 E2E 前缀测试数据，并在结束时尝试清理。只有确认测试环境允许写入时才执行。' }}</p></div>
           <label v-if="mode === 'real' && !selectedTestSuite?.readOnly" class="check-row real-confirm"><input v-model="confirmedRealWrite" type="checkbox">我确认当前是允许写入和清理测试数据的环境</label>
           <label v-if="mode === 'real'" class="check-row"><input v-model="useEnvironmentToken" type="checkbox">读取 Windows 用户环境变量 HLZT_TOKEN</label>
           <label v-if="mode === 'real' && !useEnvironmentToken">临时 Token<input v-model="token" type="password" autocomplete="off" placeholder="只传给本次测试子进程，不保存"></label>
           <label v-if="mode === 'real'">测试账号（可选）<input v-model="account" autocomplete="off" placeholder="仅传给支持 E2E_TEST_ACCOUNT 的已有用例"><small>账号和 Token 都不会写入数据库或报告。</small></label>
           <div v-if="preflight" class="preflight-list" :class="{ready:preflight.ready}"><b>{{ preflight.ready ? '执行前检查通过' : '执行前检查未通过' }}</b><ul><li v-for="item in preflight.checks" :key="item.name" :class="{passed:item.passed}"><i>{{ item.passed?'✓':'×' }}</i><span>{{ item.name }}<small>{{ item.detail }}</small></span></li></ul></div>
-          <section v-if="testRunning" class="test-run-progress"><header><b>{{ cancellingTest ? '正在取消测试' : '测试正在后台执行' }}</b><span>运行编号 {{ activeRunningRun?.id.slice(0,8) }}</span></header><div><i class="done">✓</i><span><b>执行前检查</b><small>项目、运行器、场景和凭据检查已完成</small></span></div><div><i class="active">2</i><span><b>{{ cancellingTest ? '停止测试进程' : '执行所选场景' }}</b><small>{{ cancellingTest ? '正在终止浏览器及其子进程' : `正在运行 ${activeRunningRun?.totalCount || selectedScenarios.length} 个场景` }}</small></span></div><div><i>3</i><span><b>整理测试报告</b><small>执行结束后自动汇总问题、截图和修复入口</small></span></div></section>
+          <section v-if="testRunning" class="test-run-progress"><header><b>{{ cancellingTest ? '正在取消测试' : '测试正在后台执行' }}</b><span>运行编号 {{ activeRunningRun?.id.slice(0,8) }}</span></header><div><i class="done">✓</i><span><b>执行前检查</b></span></div><div><i class="active">2</i><span><b>{{ cancellingTest ? '停止测试进程' : '执行所选场景' }}</b></span></div><div><i>3</i><span><b>整理测试报告</b></span></div></section>
           <div class="reuse-source"><b>测试来源</b><code v-if="mode === 'real' && selectedTestSuite?.specPath">{{ selectedTestSuite.specPath }}</code><code v-else-if="configuring.caseFilePath">{{ configuring.caseFilePath }}</code><code v-else>{{ configuring.sourcePath }}（尚未添加测试配置）</code></div>
         </div>
-        <footer><span>{{ generatingDedicatedCase ? 'Codex 生成和校验完成后会自动选择专属用例。' : testRunning ? '运行期间可离开页面，但请不要关闭桌面程序。' : '测试结果保存在工作台本地数据库；真实凭据不会保存。' }}</span><button v-if="testRunning" class="button secondary" :disabled="cancellingTest" @click="cancelCurrentTest">{{ cancellingTest ? '正在取消…' : '停止本次测试' }}</button><button v-else class="button secondary" :disabled="loading || generatingDedicatedCase" @click="configuring = null">取消</button><button v-if="!testRunning" class="button primary" :disabled="loading || generatingDedicatedCase || scenarioLoading || !selectedScenarios.length || (mode==='real' && !selectedTestSuite?.readOnly && !confirmedRealWrite)" @click="runTest">开始测试 {{ selectedScenarios.length }} 个场景</button></footer>
+        <footer><span>{{ testRunning ? '请勿关闭桌面程序' : '真实凭据不会保存' }}</span><button v-if="testRunning" class="button secondary" :disabled="cancellingTest" @click="cancelCurrentTest">{{ cancellingTest ? '正在取消…' : '停止本次测试' }}</button><button v-else class="button secondary" :disabled="loading" @click="configuring = null">取消</button><button v-if="!testRunning" class="button primary" :disabled="loading || scenarioLoading || !selectedScenarios.length || (mode==='real' && !selectedTestSuite?.readOnly && !confirmedRealWrite)" @click="runTest">开始测试 {{ selectedScenarios.length }} 个场景</button></footer>
       </section>
     </div>
 

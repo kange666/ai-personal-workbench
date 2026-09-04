@@ -321,10 +321,10 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
 
 <template>
   <div class="view">
-    <header class="page-header"><div><h1>设置</h1><p>管理界面主题、本地数据、轻量工时和外部服务</p></div></header>
+    <header class="page-header"><div><h1>设置</h1></div></header>
     <div v-if="message || error" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
     <section class="settings-section">
-      <header class="settings-section-title"><div><h2>常用设置</h2><p>调整显示、工时、会员功能与本地数据。</p></div></header>
+      <header class="settings-section-title"><div><h2>常用设置</h2></div></header>
       <div class="settings-overview-grid">
         <article class="panel settings-card compact-setting-card appearance-settings">
           <h2>外观</h2>
@@ -361,7 +361,7 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
               <button class="button primary" :disabled="loading" @click="saveWorkGap">保存</button>
             </div>
           </div>
-          <p class="worktime-setting-hint">间隔内的活动合为同一工作区间，默认 45 分钟。估算非考勤，可在工作记录中修正。</p>
+          <p class="worktime-setting-hint">{{ workGapMinutes }} 分钟内活动合并；可在工作记录中修正</p>
           <fieldset :key="fontSizeRevision" class="font-size-setting">
             <legend>页面字号</legend>
             <div class="font-size-options">
@@ -370,17 +370,17 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
                 <span>{{ option.label }}</span>
               </label>
             </div>
-            <small>中为默认 · 全部页面即时生效 · 最小 10px</small>
+            <small>中为默认</small>
           </fieldset>
         </article>
         <article class="panel settings-card vip-settings">
-          <div><h2>VIP 功能</h2><p>启用后开放内容工坊和视频中心，状态仅保存在本机。</p></div>
+          <div><h2>VIP 功能</h2><p>启用内容工坊和视频中心</p></div>
           <span class="settings-status" :class="{ ready:vipStatus.active }">{{ vipStatus.active ? '已启用' : '未启用' }}</span>
           <label v-if="!vipStatus.active">VIP 码<input v-model="vipCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="请输入 4 位 VIP 码" @keyup.enter="enableVip"></label>
           <div class="settings-actions"><button v-if="!vipStatus.active" class="button primary" :disabled="loading || vipCode.length !== 4" @click="enableVip">启用 VIP</button><button v-else class="button secondary" :disabled="loading" @click="disableVip">关闭 VIP</button></div>
         </article>
         <article class="panel settings-card update-settings">
-          <div><h2>版本更新</h2><p>自动下载并验证官方签名；安装前先备份本地数据，完成后重新启动。</p></div>
+          <div><h2>版本更新</h2><p>验证签名后安装；安装前自动备份</p></div>
           <span class="settings-status" :class="{ ready:!updateStatus.updateAvailable, warning:updateStatus.updateAvailable }">当前 V{{ updateStatus.currentVersion || '—' }}</span>
           <div class="update-summary"><b>{{ updateStatus.message }}</b><small v-if="updateStatus.latestVersion">线上版本 {{ updateStatus.latestVersion }}</small></div>
           <div v-if="updateBusy || updatePhase==='ready'" class="update-progress">
@@ -393,7 +393,7 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
           <div class="settings-actions"><button class="button secondary" :disabled="loading || updateBusy" @click="refreshUpdateStatus">重新检查</button><button v-if="updateStatus.updateAvailable" class="button primary" :disabled="updateBusy" @click="installAvailableUpdate">{{ updatePhase==='checking' ? '验证中…' : updatePhase==='backing-up' ? '备份中…' : updatePhase==='downloading' ? (updateTotal ? `下载 ${updateProgress}%` : '正在下载…') : updatePhase==='installing' ? '正在启动安装器…' : '一键更新并重启' }}</button><button v-if="updateStatus.updateAvailable && updateStatus.installerUrl && (updatePhase==='downloading' || updatePhase==='error')" class="button secondary" @click="openUpdateUrl(updateStatus.installerUrl)">手工下载</button></div>
         </article>
         <details class="panel settings-card-wide data-safety-collapsible">
-          <summary><div><h2>本地数据保护</h2><p>每天首次启动自动备份，内部备份自动清理并只保留最新 10 条；恢复前会再做一次保护备份。</p></div><span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span><span class="settings-collapse-label"></span></summary>
+          <summary><div><h2>本地数据保护</h2><p>每日首次启动备份，保留最近 10 份</p></div><span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span><span class="settings-collapse-label"></span></summary>
           <div class="data-safety-body">
             <div class="settings-actions"><button class="button primary" :disabled="loading" @click="createBackup">立即备份</button><button class="button secondary" :disabled="loading" @click="exportBackup">导出到文档</button></div>
             <div v-if="backupStatus.backups.length" class="backup-list"><article v-for="item in backupStatus.backups" :key="item.path"><span><b>{{ backupKind(item.kind) }}</b><small>{{ backupTime(item.createdAt) }} · {{ backupSize(item.sizeBytes) }}</small></span><button class="text-button" @click="locateBackup(item.path)">定位</button><button class="text-button danger-text" @click="restoreBackup(item.path)">恢复</button></article></div>
@@ -403,9 +403,9 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
       </div>
     </section>
     <details class="settings-section settings-collapsible">
-      <summary class="settings-section-title"><div><h2>菜单顺序与显示</h2><p>调整左侧主菜单的顺序和显示状态；设置入口固定在底部。</p></div><span class="settings-collapse-label"></span></summary>
+      <summary class="settings-section-title"><div><h2>菜单顺序与显示</h2></div><span class="settings-collapse-label"></span></summary>
       <article class="panel menu-order-settings">
-        <header><div><h2>左侧菜单</h2><p>隐藏只影响左侧入口，不会删除功能和数据；VIP 菜单仍需启用 VIP 后才会显示。</p></div><button class="button secondary" @click="resetMenuOrder">恢复默认</button></header>
+        <header><div><h2>左侧菜单</h2><p>隐藏不删除功能和数据</p></div><button class="button secondary" @click="resetMenuOrder">恢复默认</button></header>
         <div class="menu-order-list"><article v-for="(item,index) in orderedMenuItems" :key="item.path" :class="{ 'is-hidden':hiddenMenuPathSet.has(item.path) }"><b>{{ index+1 }}</b><NavIcon :name="item.icon" /><span><strong>{{ item.label }}</strong><small>{{ item.vip ? 'VIP 功能' : '常用功能' }} · {{ hiddenMenuPathSet.has(item.path) ? '已隐藏' : '显示中' }}</small></span><div><button class="button small secondary menu-visibility-button" @click="toggleMenuVisibility(item.path)">{{ hiddenMenuPathSet.has(item.path) ? '显示' : '隐藏' }}</button><button class="icon-button" title="上移" :disabled="index===0" @click="moveMenu(item.path,-1)">↑</button><button class="icon-button" title="下移" :disabled="index===orderedMenuItems.length-1" @click="moveMenu(item.path,1)">↓</button></div></article></div>
       </article>
     </details>
@@ -418,7 +418,7 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
         <label>模型<input :value="status.model" disabled></label>
         <label>API Key<input v-model="key" type="password" autocomplete="off" placeholder="输入后保存；页面不会读取或显示旧密钥"></label>
         <div class="settings-actions"><button v-if="status.configured" class="button secondary" :disabled="loading" @click="test">测试连接</button><button v-if="status.configured && status.source !== '环境变量'" class="button secondary danger-button" :disabled="loading" @click="clear">删除密钥</button><button class="button primary" :disabled="loading || !key.trim()" @click="save">保存到凭据库</button></div>
-        <small>点击“AI 润色”时会发送报告草稿与同期 Codex 对话摘录；知识问答只发送已确认知识。原始日志不会在后台自动上传。</small>
+        <small>仅发送当前报告正文或已确认知识；AI 总结独立保存，不替换原文；不上传原始日志</small>
       </article>
       <article class="panel settings-card tapd-settings">
         <div><h2>TAPD OpenAPI</h2><p>一个凭据可供多个项目共用；项目、负责人和自动规则分别在 TAPD 工作与自动处理菜单中配置。</p></div>
@@ -427,7 +427,7 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
         <label v-if="tapdAuthMode==='token'">个人访问令牌<input v-model="tapdAccessToken" type="password" autocomplete="off" placeholder="粘贴 TAPD 个人访问令牌；保存后不再回显"></label>
         <template v-else><label>API 用户名<input v-model="tapdUser" autocomplete="off" placeholder="TAPD 开放平台 API 账号"></label><label>API 密码<input v-model="tapdPassword" type="password" autocomplete="off" placeholder="保存后不再回显"></label></template>
         <div class="settings-actions"><button v-if="tapdStatus.configured" class="button secondary" :disabled="loading" @click="testTapd">测试连接</button><button v-if="tapdStatus.configured && tapdStatus.source!=='环境变量'" class="button secondary danger-button" :disabled="loading" @click="clearTapd">删除凭据</button><button class="button primary" :disabled="loading || (tapdAuthMode==='token' ? !tapdAccessToken.trim() : !tapdUser.trim() || !tapdPassword.trim())" @click="saveTapd">保存到凭据库</button></div>
-        <small>令牌或密码只保存在 Windows 凭据库。工作台通过 TAPD 官方 OpenAPI 只同步缺陷，不读取任务和需求；只有人工确认完成时才会把对应缺陷回写为“已解决”。</small>
+        <small>仅同步缺陷；人工确认完成后回写</small>
       </article>
       <article class="panel settings-card email-settings">
         <div><h2>QQ 邮件通知</h2><p>邮件开关开启后，新完成的 Codex 任务会发送到同一个 QQ 邮箱。</p></div>
@@ -436,30 +436,30 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
         <label>SMTP 授权码<input v-model="qqAuthCode" type="password" autocomplete="new-password" placeholder="QQ 邮箱生成的授权码；保存后不回显"></label>
         <p v-if="emailStatus.lastError" class="email-settings-error">{{ emailStatus.lastError }}<span v-if="emailStatus.retryingCount || emailStatus.failedCount"> · 重试中 {{ emailStatus.retryingCount }} 封，失败 {{ emailStatus.failedCount }} 封</span></p>
         <div class="settings-actions"><button v-if="emailStatus.configured" class="button secondary" :disabled="loading" @click="testEmail">发送测试邮件</button><button class="button primary" :disabled="loading || !qqEmail.trim() || !qqAuthCode.trim()" @click="saveEmail">保存配置</button><button v-if="emailStatus.configured" class="button secondary danger-button" :disabled="loading" @click="clearEmail">删除配置</button></div>
-        <small>固定使用 smtp.qq.com:465（SSL/TLS），发件人与收件人相同。授权码仅保存在 Windows 凭据管理器中，不会写入数据库、日志或回显到页面。</small>
+        <small>发件人与收件人相同</small>
       </article>
       <article class="panel settings-card apifox-settings">
         <div><h2>Apifox 开放 API</h2><p>用于接口文档中心只读同步多个项目的 OpenAPI 文档。</p></div>
         <span class="settings-status" :class="{ready:apifoxStatus.configured}">{{ apifoxStatus.configured ? `已配置 · ${apifoxStatus.source}` : '未配置' }}</span>
         <label>API 访问令牌<input v-model="apifoxToken" type="password" autocomplete="off" placeholder="粘贴 Apifox API 访问令牌；保存后不再回显"></label>
         <div class="settings-actions"><RouterLink class="button secondary link-button" to="/api-docs">打开接口文档</RouterLink><button v-if="apifoxStatus.configured" class="button secondary danger-button" :disabled="loading" @click="clearApifox">删除令牌</button><button class="button primary" :disabled="loading || !apifoxToken.trim()" @click="saveApifox">保存到凭据库</button></div>
-        <small>令牌仅保存在 Windows 凭据库，不写入 SQLite、日志或页面。项目 ID 和同步后的脱敏接口文档保存在本机数据库。</small>
+        <small>同步后的接口文档会脱敏并缓存在本机</small>
       </article>
       </div>
     </details>
     <section class="settings-section">
-      <header class="settings-section-title"><div><h2>自动化</h2><p>控制工作台在后台持续运行的行为。</p></div></header>
+      <header class="settings-section-title"><div><h2>自动化</h2></div></header>
       <article class="panel settings-card report-automation-settings">
         <div><h2>自动报告</h2><p>关闭窗口后程序保留在托盘；每天 22:00 生成日报，周日和月末同时生成周报、月报。</p></div>
         <div class="autostart-control"><span class="settings-status ready">自动生成已启用</span><button class="button secondary" @click="toggleAutostart">开机启动：{{ autostartEnabled ? '开' : '关' }}</button></div>
       </article>
       <article class="panel settings-card report-automation-settings cockpit-automation-settings">
-        <div><h2>驾驶舱屏保</h2><p>工作台连续无操作后自动进入数据驾驶舱；手动进入不受此设置影响。</p></div>
+        <div><h2>驾驶舱屏保</h2><p>无操作后自动进入驾驶舱</p></div>
         <div class="autostart-control cockpit-idle-control">
           <span class="settings-status" :class="{ ready:cockpitIdleMinutes!==null }">{{ cockpitIdleStatusText }}</span>
           <label>无操作<select :value="cockpitIdleMinutes===null ? 'never' : String(cockpitIdleMinutes)" aria-label="驾驶舱屏保时间" @change="changeCockpitIdleMinutes"><option v-for="minutes in cockpitIdleMinuteOptions" :key="minutes" :value="String(minutes)">{{ minutes }} 分钟</option><option value="never">永不自动进入</option></select></label>
         </div>
-        <small>默认 10 分钟 · 修改后立即生效 · 仅保存在当前电脑。</small>
+
       </article>
     </section>
   </div>

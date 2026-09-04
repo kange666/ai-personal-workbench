@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { exportTestReportMarkdown, exportTestReportPdf, getExistingTestReportPdf, isTauriRuntime, openTestReportPdf, readTestArtifact, type TestRun } from "../services/backend";
+import { cleanTestOutput, diagnoseTestFailure } from "../utils/testFailureDiagnosis";
 
 const props = defineProps<{ run: TestRun | null; title: string; fallbackMarkdown?: string }>();
 const emit = defineEmits<{ close: [] }>();
@@ -17,10 +18,18 @@ const screenshotSources = ref<Record<string, string>>({});
 const previewScreenshot = ref<{ src: string; name: string } | null>(null);
 
 const problemScenarios = computed(() => props.run?.scenarioResults.filter((item) => ["failed", "blocked"].includes(item.status)) ?? []);
+const problemDetails = computed(() => problemScenarios.value.map(scenario => ({
+  scenario,
+  diagnosis: diagnoseTestFailure(scenario.errorMessage || props.run?.errorMessage || "", scenario.status, props.run?.outputExcerpt || ""),
+})));
 const otherScenarios = computed(() => props.run?.scenarioResults.filter((item) => !["failed", "blocked"].includes(item.status)) ?? []);
 const screenshotCount = computed(() => problemScenarios.value.flatMap((item) => item.artifacts).filter((item) => item.kind === "screenshot").length);
 const hasStructuredReport = computed(() => Boolean(props.run?.scenarioResults.length));
 const legacyContent = computed(() => props.fallbackMarkdown || props.run?.reportMarkdown || props.run?.errorMessage || "该报告没有可显示内容。");
+const runDiagnosis = computed(() => props.run && props.run.status !== "passed"
+  ? diagnoseTestFailure(props.run.errorMessage, props.run.status, props.run.outputExcerpt)
+  : null);
+const readableOutput = computed(() => cleanTestOutput(props.run?.outputExcerpt || ""));
 
 type LegacyBlock =
   | { type: "paragraph" | "bullet" | "ordered" | "code"; text: string }
@@ -174,7 +183,6 @@ watch(() => props.run?.id, () => {
     <section class="panel test-report-dialog test-report-v2">
       <header>
         <div class="report-title-block">
-          <small>TEST REPORT</small>
           <h2>{{ title }}</h2>
           <p>{{ run ? `${run.project} · ${modeLabel(run.mode)} · ${new Date(run.startedAt).toLocaleString('zh-CN')}` : "历史 Markdown 报告" }}</p>
         </div>
@@ -190,7 +198,7 @@ watch(() => props.run?.id, () => {
 
       <template v-if="run && hasStructuredReport">
         <section class="report-overview report-overview-v2">
-          <article><small>执行结果</small><b :class="run.status">{{ statusLabel(run.status) }}</b><span>{{ run.errorMessage || (run.status === "passed" ? "所选场景达到预期" : "优先查看下方问题场景") }}</span></article>
+          <article><small>执行结果</small><b :class="run.status">{{ statusLabel(run.status) }}</b><span>{{ runDiagnosis?.summary || "所选场景达到预期" }}</span></article>
           <article><small>场景统计</small><b>{{ run.totalCount }} 个</b><span>{{ run.passedCount }} 通过 · {{ run.failedCount }} 失败 · {{ run.skippedCount }} 跳过</span></article>
           <article><small>执行耗时</small><b>{{ durationLabel(run.durationMs) }}</b><span>{{ run.environmentSummary }}</span></article>
           <article><small>失败截图</small><b>{{ screenshotCount }} 张</b><span>{{ screenshotCount ? "已关联到对应问题场景" : "本次报告没有页面截图" }}</span></article>
@@ -198,10 +206,17 @@ watch(() => props.run?.id, () => {
 
         <div class="report-body-v2">
           <section v-if="problemScenarios.length" class="problem-section">
-            <header><div><small>NEEDS ATTENTION</small><h3>问题场景详情</h3><p>失败场景优先展示，包含目的、步骤、验证内容、错误信息和页面截图。</p></div><button class="button secondary small" @click="openTasks">打开整改任务</button></header>
-            <article v-for="(scenario, index) in problemScenarios" :key="scenario.id" class="problem-card">
+            <header><div><h3>问题场景详情</h3></div><button class="button secondary small" @click="openTasks">打开整改任务</button></header>
+            <article v-for="({ scenario, diagnosis }, index) in problemDetails" :key="scenario.id" class="problem-card">
               <header><i>{{ String(index + 1).padStart(2, "0") }}</i><div><h4>{{ scenario.title }}</h4><p>{{ scenario.purpose }}</p></div><b :class="scenario.status">{{ scenarioStatusLabel(scenario.status) }}</b></header>
-              <pre v-if="scenario.errorMessage" class="scenario-error">{{ scenario.errorMessage }}</pre>
+              <section class="failure-diagnosis">
+                <header><span>{{ diagnosis.category }}</span><div><b>{{ diagnosis.summary }}</b><em>发生阶段：{{ diagnosis.stage }}</em></div></header>
+                <div class="failure-diagnosis-grid">
+                  <section><h5>可能原因 <small>根据错误特征推测</small></h5><ul><li v-for="item in diagnosis.possibleCauses" :key="item">{{ item }}</li></ul></section>
+                  <section><h5>建议排查顺序</h5><ol><li v-for="item in diagnosis.troubleshootingSteps" :key="item">{{ item }}</li></ol></section>
+                </div>
+                <details open><summary>完整技术详情</summary><pre class="scenario-error">{{ diagnosis.technicalDetails }}</pre></details>
+              </section>
               <div class="scenario-detail-grid">
                 <section><h5>测试步骤</h5><ol><li v-for="item in scenario.steps" :key="item">{{ item }}</li></ol></section>
                 <section><h5>验证内容</h5><ul><li v-for="item in scenario.checks" :key="item">{{ item }}</li></ul></section>
@@ -217,10 +232,14 @@ watch(() => props.run?.id, () => {
             </article>
           </section>
 
-          <section v-else class="report-success-state"><i>✓</i><div><h3>所选场景全部通过</h3><p>当前没有需要优先处理的问题场景。</p></div></section>
+          <section v-else-if="run.status !== 'passed' && runDiagnosis" class="problem-section run-level-problem">
+            <article class="problem-card"><section class="failure-diagnosis"><header><span>{{ runDiagnosis.category }}</span><div><b>{{ runDiagnosis.summary }}</b><em>发生阶段：{{ runDiagnosis.stage }}</em></div></header><div class="failure-diagnosis-grid"><section><h5>可能原因 <small>根据错误特征推测</small></h5><ul><li v-for="item in runDiagnosis.possibleCauses" :key="item">{{ item }}</li></ul></section><section><h5>建议排查顺序</h5><ol><li v-for="item in runDiagnosis.troubleshootingSteps" :key="item">{{ item }}</li></ol></section></div><details open><summary>完整技术详情</summary><pre class="scenario-error">{{ runDiagnosis.technicalDetails }}</pre></details></section></article>
+          </section>
+
+          <section v-else class="report-success-state"><i>✓</i><div><h3>所选场景全部通过</h3></div></section>
 
           <section class="completed-section">
-            <header><div><small>ALL SCENARIOS</small><h3>全部场景</h3></div><span>{{ otherScenarios.length }} 项</span></header>
+            <header><div><h3>全部场景</h3></div><span>{{ otherScenarios.length }} 项</span></header>
             <details v-for="scenario in otherScenarios" :key="scenario.id" class="scenario-row">
               <summary><span :class="scenario.status"></span><b>{{ scenario.title }}</b><em>{{ scenarioStatusLabel(scenario.status) }} · {{ durationLabel(scenario.durationMs) }}</em></summary>
               <p>{{ scenario.purpose }}</p>
@@ -228,11 +247,12 @@ watch(() => props.run?.id, () => {
             </details>
           </section>
 
-          <details v-if="run.outputExcerpt" class="raw-output"><summary>查看原始命令输出</summary><pre>{{ run.outputExcerpt }}</pre></details>
+          <details v-if="readableOutput" class="raw-output"><summary>查看原始命令输出</summary><pre>{{ readableOutput }}</pre></details>
         </div>
       </template>
       <div v-else class="legacy-report-readable">
-        <div class="legacy-report-notice"><b>历史报告兼容视图</b><span>已把旧版 Markdown 报告按章节、清单和表格重新排版；原始结论与内容不做改写。</span></div>
+        <div class="legacy-report-notice"><b>历史报告兼容视图</b><span>旧版报告按原内容重新排版</span></div>
+        <section v-if="run && run.status !== 'passed' && runDiagnosis" class="problem-card legacy-failure-diagnosis"><section class="failure-diagnosis"><header><span>{{ runDiagnosis.category }}</span><div><b>{{ runDiagnosis.summary }}</b><em>发生阶段：{{ runDiagnosis.stage }}</em></div></header><div class="failure-diagnosis-grid"><section><h5>可能原因 <small>根据错误特征推测</small></h5><ul><li v-for="item in runDiagnosis.possibleCauses" :key="item">{{ item }}</li></ul></section><section><h5>建议排查顺序</h5><ol><li v-for="item in runDiagnosis.troubleshootingSteps" :key="item">{{ item }}</li></ol></section></div><details open><summary>完整技术详情</summary><pre class="scenario-error">{{ runDiagnosis.technicalDetails }}</pre></details></section></section>
         <section v-for="(section, sectionIndex) in legacySections" :key="`${section.title}-${sectionIndex}`" class="legacy-section">
           <h3>{{ section.title }}</h3>
           <template v-for="(block, blockIndex) in section.blocks" :key="blockIndex">
@@ -262,11 +282,12 @@ watch(() => props.run?.id, () => {
 .report-body-v2{flex:1;overflow:auto;padding:0 18px 22px}.problem-section{margin-top:4px}.problem-section>header,.completed-section>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0 10px}.problem-section h3,.completed-section h3{margin:4px 0}.problem-section>header p{margin:0;color:var(--muted)}
 .problem-card{margin-bottom:12px;border:1px solid color-mix(in srgb,var(--danger) 42%,var(--line));border-radius:11px;overflow:hidden;background:color-mix(in srgb,var(--danger) 3%,var(--surface-2))}.problem-card>header{display:flex;align-items:flex-start;gap:11px;padding:13px 14px;border-bottom:1px solid var(--line)}.problem-card>header i{display:grid;place-items:center;width:28px;height:28px;border-radius:7px;background:color-mix(in srgb,var(--danger) 12%,transparent);color:var(--danger);font-style:normal}.problem-card>header div{min-width:0;flex:1}.problem-card h4{margin:0 0 5px}.problem-card header p{margin:0;color:var(--muted)}.problem-card>header b{padding:5px 8px;border-radius:99px;color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}.problem-card>header b.blocked{color:var(--warning);background:color-mix(in srgb,var(--warning) 12%,transparent)}
 .scenario-error{margin:12px 14px 0;padding:11px;border-radius:8px;background:#161923;color:#ffb8be;white-space:pre-wrap;word-break:break-word;font:11px/1.6 Consolas,monospace}.scenario-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:13px 14px}.scenario-detail-grid section{padding:11px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.scenario-detail-grid h5,.scenario-screenshots h5{margin:0 0 8px}.scenario-detail-grid ol,.scenario-detail-grid ul{margin:0;padding-left:19px;line-height:1.8;color:var(--muted)}
+.failure-diagnosis{display:grid;gap:11px;padding:13px 14px 0}.failure-diagnosis>header{display:flex;align-items:flex-start;gap:10px;padding:0}.failure-diagnosis>header span{flex:0 0 auto;padding:4px 8px;border-radius:6px;background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger);font-size:11px;font-weight:800}.failure-diagnosis>header div{display:flex;min-width:0;flex-direction:column;gap:4px}.failure-diagnosis>header b{line-height:1.65}.failure-diagnosis>header em{color:var(--muted);font-size:11px;font-style:normal}.failure-diagnosis-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.failure-diagnosis-grid>section{padding:11px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.failure-diagnosis h5{margin:0 0 8px}.failure-diagnosis h5 small{margin-left:5px;color:var(--warning);font-weight:400}.failure-diagnosis ul,.failure-diagnosis ol{margin:0;padding-left:19px;color:var(--muted);line-height:1.75}.failure-diagnosis details{border:1px solid var(--line);border-radius:8px;overflow:hidden}.failure-diagnosis summary{padding:9px 11px;cursor:pointer;color:var(--primary);font-weight:700}.failure-diagnosis .scenario-error{margin:0;border-radius:0}.run-level-problem .failure-diagnosis{padding-bottom:14px}
 .scenario-screenshots{padding:0 14px 14px}.scenario-screenshots figure{margin:9px 0 0;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}.screenshot-preview-button{position:relative;display:block;width:100%;padding:0;border:0;border-radius:7px;overflow:hidden;background:var(--surface-2);cursor:zoom-in}.screenshot-preview-button img{display:block;max-width:100%;max-height:560px;margin:auto}.screenshot-preview-button span{position:absolute;right:10px;bottom:10px;padding:6px 9px;border-radius:7px;background:rgba(17,20,29,.82);color:#fff;font-size:11px}.scenario-screenshots figcaption{display:flex;flex-direction:column;gap:4px;margin-top:8px}.scenario-screenshots figcaption small{color:var(--muted);word-break:break-all}.screenshot-unavailable{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;min-height:130px;padding:18px;color:var(--muted);text-align:center;background:var(--surface-2)}.screenshot-unavailable b{color:var(--warning)}
 .report-success-state{display:flex;align-items:center;gap:12px;margin:15px 0;padding:15px;border:1px solid color-mix(in srgb,var(--success) 35%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--success) 7%,transparent)}.report-success-state i{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--success);color:white;font-style:normal}.report-success-state h3,.report-success-state p{margin:0}.report-success-state p{margin-top:4px;color:var(--muted)}
 .completed-section>header span{color:var(--muted)}.scenario-row{border-top:1px solid var(--line)}.scenario-row summary{display:grid;grid-template-columns:9px minmax(0,1fr) auto;align-items:center;gap:9px;padding:12px 4px;cursor:pointer}.scenario-row summary>span{width:8px;height:8px;border-radius:50%;background:var(--muted)}.scenario-row summary>span.passed{background:var(--success)}.scenario-row summary>span.skipped{background:var(--warning)}.scenario-row summary em{color:var(--muted);font-style:normal}.scenario-row>p{margin:0 24px 9px;color:var(--muted)}.scenario-row>div{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:0 24px 12px;padding:10px;border-radius:8px;background:var(--surface-2)}.scenario-row ol,.scenario-row ul{margin:0;padding-left:18px;line-height:1.7}
 .raw-output{margin-top:15px;border:1px solid var(--line);border-radius:9px;overflow:hidden}.raw-output summary{padding:11px 13px;cursor:pointer;color:var(--primary)}.raw-output pre{margin:0;padding:14px;background:#0d1118;color:#c9d3e7;white-space:pre-wrap;word-break:break-word;font:11px/1.65 Consolas,monospace}
-.legacy-report-readable{flex:1;overflow:auto;padding:18px 20px 24px;background:var(--surface-2)}.legacy-report-notice{display:flex;align-items:center;gap:12px;margin-bottom:13px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--primary) 28%,var(--line));border-radius:9px;background:color-mix(in srgb,var(--primary) 6%,var(--surface))}.legacy-report-notice b{white-space:nowrap;color:var(--primary)}.legacy-report-notice span{color:var(--muted)}.legacy-section{margin-bottom:12px;padding:15px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.legacy-section h3{margin:0 0 11px;padding-bottom:9px;border-bottom:1px solid var(--line)}.legacy-section p{margin:7px 0;line-height:1.7}.legacy-list-item{display:grid;grid-template-columns:18px minmax(0,1fr);gap:7px;margin:6px 0;line-height:1.65}.legacy-list-item i{color:var(--primary);font-style:normal;font-weight:800}.legacy-list-item.ordered i{display:grid;place-items:center;width:18px;height:18px;margin-top:2px;border-radius:50%;background:color-mix(in srgb,var(--primary) 12%,transparent);font-size:9px}.legacy-section pre{padding:11px;border-radius:8px;background:#111722;color:#d8e1f1;white-space:pre-wrap;word-break:break-word;font:11px/1.65 Consolas,monospace}.legacy-table-wrap{max-width:100%;margin:9px 0;overflow:auto;border:1px solid var(--line);border-radius:8px}.legacy-table-wrap table{width:100%;border-collapse:collapse}.legacy-table-wrap th,.legacy-table-wrap td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}.legacy-table-wrap th{background:var(--surface-2);color:var(--muted)}.legacy-table-wrap tbody tr:last-child td{border-bottom:0}
+.legacy-report-readable{flex:1;overflow:auto;padding:18px 20px 24px;background:var(--surface-2)}.legacy-report-notice{display:flex;align-items:center;gap:12px;margin-bottom:13px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--primary) 28%,var(--line));border-radius:9px;background:color-mix(in srgb,var(--primary) 6%,var(--surface))}.legacy-report-notice b{white-space:nowrap;color:var(--primary)}.legacy-report-notice span{color:var(--muted)}.legacy-failure-diagnosis{padding-bottom:14px;background:var(--surface)}.legacy-section{margin-bottom:12px;padding:15px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.legacy-section h3{margin:0 0 11px;padding-bottom:9px;border-bottom:1px solid var(--line)}.legacy-section p{margin:7px 0;line-height:1.7}.legacy-list-item{display:grid;grid-template-columns:18px minmax(0,1fr);gap:7px;margin:6px 0;line-height:1.65}.legacy-list-item i{color:var(--primary);font-style:normal;font-weight:800}.legacy-list-item.ordered i{display:grid;place-items:center;width:18px;height:18px;margin-top:2px;border-radius:50%;background:color-mix(in srgb,var(--primary) 12%,transparent);font-size:9px}.legacy-section pre{padding:11px;border-radius:8px;background:#111722;color:#d8e1f1;white-space:pre-wrap;word-break:break-word;font:11px/1.65 Consolas,monospace}.legacy-table-wrap{max-width:100%;margin:9px 0;overflow:auto;border:1px solid var(--line);border-radius:8px}.legacy-table-wrap table{width:100%;border-collapse:collapse}.legacy-table-wrap th,.legacy-table-wrap td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}.legacy-table-wrap th{background:var(--surface-2);color:var(--muted)}.legacy-table-wrap tbody tr:last-child td{border-bottom:0}
 .screenshot-lightbox{position:fixed;inset:22px;z-index:20;display:flex;flex-direction:column;padding:12px;border:1px solid var(--line);border-radius:12px;background:rgba(10,13,20,.96);box-shadow:0 24px 80px rgba(0,0,0,.45)}.screenshot-lightbox header{display:flex;align-items:center;gap:12px;padding:0 4px 10px;color:#fff}.screenshot-lightbox header b{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.screenshot-lightbox img{min-width:0;min-height:0;max-width:100%;max-height:calc(100vh - 92px);margin:auto;object-fit:contain}
-@media(max-width:900px){.test-report-v2{width:calc(100vw - 24px)}.report-overview-v2{grid-template-columns:1fr 1fr}.scenario-detail-grid,.scenario-row>div{grid-template-columns:1fr}.report-result-pill{display:none}}
+@media(max-width:900px){.test-report-v2{width:calc(100vw - 24px)}.report-overview-v2{grid-template-columns:1fr 1fr}.failure-diagnosis-grid,.scenario-detail-grid,.scenario-row>div{grid-template-columns:1fr}.report-result-pill{display:none}}
 </style>

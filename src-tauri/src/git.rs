@@ -2474,11 +2474,11 @@ pub async fn generate_commit_plan(
     let (groups, generator, model, generation_warning) =
         match generate_ai_commit_groups(&path, &eligible_changed_files, grouping_mode).await {
             Ok(groups) => (groups, "deepseek".to_string(), ai_model, String::new()),
-            Err(error) => (
+            Err(_) => (
                 fallback_commit_groups(&eligible_files, grouping_mode),
                 "rules".to_string(),
                 String::new(),
-                truncate_text(&format!("AI 生成失败，已使用本地规则：{error}"), 240),
+                String::new(),
             ),
         };
     let now = Utc::now().to_rfc3339();
@@ -2486,11 +2486,7 @@ pub async fn generate_commit_plan(
     let summary = format!(
         "识别 {} 个已暂存文件，{}生成 {} 组提交建议{}；未暂存文件未参与判断。",
         changed_files.len(),
-        if generator == "deepseek" {
-            "AI "
-        } else {
-            "本地规则"
-        },
+        "智能",
         groups.len(),
         if excluded_files.is_empty() {
             String::new()
@@ -2507,7 +2503,7 @@ pub async fn generate_commit_plan(
         let group_risk = if generator == "deepseek" {
             "AI 已按实际差异生成建议，提交前仍请人工确认"
         } else {
-            "AI 当前不可用，本组由本地规则生成，请重点核对提交信息"
+            "本组由本地规则生成，提交前请核对提交信息"
         };
         transaction.execute("INSERT INTO commit_groups(id,plan_id,group_order,title,commit_message,files_json,risk_notes,verification_notes,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'suggested')", params![uuid::Uuid::new_v4().to_string(),plan_id,order as i64,group.title,group.commit_message,serde_json::to_string(&group.files).map_err(|error| error.to_string())?,group_risk,if diff_warning.is_empty(){"建议执行项目已配置的安全测试命令"}else{"git diff --check 未通过，请先处理空白或冲突标记"}]).map_err(|error| error.to_string())?;
     }

@@ -72,6 +72,28 @@ describe("TestReportDialog", () => {
     expect(wrapper.find(".screenshot-lightbox img").attributes("src")).toBe("data:image/png;base64,AAAA");
   });
 
+  it("异常场景展示具体问题、可能原因、排查顺序和完整技术详情", async () => {
+    const timeoutRun = {
+      ...run,
+      errorMessage: "\u001b[31mTest timeout of 60000ms exceeded.\u001b[39m",
+      outputExcerpt: "\u001b[31mTest timeout of 60000ms exceeded.\u001b[39m\n at locator.click (related.spec.js:42:8)",
+      scenarioResults: run.scenarioResults.map(item => item.id === "failed" ? {
+        ...item,
+        errorMessage: "\u001b[31mTest timeout of 60000ms exceeded.\u001b[39m\n at locator.click (related.spec.js:42:8)",
+      } : item),
+    } satisfies TestRun;
+    const wrapper = mountDialog({ run:timeoutRun });
+    await flushPromises();
+
+    const diagnosis = wrapper.get(".failure-diagnosis");
+    expect(diagnosis.text()).toContain("执行超时");
+    expect(diagnosis.text()).toContain("测试超过 1 分钟仍未完成");
+    expect(diagnosis.text()).toContain("可能原因");
+    expect(diagnosis.text()).toContain("建议排查顺序");
+    expect(diagnosis.text()).toContain("related.spec.js:42:8");
+    expect(diagnosis.text()).not.toContain("[31m");
+  });
+
   it("把报告操作集中在标题栏最右侧并可导出 PDF", async () => {
     const wrapper = mountDialog();
     await flushPromises();
@@ -130,6 +152,8 @@ describe("TestReportDialog", () => {
     const legacyRun = { ...run, scenarioResults: [], artifacts: [], totalCount: 0, passedCount: 0, failedCount: 0, reportMarkdown: "" };
     const wrapper = mountDialog({ run: legacyRun, fallbackMarkdown: "# 旧测试报告\n\n- 测试结论：不通过\n\n## 汇总\n\n| 用例总数 | 通过 | 失败 |\n| ---: | ---: | ---: |\n| 3 | 2 | 1 |\n\n## 失败详情\n\n### 搜索场景\n\n1. 点击搜索\n2. 核对列表" });
     expect(wrapper.find(".legacy-report-readable").text()).toContain("历史报告兼容视图");
+    expect(wrapper.find(".legacy-failure-diagnosis").text()).toContain("测试执行异常");
+    expect(wrapper.find(".legacy-failure-diagnosis").text()).toContain("建议排查顺序");
     expect(wrapper.find(".legacy-report-readable").text()).toContain("搜索场景");
     expect(wrapper.find(".legacy-table-wrap table").text()).toContain("3");
     expect(wrapper.find(".report-overview-v2").exists()).toBe(false);

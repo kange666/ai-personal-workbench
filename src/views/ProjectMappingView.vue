@@ -53,7 +53,7 @@ onMounted(load);
 
 <template>
   <div class="view project-mapping-view">
-    <header class="page-header"><div><h1>项目身份映射</h1><p>把本地目录、Codex 名称和 TAPD 项目统一到同一个规范项目</p></div><div><RouterLink class="button secondary link-button" to="/projects">返回项目资产</RouterLink><button class="button primary" :disabled="loading" @click="load">{{ loading ? "同步中…" : "↻ 同步项目" }}</button></div></header>
+    <header class="page-header"><div><h1>项目身份映射</h1><p>统一本地目录、Codex 与 TAPD 项目名称</p></div><div><RouterLink class="button secondary link-button" to="/projects">返回项目资产</RouterLink><button class="button primary" :disabled="loading" @click="load">{{ loading ? "同步中…" : "↻ 同步项目" }}</button></div></header>
     <div v-if="message || error" class="mapping-message" :class="{error:Boolean(error)}">{{ error || message }}</div>
     <section class="mapping-layout panel">
       <aside class="mapping-list">
@@ -65,13 +65,13 @@ onMounted(load);
         </div>
       </aside>
       <form v-if="selectedId" class="mapping-editor" @submit.prevent="save">
-        <header><div><h2>编辑项目身份</h2><p>规范名称会用于所有统计；别名只帮助识别，不修改原始数据。</p></div><span>唯一项目</span></header>
+        <header><div><h2>编辑项目身份</h2><p>规范名称用于统计，别名用于识别</p></div><span>唯一项目</span></header>
         <div class="mapping-form-grid">
           <label>规范项目名称<input v-model="form.displayName" maxlength="80" placeholder="例如：安全生产管理"></label>
           <label>分类<input v-model="form.category" maxlength="40" placeholder="例如：TB 业务系统"></label>
-          <label class="wide">本地项目目录<input v-model="form.repositoryPath" readonly><small>目录来自项目资产，避免误把两个仓库映射到同一个项目。</small></label>
+          <label class="wide">本地项目目录<input v-model="form.repositoryPath" readonly></label>
           <label>TAPD 项目 ID<input v-model="form.tapdWorkspaceId" placeholder="例如：37583308"></label>
-          <label class="wide">识别别名<textarea v-model="aliasesText" rows="8" placeholder="每行一个，例如：&#10;scaq-client&#10;client&#10;F:\TB-project\scaq-client"></textarea><small>Codex 工作目录、人工项目名或历史名称匹配任意别名后，都会归入当前规范项目。</small></label>
+          <label class="wide">识别别名<textarea v-model="aliasesText" rows="8" placeholder="每行一个，例如：&#10;scaq-client&#10;client&#10;F:\TB-project\scaq-client"></textarea><small>每行一个可识别名称或路径</small></label>
         </div>
         <footer><span>保存后不会重写 Codex、Git 或 TAPD 原始记录。</span><button class="button primary" :disabled="loading">{{ loading ? "保存中…" : "保存映射" }}</button></footer>
       </form>

@@ -74,10 +74,10 @@ describe("DeploymentsView",()=>{
     await normalButton.trigger("click");await flushPromises();
     expect(mocks.branches).toHaveBeenCalledWith("folder/普通项目");
     expect(JSON.parse(window.localStorage.getItem("workbench-jenkins-last-project") || "{}")).toEqual({baseUrl:"https://jenkins",jobFullName:"folder/普通项目"});
-    expect(wrapper.text()).toContain("参数：BRANCH_NAME");
     await wrapper.get("select").setValue("develop");
     await wrapper.get(".publish-button").trigger("click");await flushPromises();
     expect(wrapper.get(".jenkins-confirm-dialog").text()).toContain("本次实际 Changes");
+    expect(wrapper.get(".jenkins-confirm-dialog").text()).toContain("使用 Job 默认参数，不修改 Jenkins 配置");
     expect(mocks.publish).not.toHaveBeenCalled();
     await wrapper.get(".jenkins-confirm-dialog .button.primary").trigger("click");await flushPromises();
     expect(mocks.publish).toHaveBeenCalledWith("folder/普通项目","develop");
@@ -129,7 +129,7 @@ describe("DeploymentsView",()=>{
     await wrapper.get(".project-select-trigger").trigger("click");
     const option=wrapper.findAll(".project-option").find(item=>item.text().includes("业务后台"))!;
     await option.findAll(".project-option-action")[0].trigger("click");
-    expect(wrapper.get(".jenkins-alias-dialog").text()).toContain("不修改 Jenkins Job");
+    expect(wrapper.get(".jenkins-alias-dialog").text()).toContain("仅影响工作台显示");
     await wrapper.get('.jenkins-alias-dialog input:not([disabled])').setValue("核心后台");
     await wrapper.get('.jenkins-alias-dialog').trigger("submit");await flushPromises();
     expect(mocks.displayName).toHaveBeenCalledWith("folder/普通项目","核心后台");

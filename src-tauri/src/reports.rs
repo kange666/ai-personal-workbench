@@ -80,6 +80,8 @@ pub struct ReportRecord {
     pub period_end: String,
     pub title: String,
     pub content_markdown: String,
+    #[serde(default)]
+    pub ai_summary: String,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -1114,10 +1116,10 @@ fn generate_for_date(
 
     let existing: Option<ReportRecord> = connection
         .query_row(
-            "SELECT id,report_type,period_start,period_end,title,content_markdown,status,created_at,updated_at
+            "SELECT id,report_type,period_start,period_end,title,content_markdown,ai_summary,status,created_at,updated_at
              FROM reports WHERE report_type=?1 AND period_start=?2 AND period_end=?3 ORDER BY updated_at DESC LIMIT 1",
             params![report_type, start_text, end_text],
-            |row| Ok(ReportRecord { id: row.get(0)?, report_type: row.get(1)?, period_start: row.get(2)?, period_end: row.get(3)?, title: row.get(4)?, content_markdown: row.get(5)?, status: row.get(6)?, created_at: row.get(7)?, updated_at: row.get(8)? }),
+            |row| Ok(ReportRecord { id: row.get(0)?, report_type: row.get(1)?, period_start: row.get(2)?, period_end: row.get(3)?, title: row.get(4)?, content_markdown: row.get(5)?, ai_summary: row.get(6)?, status: row.get(7)?, created_at: row.get(8)?, updated_at: row.get(9)? }),
         )
         .optional()
         .map_err(|error| error.to_string())?;
@@ -1392,6 +1394,7 @@ fn generate_for_date(
         period_end: end_text,
         title,
         content_markdown: content,
+        ai_summary: String::new(),
         status: "draft".to_string(),
         created_at: existing
             .as_ref()
@@ -1408,10 +1411,10 @@ fn save_report_record(
     report: &ReportRecord,
 ) -> Result<(), String> {
     connection.execute(
-        "INSERT INTO reports(id,report_type,period_start,period_end,title,content_markdown,status,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
-         ON CONFLICT(id) DO UPDATE SET title=excluded.title,content_markdown=excluded.content_markdown,status=excluded.status,updated_at=excluded.updated_at",
-        params![report.id,report.report_type,report.period_start,report.period_end,report.title,report.content_markdown,report.status,report.created_at,report.updated_at],
+        "INSERT INTO reports(id,report_type,period_start,period_end,title,content_markdown,ai_summary,status,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(id) DO UPDATE SET title=excluded.title,content_markdown=excluded.content_markdown,ai_summary=excluded.ai_summary,status=excluded.status,updated_at=excluded.updated_at",
+        params![report.id,report.report_type,report.period_start,report.period_end,report.title,report.content_markdown,report.ai_summary,report.status,report.created_at,report.updated_at],
     ).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1420,7 +1423,7 @@ fn save_report_record(
 pub fn list_reports(state: tauri::State<'_, DatabaseState>) -> Result<Vec<ReportRecord>, String> {
     let connection = state.connect()?;
     let mut statement = connection.prepare(
-        "SELECT id,report_type,period_start,period_end,title,content_markdown,status,created_at,updated_at FROM reports ORDER BY period_start DESC, updated_at DESC",
+        "SELECT id,report_type,period_start,period_end,title,content_markdown,ai_summary,status,created_at,updated_at FROM reports ORDER BY period_start DESC, updated_at DESC",
     ).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
@@ -1431,9 +1434,10 @@ pub fn list_reports(state: tauri::State<'_, DatabaseState>) -> Result<Vec<Report
                 period_end: row.get(3)?,
                 title: row.get(4)?,
                 content_markdown: row.get(5)?,
-                status: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
+                ai_summary: row.get(6)?,
+                status: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })
         .map_err(|error| error.to_string())?;

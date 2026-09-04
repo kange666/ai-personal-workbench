@@ -184,7 +184,7 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
 
 <template>
   <div class="view video-center-view">
-    <header class="page-header"><div><h1>视频中心</h1><p>管理本地成片，并按脚本、视频、封面、发布文案检查生产交付</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">{{ loading ? '扫描中…' : '↻ 重新扫描' }}</button></div></header>
+    <header class="page-header"><div><h1>视频中心</h1><p>管理成片与生产交付</p></div><div><button class="button secondary" :disabled="loading" @click="refresh">{{ loading ? '扫描中…' : '↻ 重新扫描' }}</button></div></header>
     <p v-if="error" class="scan-message error">{{ error }}</p>
     <div class="video-center-tabs"><button :class="{active:activeSection==='library'}" @click="activeSection='library'">本地视频库</button><button :class="{active:activeSection==='pipeline'}" @click="activeSection='pipeline'">生产流水线</button><button :class="{active:activeSection==='publish'}" @click="activeSection='publish'">发布与复盘</button></div>
     <section v-if="activeSection==='library'" class="video-collections">
@@ -193,10 +193,10 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
       </button>
     </section>
     <section v-if="activeSection==='library'" class="video-metrics">
-      <button @click="statusFilter='all'"><span>本地视频</span><b>{{ videos.length }}</b><small>排除 clip 和 work 中间文件</small></button>
-      <button @click="statusFilter='final'"><span>最终成片</span><b>{{ videos.filter(item=>item.status==='final').length }}</b><small>文件名已标记 final / 最终 / 成片</small></button>
-      <div><span>创作项目</span><b>{{ projects.length - 1 }}</b><small>按作品目录自动归类</small></div>
-      <div><span>视频空间</span><b>{{ formatSize(totalBytes) }}</b><small>只统计当前列表文件</small></div>
+      <button @click="statusFilter='all'"><span>本地视频</span><b>{{ videos.length }}</b><small>仅统计成片与渲染结果</small></button>
+      <button @click="statusFilter='final'"><span>最终成片</span><b>{{ videos.filter(item=>item.status==='final').length }}</b></button>
+      <div><span>创作项目</span><b>{{ projects.length - 1 }}</b></div>
+      <div><span>视频空间</span><b>{{ formatSize(totalBytes) }}</b></div>
     </section>
     <section v-if="activeSection==='library'" class="panel video-library">
       <header class="video-toolbar"><label>⌕<input v-model="query" placeholder="搜索视频标题、项目或文件名"></label><select v-model="projectFilter"><option v-for="project in projects" :key="project">{{ project }}</option></select><div class="mode-switch"><button :class="{active:statusFilter==='all'}" @click="statusFilter='all'">全部</button><button :class="{active:statusFilter==='final'}" @click="statusFilter='final'">成片</button><button :class="{active:statusFilter==='output'}" @click="statusFilter='output'">输出</button><button :class="{active:statusFilter==='render'}" @click="statusFilter='render'">渲染</button></div></header>
@@ -209,35 +209,35 @@ onBeforeUnmount(() => window.clearInterval(jobTimer));
       </div>
     </section>
     <template v-if="activeSection==='pipeline'">
-      <section class="video-metrics pipeline-metrics"><div><span>生产项目</span><b>{{ jobs.length }}</b><small>每个目录只保留一条任务</small></div><div><span>完整交付</span><b>{{ pipelineStats.complete }}</b><small>四项交付全部可读</small></div><div><span>需要补齐</span><b>{{ pipelineStats.attention }}</b><small>明确显示缺少哪一项</small></div><div><span>已覆盖合集</span><b>{{ pipelineStats.types }}/3</b><small>人性、科技、推理</small></div></section>
+      <section class="video-metrics pipeline-metrics"><div><span>生产项目</span><b>{{ jobs.length }}</b></div><div><span>完整交付</span><b>{{ pipelineStats.complete }}</b></div><div><span>需要补齐</span><b>{{ pipelineStats.attention }}</b></div><div><span>已覆盖合集</span><b>{{ pipelineStats.types }}/3</b></div></section>
       <section class="panel pipeline-panel">
-        <div class="pipeline-explain"><b>统一验收口径</b><span>脚本 → 成片 → 封面 → 发布文案。工作台只检查并管理现有本地交付，不会未经确认自动发布视频。</span></div>
+        <div class="pipeline-explain"><b>交付流程</b><span>脚本 → 成片 → 封面 → 发布文案</span></div>
         <div class="job-grid"><article v-for="job in jobs" :key="job.id" class="video-job-card" :class="job.status">
           <header><div><small>{{ jobTypeText[job.videoType] }}<template v-if="job.skillName"> · ${{ job.skillName }}</template></small><h2>{{ job.title }}</h2></div><span>{{ jobStatusText[job.status] }}</span></header>
           <div class="job-progress-label"><span>{{ job.progressMessage || stageText[job.currentStage] }}</span><b>{{ job.progressPercent }}%</b></div><div class="job-stage"><i :style="{width:`${job.progressPercent}%`}"></i></div>
           <div class="job-deliverables"><span v-for="item in job.deliverables" :key="item.kind" :class="item.status"><b>{{ deliverableIcons[item.kind] }}</b>{{ item.kind==='script'?'脚本':item.kind==='video'?'成片':item.kind==='cover'?'封面':'发布' }}<em>{{ item.status==='ready'?'已就绪':'缺失' }}</em><small>{{ item.qualitySummary }}</small></span></div>
-          <p v-if="job.failureReason" class="job-failure">{{ job.status==='failed'?'失败原因：':'下一步：' }}{{ job.failureReason }}</p><p v-else-if="['queued','running','finalizing'].includes(job.status)" class="job-running">Codex 正在后台执行，完成后会自动扫描四项交付并发送工作台消息。</p><p v-else class="job-success">四项交付完整，可在视频库中播放、查看和复制。</p>
+          <p v-if="job.failureReason" class="job-failure">{{ job.status==='failed'?'失败原因：':'下一步：' }}{{ job.failureReason }}</p><p v-else-if="['queued','running','finalizing'].includes(job.status)" class="job-running">Codex 正在后台执行，完成后会自动扫描四项交付并发送工作台消息。</p>
           <details v-if="job.codexOutput" class="job-codex-output"><summary>查看 Codex 输出</summary><pre>{{ job.codexOutput }}</pre></details>
           <footer><label>合集<select v-model="job.videoType" @change="changeJobType(job)"><option value="human-weakness">人性的弱点</option><option value="tech">AI未来观察局</option><option value="reasoning">谜题推演社</option></select></label><span>{{ job.manuallyConfirmedType?'已人工确认':'自动识别' }}</span><b>当前阶段：{{ stageText[job.currentStage] }}</b></footer>
         </article><div v-if="!jobs.length&&!loading" class="empty-state"><b>尚未建立视频生产任务</b><p>点击重新扫描后，会从本地视频项目自动建立。</p></div></div>
       </section>
     </template>
     <section v-if="activeSection==='publish'" class="panel publish-review-panel">
-      <header><div><h2>发布与数据复盘</h2><p>完整交付后自动进入待发布。工作台只记录状态和数据，不会在未授权的情况下操作抖音账号。</p></div><b>{{ publishRecords.filter(item=>item.status==='ready').length }} 条待发布</b></header>
+      <header><div><h2>发布与数据复盘</h2><p>不会自动发布到抖音</p></div><b>{{ publishRecords.filter(item=>item.status==='ready').length }} 条待发布</b></header>
       <div class="publish-records"><article v-for="record in publishRecords" :key="record.id" :class="record.status"><header><div><small>{{ jobTypeText[record.videoType] }} · {{ record.platform }}</small><h3>{{ record.title }}</h3></div><span>{{ record.status==='published'?'已发布':'待发布' }}</span></header><div class="publish-fields"><label>作品链接<input v-model="record.publishUrl" placeholder="发布后粘贴抖音作品链接"></label><label>播放<input v-model.number="record.views" min="0" type="number"></label><label>点赞<input v-model.number="record.likes" min="0" type="number"></label><label>评论<input v-model.number="record.comments" min="0" type="number"></label><label>收藏<input v-model.number="record.favorites" min="0" type="number"></label></div><label>复盘备注<textarea v-model="record.notes" rows="2" placeholder="记录开头留存、评论反馈和下一条改进点"></textarea></label><footer><small v-if="record.publishedAt">发布于 {{ formatTime(record.publishedAt) }}</small><span></span><button class="button secondary small" :disabled="savingPublishId===record.id" @click="savePublish(record)">保存数据</button><button v-if="record.status==='ready'" class="button primary small" :disabled="savingPublishId===record.id" @click="savePublish(record,true)">标记已发布</button></footer></article><div v-if="!publishRecords.length" class="empty-state"><b>还没有待发布作品</b><p>视频的脚本、成片、封面和发布文案全部就绪后，会自动出现在这里。</p></div></div>
     </section>
     <div v-if="selected" class="activity-backdrop" @click.self="selected=null">
       <aside class="activity-drawer panel video-detail-drawer">
         <header>
-          <div><h2 :title="selected.title">{{ selectedTitle }}</h2><p>本地交付内容 · 可直接查看、复制和定位</p></div>
+          <div><h2 :title="selected.title">{{ selectedTitle }}</h2></div>
           <button class="icon-button" @click="selected=null">×</button>
         </header>
         <video v-if="selectedVideoSrc" :key="selected.path" class="internal-video-player" :src="selectedVideoSrc" controls autoplay playsinline preload="metadata">当前环境不支持播放该视频。</video>
-        <div v-else class="video-detail-cover" :style="selected.coverPath && covers[selected.coverPath] ? {backgroundImage:`url('${covers[selected.coverPath]}')`} : {}"><span>▶</span><small>桌面版可在工作台内直接播放</small></div>
+        <div v-else class="video-detail-cover" :style="selected.coverPath && covers[selected.coverPath] ? {backgroundImage:`url('${covers[selected.coverPath]}')`} : {}"><span>▶</span></div>
 
         <section class="video-deliverables">
           <div class="deliverable-heading">
-            <div><h3>交付文件</h3><p>自动读取当前视频所属项目，不上传本地内容</p></div>
+            <div><h3>交付文件</h3><p>自动读取本地交付，不上传内容</p></div>
             <span v-if="detailsLoading">读取中…</span>
           </div>
           <p v-if="detailMessage" class="detail-message">{{ detailMessage }}</p>

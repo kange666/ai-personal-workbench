@@ -50,7 +50,6 @@ async function openResult(result: WorkspaceSearchResult) {
       <div class="workspace-search-results">
         <button v-for="result in results" :key="`${result.kind}-${result.id}`" @click="openResult(result)"><i>{{ result.kind === '任务' ? '✓' : result.kind === 'Codex 对话' ? '◔' : result.kind === '报告' ? '▤' : result.kind === '内容' ? '✦' : result.kind === '接口' ? '⌘' : '◇' }}</i><span><b>{{ result.title }}</b><small>{{ result.kind }} · {{ result.subtitle }}<template v-if="result.date"> · {{ result.date }}</template></small></span><em>›</em></button>
         <p v-if="query.trim() && !loading && !results.length && !error" class="panel-empty">没有找到匹配内容。</p>
-        <p v-if="!query.trim()" class="search-hint">输入关键词后按 Enter，所有结果都可点击进入对应数据页。</p>
       </div>
     </section>
   </div>

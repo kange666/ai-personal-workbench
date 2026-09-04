@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 47;
+pub const SCHEMA_VERSION: i64 = 48;
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -608,6 +608,7 @@ impl DatabaseState {
                    period_end TEXT NOT NULL,
                    title TEXT NOT NULL,
                    content_markdown TEXT NOT NULL DEFAULT '',
+                   ai_summary TEXT NOT NULL DEFAULT '',
                    status TEXT NOT NULL DEFAULT 'draft',
                    created_at TEXT NOT NULL,
                    updated_at TEXT NOT NULL
@@ -1283,6 +1284,7 @@ impl DatabaseState {
             "ALTER TABLE api_sources ADD COLUMN code_typescript INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE api_endpoints ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE jenkins_publish_records ADD COLUMN changes_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE reports ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = connection.execute(migration, []);
         }
@@ -1657,7 +1659,7 @@ pub fn search_workspace(
         "/tokens?conversation=",
     )?;
     collect(
-        "SELECT id,title,report_type || ' · ' || period_start,period_start FROM reports WHERE title LIKE ?1 ESCAPE '\\' OR content_markdown LIKE ?1 ESCAPE '\\' ORDER BY updated_at DESC LIMIT 15",
+        "SELECT id,title,report_type || ' · ' || period_start,period_start FROM reports WHERE title LIKE ?1 ESCAPE '\\' OR content_markdown LIKE ?1 ESCAPE '\\' OR ai_summary LIKE ?1 ESCAPE '\\' ORDER BY updated_at DESC LIMIT 15",
         "报告",
         "/reports?report=",
     )?;
@@ -1930,6 +1932,50 @@ mod migration_tests {
         drop(backup);
 
         DatabaseState::new(database_path).unwrap();
+        assert_eq!(backup_files(&directory).len(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn report_ai_summary_migration_preserves_original_content() {
+        let directory = test_directory("report-ai-summary");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("workbench.sqlite3");
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO app_meta(key,value) VALUES('schema_version','47');
+                 CREATE TABLE reports (
+                   id TEXT PRIMARY KEY,
+                   report_type TEXT NOT NULL,
+                   period_start TEXT NOT NULL,
+                   period_end TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   content_markdown TEXT NOT NULL DEFAULT '',
+                   status TEXT NOT NULL DEFAULT 'draft',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO reports(id,report_type,period_start,period_end,title,content_markdown,status,created_at,updated_at)
+                 VALUES('report-1','weekly','2026-08-31','2026-09-06','周报','原报告内容','draft','2026-09-04T00:00:00Z','2026-09-04T00:00:00Z');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let state = DatabaseState::new(database_path).unwrap();
+        let upgraded = state.connect().unwrap();
+        let (content, summary): (String, String) = upgraded
+            .query_row(
+                "SELECT content_markdown,ai_summary FROM reports WHERE id='report-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "原报告内容");
+        assert_eq!(summary, "");
+        drop(upgraded);
+
         assert_eq!(backup_files(&directory).len(), 1);
         std::fs::remove_dir_all(directory).unwrap();
     }

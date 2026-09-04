@@ -83,13 +83,13 @@ onMounted(load);
 
 <template>
   <div class="view inbox-view">
-    <header class="page-header"><div><h1>待处理收件箱</h1><p>统一处理快速任务、Codex、TAPD、测试和项目风险</p></div><div><button class="button secondary" :disabled="loading" @click="load">{{ loading?"同步中…":"↻ 同步来源" }}</button><RouterLink class="button primary link-button" to="/calendar?tab=tasks">打开工作日历</RouterLink></div></header>
+    <header class="page-header"><div><h1>待处理收件箱</h1></div><div><button class="button secondary" :disabled="loading" @click="load">{{ loading?"同步中…":"↻ 同步来源" }}</button><RouterLink class="button primary link-button" to="/calendar?tab=tasks">打开工作日历</RouterLink></div></header>
     <div v-if="message||error" class="inbox-message" :class="{error:Boolean(error)}">{{ error||message }}</div>
     <section class="inbox-metrics">
-      <article><small>需要行动</small><b>{{ counts.open }}</b><span>待决策与处理中</span></article>
-      <article><small>待决策</small><b>{{ counts.needs_decision }}</b><span>需要你给出结论</span></article>
-      <article><small>处理中</small><b>{{ counts.in_progress }}</b><span>已转任务或继续修改</span></article>
-      <article><small>已完成</small><b>{{ counts.done }}</b><span>来源结果已闭环</span></article>
+      <article><small>需要行动</small><b>{{ counts.open }}</b></article>
+      <article><small>待决策</small><b>{{ counts.needs_decision }}</b></article>
+      <article><small>处理中</small><b>{{ counts.in_progress }}</b></article>
+      <article><small>已完成</small><b>{{ counts.done }}</b></article>
     </section>
     <section class="inbox-workspace panel">
       <nav class="inbox-tabs">
@@ -102,7 +102,7 @@ onMounted(load);
           <div class="inbox-meta"><span :class="`priority-${item.priority}`">{{ priorityLabel(item.priority) }}</span><span>{{ statusLabels[item.workflowStatus] }}</span><time>{{ formatTime(item.updatedAt) }}</time></div>
           <div class="inbox-actions"><button class="text-button" @click="selected=item">详情</button><button v-if="item.workflowStatus==='needs_decision'" class="button secondary small" :disabled="loading" @click="changeStatus(item,'in_progress')">开始处理</button><button v-if="item.workflowStatus==='needs_decision'&&!['task_suggestion','video'].includes(item.sourceType)" class="button secondary small" :disabled="loading" @click="createTask(item)">转为任务</button><button v-if="item.workflowStatus==='in_progress'" class="button primary small" :disabled="loading" @click="changeStatus(item,'done')">标记完成</button><button v-if="item.workflowStatus!=='archived'" class="text-button muted" :disabled="loading" @click="changeStatus(item,'archived')">归档</button></div>
         </article>
-        <div v-if="!filtered.length" class="inbox-empty"><b>{{ loading?'正在同步本地来源':'当前筛选条件下没有事项' }}</b><p>已完成和已归档记录不会出现在“需要行动”中。</p></div>
+        <div v-if="!filtered.length" class="inbox-empty"><b>{{ loading?'正在同步本地来源':'当前筛选条件下没有事项' }}</b></div>
       </div>
     </section>
     <div v-if="selected" class="activity-backdrop" @click.self="selected=null"><aside class="activity-drawer panel inbox-detail"><header><div><small>{{ sourceLabels[selected.sourceType] }} · {{ selected.project }}</small><h2 :title="selected.title">{{ compactDetailTitle(selected.title) }}</h2><p>{{ statusLabels[selected.workflowStatus] }} · {{ formatTime(selected.updatedAt) }}</p></div><button class="icon-button" @click="selected=null">×</button></header><section class="inbox-detail-tags"><span :class="`priority-${selected.priority}`">{{ priorityLabel(selected.priority) }}</span><span>{{ selected.sourceStatus||"来源状态未知" }}</span></section><section><h3>事项摘要</h3><p>{{ selected.summary||"暂无摘要" }}</p></section><section><h3>来源与处理说明</h3><p>{{ selected.detail||"暂无补充信息" }}</p><dl><div><dt>来源类型</dt><dd>{{ sourceLabels[selected.sourceType] }}</dd></div><div><dt>来源 ID</dt><dd>{{ selected.sourceId||"未关联" }}</dd></div><div><dt>规范项目</dt><dd>{{ selected.project }}</dd></div></dl></section><footer><button v-if="selected.route" class="button secondary" @click="openSource(selected)">查看来源</button><button v-if="selected.workflowStatus==='needs_decision'" class="button secondary" @click="createTask(selected)">转为今日任务</button><button v-if="selected.workflowStatus==='needs_decision'" class="button primary" @click="changeStatus(selected,'in_progress')">开始处理</button><button v-else-if="selected.workflowStatus==='in_progress'" class="button primary" @click="changeStatus(selected,'done')">标记完成</button></footer></aside></div>

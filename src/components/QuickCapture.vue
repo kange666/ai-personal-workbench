@@ -43,7 +43,7 @@ function time(value:string) { return new Intl.DateTimeFormat("zh-CN",{month:"num
 <template>
   <div v-if="open" class="modal-backdrop quick-capture-backdrop" @click.self="emit('close')">
     <section class="panel quick-capture-dialog">
-      <header><div><h2>快速记录</h2><p>笔记、灵感和网址留待整理；任务会进入待处理收件箱。</p></div><button class="icon-button" @click="emit('close')">×</button></header>
+      <header><div><h2>快速记录</h2><p>任务将进入待处理收件箱</p></div><button class="icon-button" @click="emit('close')">×</button></header>
       <div class="quick-capture-body">
         <div class="quick-capture-editor">
           <nav><button v-for="item in kindOptions" :key="item.id" :class="{active:kind===item.id}" @click="kind=item.id">{{ item.label }}</button></nav>
@@ -51,7 +51,7 @@ function time(value:string) { return new Intl.DateTimeFormat("zh-CN",{month:"num
           <input v-if="kind==='url'" v-model="sourceUrl" type="url" placeholder="https://…" @keydown.enter="save">
           <p v-if="error" class="form-error">{{ error }}</p>
           <p v-if="message" class="quick-capture-message">{{ message }}</p>
-          <footer><small>全局快捷键 Ctrl + Shift + Space · Ctrl + Enter 保存</small><button class="button primary" :disabled="loading || !content.trim()" @click="save">{{ loading?'保存中…':kind==='task'?'加入待处理':'保存记录' }}</button></footer>
+          <footer><small>Ctrl + Enter 保存</small><button class="button primary" title="全局快捷键 Ctrl + Shift + Space" :disabled="loading || !content.trim()" @click="save">{{ loading?'保存中…':kind==='task'?'加入待处理':'保存记录' }}</button></footer>
         </div>
         <aside><h3>待整理记录 <span>{{ items.length }}</span></h3><div class="quick-capture-list"><article v-for="item in items" :key="item.id"><div class="quick-capture-copy"><small>{{ kindLabel(item.kind) }} · {{ time(item.createdAt) }}</small><p>{{ item.content }}</p><a v-if="item.sourceUrl" :href="item.sourceUrl" target="_blank" rel="noreferrer">{{ item.sourceUrl }}</a></div><div class="quick-capture-actions"><button class="text-button" :disabled="loading" @click="archive(item)">归档</button><button class="text-button danger-text" :disabled="loading" @click="remove(item)">删除</button></div></article><p v-if="!items.length" class="panel-empty">暂无待整理记录。</p></div></aside>
       </div>

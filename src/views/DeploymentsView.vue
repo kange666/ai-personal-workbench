@@ -270,7 +270,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
 <template>
   <div class="view deployments-view">
     <header class="page-header">
-      <div><h1>发布中心</h1><p>选择 Jenkins 项目和已配置分支，触发发布并查看实时状态</p></div>
+      <div><h1>发布中心</h1><p>选择项目与分支，触发并跟踪 Jenkins 发布</p></div>
       <div><button class="button secondary" :disabled="loadingJobs || !connection.configured" @click="loadJobs">{{ loadingJobs ? "刷新中…" : "↻ 刷新项目" }}</button><button class="button secondary" @click="openConfiguration">配置 Jenkins</button></div>
     </header>
 
@@ -278,7 +278,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
     <div v-if="error" class="status-banner error">{{ error }}</div>
 
     <section v-if="!connection.configured" class="panel deployment-empty-connection">
-      <span>J</span><div><h2>尚未连接 Jenkins</h2><p>先保存 Jenkins 地址、用户名和 API Token，工作台不会修改 Jenkins 中的任何配置。</p></div><button class="button primary" @click="openConfiguration">配置 Jenkins</button>
+      <span>J</span><div><h2>尚未连接 Jenkins</h2><p>配置 Jenkins 连接后开始发布</p></div><button class="button primary" @click="openConfiguration">配置 Jenkins</button>
     </section>
 
     <template v-else>
@@ -297,7 +297,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
             </div>
             <small>{{ selectedJob ? selectedJob.fullName : "支持 Jenkins View 分组和完整路径搜索" }}</small>
           </label>
-          <label><span>分支</span><select v-model="selectedBranch" :disabled="!selectedJob || loadingBranches"><option value="">{{ loadingBranches ? "正在读取分支…" : selectedJob ? "选择已配置分支" : "请先选择项目" }}</option><option v-for="branch in branchOptions?.branches || []" :key="branch" :value="branch">{{ branch }}</option></select><small v-if="duplicateActiveRecord" class="duplicate-publish-hint">该项目和分支正在发布，完成后可再次发布</small><small v-else-if="branchOptions">参数：{{ branchOptions.parameterName }} · 其他参数使用 Jenkins 默认值</small></label>
+          <label><span>分支</span><select v-model="selectedBranch" :disabled="!selectedJob || loadingBranches"><option value="">{{ loadingBranches ? "正在读取分支…" : selectedJob ? "选择已配置分支" : "请先选择项目" }}</option><option v-for="branch in branchOptions?.branches || []" :key="branch" :value="branch">{{ branch }}</option></select><small v-if="duplicateActiveRecord" class="duplicate-publish-hint">该项目和分支正在发布，完成后可再次发布</small></label>
           <button class="button primary publish-button" :disabled="!canPublish" @click="requestPublish">{{ publishing ? "正在提交…" : duplicateActiveRecord ? "正在发布" : "发布" }}</button>
         </div>
       </section>
@@ -330,15 +330,15 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
 
     <div v-if="confirmingPublish" class="activity-backdrop jenkins-dialog-backdrop" @click.self="confirmingPublish=false">
       <section class="panel jenkins-confirm-dialog">
-        <header><div><h2>确认发布</h2><p>工作台只传递所选分支，不修改 Jenkins 配置。</p></div><button type="button" class="icon-button" @click="confirmingPublish=false">×</button></header>
-        <div class="publish-confirm-content"><dl><div><dt>项目</dt><dd><b>{{ selectedJob?.displayName }}</b><small>{{ selectedJob?.fullName }}</small></dd></div><div><dt>分支</dt><dd><code>{{ selectedBranch }}</code></dd></div></dl><aside><b>本次实际 Changes</b><p>构建开始后从 Jenkins 当前构建读取，将显示在“正在发布”和发布历史中。</p></aside><p>其他参数使用 Jenkins Job 中已配置的默认值。</p></div>
+        <header><div><h2>确认发布</h2></div><button type="button" class="icon-button" @click="confirmingPublish=false">×</button></header>
+        <div class="publish-confirm-content"><dl><div><dt>项目</dt><dd><b>{{ selectedJob?.displayName }}</b><small>{{ selectedJob?.fullName }}</small></dd></div><div><dt>分支</dt><dd><code>{{ selectedBranch }}</code></dd></div></dl><aside><b>本次实际 Changes</b></aside><p>使用 Job 默认参数，不修改 Jenkins 配置</p></div>
         <footer><button type="button" class="button secondary" @click="confirmingPublish=false">取消</button><button type="button" class="button primary" @click="publish">确认发布</button></footer>
       </section>
     </div>
 
     <div v-if="aliasJob" class="activity-backdrop jenkins-dialog-backdrop" @click.self="aliasJob=null">
       <form class="panel jenkins-alias-dialog" @submit.prevent="saveAlias">
-        <header><div><h2>自定义项目名称</h2><p>只改变工作台显示，不修改 Jenkins Job。</p></div><button type="button" class="icon-button" @click="aliasJob=null">×</button></header>
+        <header><div><h2>自定义项目名称</h2><p>仅影响工作台显示</p></div><button type="button" class="icon-button" @click="aliasJob=null">×</button></header>
         <div><label>Jenkins 完整路径<input :value="aliasJob.fullName" disabled></label><label>工作台显示名称<input v-model="aliasValue" maxlength="80" :placeholder="aliasJob.name"><small>留空保存可恢复 Jenkins 原名。</small></label></div>
         <footer><button type="button" class="button secondary" @click="aliasJob=null">取消</button><button class="button primary" :disabled="aliasSaving">{{ aliasSaving ? "保存中…" : "保存" }}</button></footer>
       </form>
@@ -346,7 +346,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); eventUnlisten?.(); });
 
     <div v-if="configuring" class="activity-backdrop jenkins-config-backdrop" @click.self="configuring=false">
       <form class="panel jenkins-config-dialog" @submit.prevent="saveConfiguration">
-        <header><div><h2>连接 Jenkins</h2><p>只保存连接信息，不会修改 Jenkins Job 或发布规则。</p></div><button type="button" class="icon-button" @click="configuring=false">×</button></header>
+        <header><div><h2>连接 Jenkins</h2><p>仅保存连接信息</p></div><button type="button" class="icon-button" @click="configuring=false">×</button></header>
         <div><label>Jenkins 地址<input v-model="configBaseUrl" placeholder="https://jenkins.example.com"></label><label>用户名<input v-model="configUsername" autocomplete="username" placeholder="Jenkins 用户名"></label><label>API Token<input v-model="configToken" type="password" autocomplete="new-password" :placeholder="connection.configured ? '留空则继续使用已保存 Token' : '粘贴 Jenkins API Token'"><small>Token 保存到 Windows 凭据库，保存后不再回显。</small></label></div>
         <footer><button type="button" class="button secondary" :disabled="configBusy || !configBaseUrl.trim() || !configUsername.trim()" @click="testConfiguration">{{ configBusy ? "连接中…" : "测试连接" }}</button><span></span><button type="button" class="button secondary" @click="configuring=false">取消</button><button class="button primary" :disabled="configBusy || !configBaseUrl.trim() || !configUsername.trim() || (!connection.configured && !configToken)">{{ configBusy ? "保存中…" : "保存" }}</button></footer>
       </form>

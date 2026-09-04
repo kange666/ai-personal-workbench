@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { backfillHistoricalReports, generateReport, getReportSources, isTauriRuntime, listReports, refineReportWithAi, saveReport, setReportLocked, type HistoricalReportSummary, type ReportRecord, type ReportSource } from "../services/backend";
+import { backfillHistoricalReports, generateReport, getReportSources, isTauriRuntime, listReports, saveReport, setReportLocked, summarizeReportWithAi, type HistoricalReportSummary, type ReportRecord, type ReportSource } from "../services/backend";
 import { useWorkbenchStore } from "../stores/workbench";
 
 const today = new Date().toISOString().slice(0, 10);
 const demoReports: ReportRecord[] = [{
   id: "demo-report", reportType: "weekly", periodStart: "2026-07-27", periodEnd: "2026-08-02",
   title: "2026年第31周工作总结", status: "draft", createdAt: "2026-08-02T16:00:00+08:00", updatedAt: "2026-08-02T16:00:00+08:00",
+  aiSummary: "- 相关方管理功能开发完成\n- 修改多模块 deptId 参数逻辑",
   contentMarkdown: "# 2026年第31周工作总结\n\n统计周期：2026-07-27 至 2026-08-02\n\n## 工作概览\n\n- 完成任务：8 项\n- 活跃项目：3 个\n- Token 使用：542800\n\n## 已完成事项\n\n- [星枢 ASTRION] 完成产品原型与正式版基础搭建。\n- [星枢 ASTRION] 确认 B 指挥中心布局及双主题。\n\n## 问题与风险\n\n- 桌面端仍需安装 Windows C++ 链接工具后才能完成打包验证。\n\n## 下一步计划\n\n- 完成本地数据采集与自动报告链路。",
 }];
 
@@ -32,8 +33,9 @@ const reportSources = ref<ReportSource[]>([]);
 const backfillSummary = ref<HistoricalReportSummary | null>(null);
 const selected = computed(() => reports.value.find((report) => report.id === selectedId.value) ?? null);
 const reportProjects = computed(() => ["全部项目", ...new Set(reports.value.flatMap(report => report.contentMarkdown.split("\n").filter(line => line.startsWith("### ")).map(line => line.slice(4).trim())).filter(Boolean))]);
-const filteredReports = computed(() => reports.value.filter(report => (typeFilter.value === "all" || report.reportType === typeFilter.value) && (projectFilter.value === "全部项目" || report.contentMarkdown.split("\n").some(line => line.trim() === `### ${projectFilter.value}`)) && (!searchQuery.value.trim() || `${report.title} ${report.contentMarkdown}`.toLowerCase().includes(searchQuery.value.trim().toLowerCase()))));
+const filteredReports = computed(() => reports.value.filter(report => (typeFilter.value === "all" || report.reportType === typeFilter.value) && (projectFilter.value === "全部项目" || report.contentMarkdown.split("\n").some(line => line.trim() === `### ${projectFilter.value}`)) && (!searchQuery.value.trim() || `${report.title} ${report.aiSummary} ${report.contentMarkdown}`.toLowerCase().includes(searchQuery.value.trim().toLowerCase()))));
 const lines = computed(() => selected.value?.contentMarkdown.split("\n") ?? []);
+const summaryLines = computed(() => selected.value?.aiSummary.split("\n").map(line => line.replace(/^\s*[-*•]\s*/, "").trim()).filter(Boolean) ?? []);
 
 function reportLabel(type: ReportRecord["reportType"]) {
   return ({ daily: "日报", weekly: "周报", monthly: "月报" })[type];
@@ -102,10 +104,10 @@ async function regenerate() {
   referenceDate.value = selected.value.periodStart;
   await createReport();
 }
-async function refineWithAi() {
-  if (!selected.value || !isTauriRuntime()) { error.value = "请在桌面端使用 AI 润色。"; return; }
+async function summarizeWithAi() {
+  if (!selected.value || !isTauriRuntime()) { error.value = "请在桌面端使用 AI 总结。"; return; }
   loading.value = true; error.value = "";
-  try { selected.value.contentMarkdown = await refineReportWithAi(selected.value.id); }
+  try { selected.value.aiSummary = await summarizeReportWithAi(selected.value.id); }
   catch (cause) { error.value = String(cause); }
   finally { loading.value = false; }
 }
@@ -124,7 +126,10 @@ function openSource(source: ReportSource) {
 }
 function exportWord() {
   if (!selected.value) return;
-  const escaped = selected.value.contentMarkdown.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const content = selected.value.aiSummary.trim()
+    ? `## AI 总结\n\n${selected.value.aiSummary}\n\n${selected.value.contentMarkdown}`
+    : selected.value.contentMarkdown;
+  const escaped = content.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const html = `<html><head><meta charset="utf-8"><title>${selected.value.title}</title></head><body><pre style="font:14px/1.8 Microsoft YaHei;white-space:pre-wrap">${escaped}</pre></body></html>`;
   const url = URL.createObjectURL(new Blob(["\ufeff", html], { type: "application/msword;charset=utf-8" }));
   const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${selected.value.title}.doc`; anchor.click();
@@ -139,7 +144,7 @@ onMounted(async () => { await refresh(String(route.query.report || "") || undefi
 <template>
   <div class="view">
     <header class="page-header">
-      <div><h1>报告中心</h1><p>普通与归档 Codex 对话统一分析；按天回答“今天做了什么”，按周还原完整工作轨迹</p></div>
+      <div><h1>报告中心</h1><p>按日、周、月整理本地工作记录</p></div>
       <div class="report-create"><button class="button secondary" :disabled="loading" title="扫描普通与归档会话，并重建所有未锁定的日报和周报" @click="organizeHistory">▦ 扫描并重建全部历史</button><select v-model="reportType"><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option></select><input v-model="referenceDate" type="date"><button class="button primary" :disabled="loading" @click="createReport">{{ loading ? "处理中…" : "＋ 生成报告" }}</button></div>
     </header>
     <div v-if="error || message" class="scan-message" :class="{ error: Boolean(error) }">{{ error || message }}</div>
@@ -152,12 +157,12 @@ onMounted(async () => { await refresh(String(route.query.report || "") || undefi
         <p v-if="!filteredReports.length" class="empty-state">没有符合条件的报告。</p>
       </aside>
       <article v-if="selected" class="panel report-paper">
-        <div class="report-actions"><span>{{ reportLabel(selected.reportType) }} · {{ selected.status === 'locked' ? '已锁定' : '可编辑' }}</span><div><button class="button secondary small" :disabled="loading" @click="openSources">◎ 查看来源</button><button class="button secondary small" :disabled="selected.status === 'locked'" @click="beginEdit">✎ 编辑</button><button class="button secondary small" :disabled="selected.status === 'locked' || loading" @click="refineWithAi">✦ AI 润色</button><button class="button secondary small" @click="toggleLock">{{ selected.status === 'locked' ? '解锁' : '▣ 锁定' }}</button><button class="button secondary small" :disabled="selected.status === 'locked'" @click="regenerate">↻ 重新生成</button><button class="button primary small" @click="exportWord">⇩ 导出 Word</button></div></div>
+        <div class="report-actions"><span>{{ reportLabel(selected.reportType) }} · {{ selected.status === 'locked' ? '已锁定' : '可编辑' }}</span><div><button class="button secondary small" :disabled="loading" @click="openSources">◎ 查看来源</button><button class="button secondary small" :disabled="selected.status === 'locked'" @click="beginEdit">✎ 编辑</button><button class="button secondary small" :disabled="selected.status === 'locked' || loading" @click="summarizeWithAi">✦ AI 总结</button><button class="button secondary small" @click="toggleLock">{{ selected.status === 'locked' ? '解锁' : '▣ 锁定' }}</button><button class="button secondary small" :disabled="selected.status === 'locked'" @click="regenerate">↻ 重新生成</button><button class="button primary small" @click="exportWord">⇩ 导出 Word</button></div></div>
         <div v-if="editing" class="report-editor"><input v-model="draftTitle"><textarea v-model="draftContent"></textarea><div><button class="button secondary" @click="editing = false">取消</button><button class="button primary" :disabled="loading" @click="persistEdit">保存修改</button></div></div>
-        <div v-else class="paper markdown-paper"><p v-for="(line,index) in lines" :key="index" :class="lineClass(line)">{{ cleanLine(line) }}</p></div>
+        <div v-else class="paper markdown-paper"><section class="report-ai-summary"><header><div><span>✦</span><h2>AI 总结</h2></div><small>DeepSeek 精炼</small></header><ul v-if="summaryLines.length"><li v-for="item in summaryLines" :key="item">{{ item }}</li></ul><p v-else>点击右上角“AI 总结”，提炼本报告的核心功能成果；原报告内容不会被替换。</p></section><p v-for="(line,index) in lines" :key="index" :class="lineClass(line)">{{ cleanLine(line) }}</p></div>
       </article>
-      <article v-else class="panel report-paper empty-report"><b>还没有可查看的报告</b><p>首次使用时先导入 Codex、扫描 Git，再生成报告，内容会更完整。</p></article>
+      <article v-else class="panel report-paper empty-report"><b>还没有可查看的报告</b><p>先导入 Codex、扫描 Git，再生成报告</p></article>
     </section>
-    <div v-if="sourceOpen" class="activity-backdrop" @click.self="sourceOpen=false"><aside class="activity-drawer panel report-source-drawer"><header><div><h2>报告证据链</h2><p>{{ selected?.periodStart }}—{{ selected?.periodEnd }} · 数据截至 {{ selected?.updatedAt ? new Date(selected.updatedAt).toLocaleString('zh-CN') : '未知' }}</p></div><button class="icon-button" @click="sourceOpen=false">×</button></header><div class="report-evidence-note"><b>来源事实</b><span>以下记录来自本地 Codex、Git、任务、测试和 TAPD；报告中的功能描述是基于这些事实自动归纳。</span></div><div class="report-source-summary"><span>Codex {{ reportSources.filter(item=>item.kind==='Codex 对话').length }}</span><span>Git {{ reportSources.filter(item=>item.kind==='Git 提交').length }}</span><span>任务 {{ reportSources.filter(item=>item.kind==='任务').length }}</span><span>测试 {{ reportSources.filter(item=>item.kind==='测试').length }}</span><span>TAPD {{ reportSources.filter(item=>item.kind==='TAPD 缺陷').length }}</span></div><div class="report-source-list"><button v-for="item in reportSources" :key="`${item.kind}:${item.id}`" @click="openSource(item)"><i>{{ item.kind }}</i><span><b>{{ item.title }}</b><small>{{ item.project }} · {{ item.date }} · {{ item.detail }}</small></span><em>{{ item.kind === 'Git 提交' ? '来源记录' : '查看 →' }}</em></button><p v-if="!reportSources.length">该报告周期没有可关联的本地来源。</p></div></aside></div>
+    <div v-if="sourceOpen" class="activity-backdrop" @click.self="sourceOpen=false"><aside class="activity-drawer panel report-source-drawer"><header><div><h2>报告证据链</h2><p>{{ selected?.periodStart }}—{{ selected?.periodEnd }} · 数据截至 {{ selected?.updatedAt ? new Date(selected.updatedAt).toLocaleString('zh-CN') : '未知' }}</p></div><button class="icon-button" @click="sourceOpen=false">×</button></header><div class="report-evidence-note"><b>来源事实</b><span>报告由以下本地记录归纳生成</span></div><div class="report-source-summary"><span>Codex {{ reportSources.filter(item=>item.kind==='Codex 对话').length }}</span><span>Git {{ reportSources.filter(item=>item.kind==='Git 提交').length }}</span><span>任务 {{ reportSources.filter(item=>item.kind==='任务').length }}</span><span>测试 {{ reportSources.filter(item=>item.kind==='测试').length }}</span><span>TAPD {{ reportSources.filter(item=>item.kind==='TAPD 缺陷').length }}</span></div><div class="report-source-list"><button v-for="item in reportSources" :key="`${item.kind}:${item.id}`" @click="openSource(item)"><i>{{ item.kind }}</i><span><b>{{ item.title }}</b><small>{{ item.project }} · {{ item.date }} · {{ item.detail }}</small></span><em>{{ item.kind === 'Git 提交' ? '来源记录' : '查看 →' }}</em></button><p v-if="!reportSources.length">该报告周期没有可关联的本地来源。</p></div></aside></div>
   </div>
 </template>

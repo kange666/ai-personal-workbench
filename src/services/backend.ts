@@ -876,6 +876,7 @@ export interface ReportRecord {
   periodEnd: string;
   title: string;
   contentMarkdown: string;
+  aiSummary: string;
   status: "draft" | "locked";
   createdAt: string;
   updatedAt: string;
@@ -2002,7 +2003,7 @@ export async function translateError(text: string): Promise<ErrorTranslation> {
   return invoke<ErrorTranslation>("translate_error", { text });
 }
 
-export async function refineReportWithAi(id: string): Promise<string> {
+export async function summarizeReportWithAi(id: string): Promise<string> {
   return invoke<string>("refine_report_with_ai", { id });
 }
 
@@ -2056,6 +2057,10 @@ export async function startTestCaseGeneration(projectPath: string, menuId: strin
 
 export async function getTestCaseGeneration(jobId: string): Promise<TestCaseGenerationJob> {
   return invoke<TestCaseGenerationJob>("get_test_case_generation", { jobId });
+}
+
+export async function listTestCaseGenerations(): Promise<TestCaseGenerationJob[]> {
+  return invoke<TestCaseGenerationJob[]>("list_test_case_generations");
 }
 
 export async function preflightTest(options: StartTestOptions): Promise<TestPreflight> {

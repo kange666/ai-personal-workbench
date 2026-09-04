@@ -381,7 +381,7 @@ onBeforeUnmount(() => {
         <div v-if="periodSwitching" class="cockpit-loading-layer" role="status" aria-live="polite"><span><i></i>正在加载{{ selectedPeriodLabel }}数据</span><u><em></em></u></div>
         <div class="cockpit-analytics">
           <article class="cockpit-panel pulse-panel">
-            <header><h2>工作脉搏</h2><div class="pulse-meta"><small>相对趋势 · 悬浮查看实际值</small><nav><span v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`"><i></i>{{ item.label }}</span></nav></div></header>
+            <header><h2>工作脉搏</h2><div class="pulse-meta"><small>相对趋势</small><nav><span v-for="item in pulseSeries" :key="item.key" :class="`series-${item.index}`"><i></i>{{ item.label }}</span></nav></div></header>
             <div class="pulse-chart" @mouseleave="pulseHoverIndex=null">
               <svg :viewBox="`0 0 ${chart.width} ${chart.height}`" preserveAspectRatio="none" aria-label="近七天工作脉搏">
                 <g class="cockpit-grid"><line v-for="index in 5" :key="index" :x1="chart.left" :x2="chart.width-chart.right" :y1="chart.top+(index-1)*(chart.height-chart.top-chart.bottom)/4" :y2="chart.top+(index-1)*(chart.height-chart.top-chart.bottom)/4" /></g>
@@ -414,11 +414,11 @@ onBeforeUnmount(() => {
 
         <aside class="cockpit-live-rail">
           <article class="cockpit-panel messages-panel" :class="{compact:latestNotifications.length>=5}"><header><h2>消息通知 <b>{{ latestNotifications.length }}</b></h2><button @click="navigate('/inbox')">查看全部 →</button></header><div><button v-for="item in latestNotifications" :key="item.id" @click="navigate(item.route || '/inbox')"><i :class="{warning:notificationIcon(item)==='warning'}"><CockpitIcon :name="notificationIcon(item)" /></i><span><b><em v-if="notificationTitleParts(item).project">{{ notificationTitleParts(item).project }}</em>{{ notificationTitleParts(item).title }}</b><small>{{ item.body }}</small></span><time>{{ messageTime(item.createdAt) }}</time></button><p v-if="!latestNotifications.length" class="cockpit-empty">暂无未读消息</p></div></article>
-          <article class="cockpit-panel running-panel"><header><h2>正在运行 <b>{{ runningCount }}</b></h2><small>每 3 秒刷新</small></header><div>
-            <button v-if="activeProject" @click="navigate(`/projects?project=${encodeURIComponent(activeProject.projectPath)}`)"><i></i><span><b>项目 · {{ activeProject.projectName }}</b><small>{{ activeProject.status==='starting'?'正在启动':'运行中' }}</small><u><em></em></u></span></button>
-            <button v-if="activeTest" @click="navigate(`/testing?run=${encodeURIComponent(activeTest.id)}`)"><i></i><span><b>测试 · {{ activeTest.menuName }}</b><small>{{ activeTestProgress ? `${activeTestProgress.percent}% · ${activeTestProgress.etaText}` : '执行中' }}</small><u class="determinate"><em :style="{width:`${activeTestProgress?.percent || 0}%`}"></em></u></span></button>
-            <button v-if="activeTapd" @click="navigate('/tapd-automation')"><i></i><span><b>自动处理 · TAPD #{{ activeTapd.itemId }}</b><small>{{ activeTapd.status==='queued'?'等待处理':'分析中' }}</small><u><em></em></u></span></button>
-            <p v-if="!runningCount" class="running-empty"><i></i><b>系统空闲</b><small>等待新的项目、测试或自动处理任务</small></p>
+          <article class="cockpit-panel running-panel"><header><h2>正在运行 <b>{{ runningCount }}</b></h2></header><div>
+            <button v-if="activeProject" class="project-running-item" @click="navigate(`/projects?project=${encodeURIComponent(activeProject.projectPath)}`)"><i></i><span><b>项目 · {{ activeProject.projectName }}</b><small>{{ activeProject.status==='starting'?'正在启动':'运行中' }}</small></span></button>
+            <button v-if="activeTest" class="animated-running-item" @click="navigate(`/testing?run=${encodeURIComponent(activeTest.id)}`)"><i></i><span><b>测试 · {{ activeTest.menuName }}</b><small>{{ activeTestProgress ? `${activeTestProgress.percent}% · ${activeTestProgress.etaText}` : '执行中' }}</small><u class="determinate"><em :style="{width:`${activeTestProgress?.percent || 0}%`}"></em></u></span></button>
+            <button v-if="activeTapd" class="animated-running-item" @click="navigate('/tapd-automation')"><i></i><span><b>自动处理 · TAPD #{{ activeTapd.itemId }}</b><small>{{ activeTapd.status==='queued'?'等待处理':'分析中' }}</small><u><em></em></u></span></button>
+            <p v-if="!runningCount" class="running-empty"><i></i><b>系统空闲</b><small>暂无运行任务</small></p>
           </div></article>
         </aside>
       </div>
@@ -714,6 +714,11 @@ onBeforeUnmount(() => {
   height: 7px;
   background: var(--c-live);
   box-shadow: 0 0 10px rgba(84, 221, 189, 0.7), 0 0 0 4px rgba(84, 221, 189, 0.07);
+}
+.running-panel > div > button.project-running-item > i {
+  opacity: 1;
+  transform: none;
+  animation: none;
 }
 .running-panel button b { color: #d7eaf6; font-size: 12px; font-weight: 590; }
 .running-panel button small { color: #7f99aa; font-size: 9px; }

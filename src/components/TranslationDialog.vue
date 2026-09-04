@@ -165,7 +165,7 @@ watch(() => props.open, (open) => {
   <div v-if="open" class="modal-backdrop translation-backdrop" @click.self="close">
     <section class="panel translation-dialog" role="dialog" aria-modal="true" aria-labelledby="translation-dialog-title">
       <header>
-        <div><h2 id="translation-dialog-title">中英翻译</h2><p>中英互译与报错解读，不保存翻译记录。</p></div>
+        <div><h2 id="translation-dialog-title">中英翻译</h2><p>不保存翻译记录</p></div>
         <button class="icon-button" title="关闭" aria-label="关闭翻译" @click="close">×</button>
       </header>
 
@@ -210,7 +210,6 @@ watch(() => props.open, (open) => {
         </section>
         <section v-else class="translation-field translation-result">
           <span><b>译文候选</b><small>{{ loading ? '正在翻译…' : translations.length ? `${translations.length} 个${targetLanguage}结果` : '等待翻译' }}</small></span>
-          <p v-if="displayCandidates.some(candidate => candidate.variants.length)" class="translation-copy-hint">点击命名文本即可复制 · 格式转换在本地完成</p>
           <div class="translation-results" :class="{ empty:!translations.length }">
             <p v-if="loading" class="translation-result-placeholder">DeepSeek 正在匹配不同语境的译法…</p>
             <p v-else-if="!translations.length" class="translation-result-placeholder">候选译文会显示在这里</p>

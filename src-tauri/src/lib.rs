@@ -945,6 +945,7 @@ pub fn run() {
             testing::list_test_suites,
             testing::start_test_case_generation,
             testing::get_test_case_generation,
+            testing::list_test_case_generations,
             testing::recommend_tests_from_git,
             testing::list_test_runs,
             testing::read_test_report,

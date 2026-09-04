@@ -1,7 +1,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
+// @ts-expect-error Vitest 在 Node 环境运行；前端生产类型配置无需引入 Node 全局类型。
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ApiDocsView from "./ApiDocsView.vue";
+
+declare const process: { cwd(): string };
 
 const mocks = vi.hoisted(() => {
   const detailResult=(id:string) => ({ id,sourceId:id==="ep-3" ? "source-2":"source-1",operationId:id==="ep-2" ? "deleteUser":"getUser",method:id==="ep-2" ? "DELETE":"GET",path:id==="ep-3" ? "/orders":"/users/{id}",title:id==="ep-2" ? "删除用户":id==="ep-3" ? "查询订单":"查询用户",description:"按编号查询",tags:[id==="ep-2" ? "用户/管理":id==="ep-3" ? "订单":"用户"],deprecated:id==="ep-2",updatedAt:"",externalProjectId:id==="ep-3" ? "1002":"1001",apifoxProjectName:id==="ep-3" ? "订单接口":"客户接口",documentTitle:"示例服务",openapiVersion:"3.1.0",lastSyncedAt:"2026-08-31T08:00:00Z",document:{parameters:[{name:"id",in:"path",required:true,schema:{type:"string"}}],responses:{200:{description:"成功"}}} });
@@ -54,6 +58,12 @@ describe("ApiDocsView", () => {
     Object.defineProperty(navigator,"clipboard",{ configurable:true,value:{ writeText:vi.fn(async()=>undefined) } });
   });
 
+  it("大字号模式保持接口树和详情两栏布局", () => {
+    const styles=readFileSync(`${process.cwd()}/src/styles/typography.css`,"utf8");
+    expect(styles).toContain('.api-docs-layout { grid-template-columns: minmax(270px, 300px) minmax(0, 1fr); overflow-x: hidden; }');
+    expect(styles).not.toContain(".api-docs-layout.source-collapsed");
+  });
+
   it("按 Apifox 项目展示树形接口、可在项目名称下拉切换并复制接口内容", async () => {
     const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView},{path:"/settings",component:{template:"<div />"}}]});
     await router.push("/api-docs"); await router.isReady();
@@ -61,9 +71,12 @@ describe("ApiDocsView", () => {
     await flushPromises();
 
     expect(wrapper.find(".api-source-panel").exists()).toBe(false);
-    const projectSwitch=wrapper.get(".api-project-switch select");
+    const projectSwitch=wrapper.get(".api-project-switch-trigger");
     expect(projectSwitch.text()).toContain("客户接口");
-    expect(projectSwitch.text()).toContain("订单接口");
+    expect(wrapper.find(".api-project-switch select").exists()).toBe(false);
+    await projectSwitch.trigger("click");
+    expect(projectSwitch.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.get(".api-project-switch-menu").text()).toContain("订单接口");
     expect(wrapper.text()).toContain("新增 Apifox 项目");
     expect(wrapper.text()).toContain("查询用户");
     expect(wrapper.find(".api-tree-group").text()).toContain("用户");
@@ -73,10 +86,12 @@ describe("ApiDocsView", () => {
     expect(wrapper.text()).not.toContain("收藏");
     expect(wrapper.find(".api-endpoint-panel>header").text()).toContain("更新于");
     expect(wrapper.find(".api-endpoint-panel>header").text()).not.toContain("OpenAPI");
-    await projectSwitch.setValue("source-2");
+    await wrapper.findAll(".api-project-switch-menu>button").find(button=>button.text().includes("订单接口"))!.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("查询订单");
-    await projectSwitch.setValue("source-1");
+    expect(wrapper.find(".api-project-switch-menu").exists()).toBe(false);
+    await projectSwitch.trigger("click");
+    await wrapper.findAll(".api-project-switch-menu>button").find(button=>button.text().includes("客户接口"))!.trigger("click");
     await flushPromises();
     const search=wrapper.get('input[placeholder*="搜索名称"]');
     await search.setValue("删除");
