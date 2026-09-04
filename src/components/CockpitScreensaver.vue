@@ -774,7 +774,8 @@ onBeforeUnmount(() => {
 .pulse-tooltip span { color: #96adbd; font-size: 10px; }
 
 /* 90 天按周纵向排列，月份标记用于快速定位。 */
-.heat-panel { display: grid; grid-template-rows: 42px minmax(0, 1fr) 18px; }
+/* 约束隐式列，避免标题的最小内容宽度把热力图和图例撑出卡片。 */
+.heat-panel { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 42px minmax(0, 1fr) 18px; }
 .heat-map { display: grid; grid-template-rows: 15px minmax(0, 1fr); min-height: 0; }
 .heat-months { position: relative; height: 15px; color: #7895aa; font-size: 9px; }
 .heat-months span { position: absolute; top: 0; white-space: nowrap; transform: translateX(2px); }

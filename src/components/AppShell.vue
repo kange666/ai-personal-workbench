@@ -9,6 +9,7 @@ import { useWorkbenchStore } from "../stores/workbench";
 import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, startRepositoryProject, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
+import appLogoWarm from "../assets/app-logo-warm.png";
 import { APP_BRAND } from "../utils/brand";
 import BrandWordmark from "./BrandWordmark.vue";
 import HeaderIcon from "./HeaderIcon.vue";
@@ -707,7 +708,7 @@ onBeforeUnmount(() => {
     <aside class="icon-sidebar">
       <div class="app-brand-slot">
         <RouterLink class="app-brand" to="/" :title="APP_BRAND.name" :aria-label="`${APP_BRAND.name} · 返回首页`">
-          <span class="app-mark" aria-hidden="true"><img :src="appLogo" alt=""></span>
+          <span class="app-mark" aria-hidden="true"><img :src="store.theme === 'warm' ? appLogoWarm : appLogo" :class="{ 'app-logo--warm': store.theme === 'warm' }" alt=""></span>
           <BrandWordmark />
         </RouterLink>
         <button class="cockpit-entry" type="button" title="进入数据驾驶舱" aria-label="进入数据驾驶舱" @click="openCockpit">
@@ -840,6 +841,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.app-brand .app-mark img.app-logo--warm{border-radius:9px;filter:none}
 .app-brand-slot{height:40px;margin:0 8px;display:flex;align-items:center;gap:4px;min-width:0}.app-brand-slot .app-brand{margin:0;min-width:0;flex:1}.cockpit-entry{width:28px;height:28px;flex:0 0 28px;padding:0;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);opacity:.34;display:grid;place-items:center;cursor:pointer;transition:opacity .16s ease,color .16s ease,border-color .16s ease,background .16s ease}.cockpit-entry svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.45;stroke-linecap:round;stroke-linejoin:round}.app-brand-slot:hover .cockpit-entry{opacity:.58}.cockpit-entry:hover,.cockpit-entry:focus-visible{opacity:1;color:var(--primary);border-color:color-mix(in srgb,var(--primary) 32%,var(--line));background:color-mix(in srgb,var(--primary) 7%,transparent);outline:0}.cockpit-entry:active{transform:translateY(1px)}
 .cockpit-idle-warning{position:fixed;right:24px;bottom:24px;z-index:490;width:360px;min-height:76px;padding:13px 14px;border:1px solid color-mix(in srgb,var(--primary) 46%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--surface) 94%,transparent);box-shadow:0 18px 45px rgba(0,0,0,.34);backdrop-filter:blur(12px);display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:center;gap:10px}.cockpit-idle-warning>i{width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 0 4px var(--primary-soft);animation:cockpit-warning-pulse 1.2s ease-in-out infinite}.cockpit-idle-warning>span{min-width:0;display:flex;flex-direction:column;gap:5px}.cockpit-idle-warning small{color:var(--muted);font-size:9px}.cockpit-idle-warning button{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);padding:0 10px}.cockpit-idle-warning button:hover{border-color:var(--primary);color:var(--primary)}
 :global(.cockpit-overlay-enter-active){transition:opacity .6s ease,transform .6s cubic-bezier(.2,.7,.2,1)}:global(.cockpit-overlay-leave-active){transition:opacity .2s ease,transform .2s ease}:global(.cockpit-overlay-enter-from),:global(.cockpit-overlay-leave-to){opacity:0;transform:scale(1.008)}.cockpit-warning-enter-active,.cockpit-warning-leave-active{transition:opacity .2s ease,transform .2s ease}.cockpit-warning-enter-from,.cockpit-warning-leave-to{opacity:0;transform:translateY(8px)}

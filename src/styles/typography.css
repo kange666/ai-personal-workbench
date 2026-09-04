@@ -1,0 +1,248 @@
+/* 阅读字号与内容容纳规则。下方排版增强仅作用于大/超大，默认中字号保持原样。 */
+/* 保留浏览器默认的标题/小字比例，但先还原父级字号再加偏移，避免把 +4px 乘倍。 */
+:where(h1) { font-size: max(10px, calc((1em - var(--app-font-offset, 0px)) * 2 + var(--app-font-offset, 0px))); }
+:where(h2) { font-size: max(10px, calc((1em - var(--app-font-offset, 0px)) * 1.5 + var(--app-font-offset, 0px))); }
+:where(h3) { font-size: max(10px, calc((1em - var(--app-font-offset, 0px)) * 1.17 + var(--app-font-offset, 0px))); }
+:where(h4) { font-size: inherit; }
+:where(h5) { font-size: max(10px, calc((1em - var(--app-font-offset, 0px)) * .83 + var(--app-font-offset, 0px))); }
+:where(h6) { font-size: max(10px, calc((1em - var(--app-font-offset, 0px)) * .67 + var(--app-font-offset, 0px))); }
+:where(small, sub, sup) { font-size: max(10px, calc((1em - var(--app-font-offset, 0px)) * .833333 + var(--app-font-offset, 0px))); }
+
+.settings-overview-grid > .worktime-settings {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.worktime-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.worktime-setting-row > h2 { margin: 0; }
+.worktime-setting-controls { display: flex; align-items: center; gap: 8px; }
+.worktime-setting-controls > label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-height);
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  background: var(--surface-2);
+  padding: 0 10px;
+}
+.worktime-setting-controls input { width: 62px; padding: 0; }
+.worktime-settings .worktime-setting-hint { font-size: 11px; overflow-wrap: anywhere; }
+.font-size-setting {
+  min-width: 0;
+  width: 100%;
+  margin: 0;
+  padding: 10px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+.font-size-setting legend { float: left; width: 100%; margin: 0 0 8px; padding: 0; font-weight: 600; font-size: 11px; }
+.font-size-options { clear: both; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.font-size-options > label {
+  position: relative;
+  min-width: 0;
+  min-height: var(--control-height-small);
+  display: grid;
+  place-items: center;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.font-size-options > label.active { color: var(--primary); background: var(--primary-soft); border-color: var(--primary); font-weight: 700; }
+.font-size-options > label:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }
+.font-size-options input { position: absolute; width: 1px; height: 1px; margin: -1px; opacity: 0; }
+.font-size-setting > small { display: block; margin-top: 8px; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+
+/* 放大后让搜索框让出空间，右侧窗口控制保留完整点击区域。 */
+.app-topbar { min-width: 0; }
+.app-topbar > .top-search { flex: 0 1 245px; }
+/* 托盘样式名称留在各自选项内，完整名称仍由按钮 title/aria-label 提供。 */
+.tray-style-option > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
+/* 标题与说明不能被固定行高裁掉；操作组空间不足时整体换到下一行。 */
+/* 大字号释放品牌区两侧留白，保留完整英文品牌与驾驶舱按钮的独立区域。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .app-brand-slot { margin-inline: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .app-brand-slot .app-brand { gap: 8px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .page-area, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .view, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .panel, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .form-grid > *, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .metric-grid > *, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .work-record-summary > * { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .page-header { height: auto; min-height: 72px; gap: 12px; flex-wrap: wrap; padding-bottom: 14px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .page-header > div { min-width: 0; max-width: 100%; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .page-header > div:last-child { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .page-header p, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .panel-head p { line-height: 1.5; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .panel-head { height: auto; min-height: 58px; gap: 12px; flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .panel-head > div { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .panel-head > a { flex-shrink: 0; white-space: nowrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .panel-head h2 { overflow-wrap: anywhere; }
+
+/* 统计数字和说明采用正常文档流，杜绝大字数字与绝对定位说明重叠。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .metric-grid article { height: auto; min-height: 100px; display: flex; flex-direction: column; gap: 6px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .metric-grid article > b { margin: 0; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .metric-grid article > p { position: static; margin: auto 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .metric-grid article > span { overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .testing-metrics article { min-height: 100px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .activity-metrics > button, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .activity-metrics > div { height: auto; min-height: 88px; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(244px, auto) minmax(230px, auto) minmax(210px, auto); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .dashboard-report { height: auto; min-height: 48px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .dashboard-report > div { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .dashboard-report b { overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .project-progress > span { gap: 10px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .project-progress b { min-width: 0; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .project-progress em { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .welcome-strip { height: auto; min-height: 78px; gap: 14px; padding-block: 14px; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .welcome-strip > div { min-width: 0; flex-wrap: wrap; }
+
+/* 多条件筛选、页签和按钮组保持间距，不把输入框压成不可读的窄条。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-toolbar, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .calendar-toolbar, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-actions { height: auto; min-height: 58px; gap: 10px; flex-wrap: wrap; padding-block: 10px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-toolbar > div, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .calendar-toolbar > div, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-actions > div, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .record-metrics, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .work-record-card > footer, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-actions { flex-wrap: wrap; gap: 8px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .scope-tabs, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .calendar-main-tabs, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-tabs { height: auto; min-height: 46px; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .scope-tabs button, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-tabs button { min-height: 40px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .week-banner { height: auto; min-height: 46px; padding-block: 10px; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .week-banner b { min-width: 0; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .list-panel { overflow-y: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .list-panel > button { height: auto; min-height: 68px; white-space: normal; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .list-panel > button > div { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .token-layout { grid-template-columns: minmax(0, 1fr) 300px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .token-breakdown { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .token-breakdown button { height: auto; min-height: 54px; flex-wrap: wrap; gap: 5px; padding-block: 10px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .context-panel { height: auto; min-height: 430px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .context-panel p { gap: 10px; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .knowledge-search { height: auto; min-height: 132px; grid-template-columns: minmax(200px, .9fr) 150px minmax(220px, 1fr); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .knowledge-search > *, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .knowledge-search input, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .knowledge-layout main { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .knowledge-actions, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-create, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-filter { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-summary { height: auto; min-height: 74px; padding-block: 12px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-summary > div { height: auto; min-height: 42px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-list > header { height: auto; min-height: 66px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-list > button { white-space: normal; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-detail > header { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-detail > header > div:last-child { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-copy, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-detail { min-height: 0; min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .video-toolbar { height: auto; min-height: 62px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .video-card h2 { height: auto; min-height: 42px; }
+
+/* 抽屉整体可滚动，表单控件不被 flex 挤扁；已有独立滚动正文仍沿用原结构。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor { max-width: calc(100vw - 24px); min-height: 0; overflow-y: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor > label, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor > .form-grid, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor > .source-panel, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor > footer { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor input:not([type=checkbox]):not([type=range]), :root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor select, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor textarea { width: 100%; min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor > footer { padding-top: 14px; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .asset-drawer > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .activity-drawer > header { gap: 12px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .activity-drawer, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .asset-drawer { max-width: 100vw; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .activity-drawer dd { min-width: 0; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .activity-drawer dt { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-breakdowns > div, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-summary > div { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-breakdowns p { gap: 10px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-breakdowns p span { min-width: 0; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-breakdowns p b { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .source-panel { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .source-panel > div { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+
+/* 矮窗口里的弹窗必须留在视口内，正文滚动时仍能找到操作按钮。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .test-config-dialog { max-height: calc(100dvh - 40px); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .test-config-dialog > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .test-report-dialog > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-dialog > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .workspace-search > header { height: auto; min-height: 72px; gap: 12px; padding-block: 14px; flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-dialog { display: flex; flex-direction: column; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-body { min-height: 0; overflow-y: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-editor { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-editor nav, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-editor footer { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-editor textarea { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quick-capture-list p { overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .translation-dialog > footer { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .translation-dialog > footer > div { margin-left: auto; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quota-popover, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .notification-popover, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .system-health-popover { max-height: calc(100dvh - 92px); overflow-y: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .quota-popover > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .notification-popover > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .quota-popover > footer, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .system-health-popover > footer { height: auto; min-height: 48px; gap: 10px; padding-block: 10px; }
+
+/* 大/超大字号仅适度增加阅读宽度，不缩放图标，也不改变字号档位的精确偏移。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .task-editor:not(.api-project-settings-editor):not(.api-test-preview-editor):not(.knowledge-tools):not(.daily-checkin-editor) { width: min(490px, calc(100vw - 24px)); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-drawer { width: 620px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .worktime-editor { right: 620px; width: min(430px, calc(100vw - 644px)); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .token-detail-drawer { width: min(580px, 100vw); }
+:root[data-font-size="extra-large"] .split-layout { grid-template-columns: 350px minmax(0, 1fr); }
+:root[data-font-size="extra-large"] .calendar-day-meta > button { height: auto; min-height: 24px; line-height: 1.4; padding-block: 3px; }
+:root[data-font-size="extra-large"] .calendar-day > .calendar-task { min-height: 24px; line-height: 24px; }
+@media (max-width: 1380px) {
+  :root:is([data-font-size="large"], [data-font-size="extra-large"]) .knowledge-search { grid-template-columns: minmax(0, 1fr) auto; }
+  :root:is([data-font-size="large"], [data-font-size="extra-large"]) .knowledge-search > label { grid-column: 1 / -1; }
+  :root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-layout { grid-template-columns: minmax(240px, .7fr) minmax(0, 1fr); }
+  :root:is([data-font-size="large"], [data-font-size="extra-large"]) .video-toolbar { grid-template-columns: minmax(220px, 1fr) minmax(160px, .6fr) auto; }
+}
+
+/* 复杂业务页面：覆盖组件内的固定高度，仍保留其原有列数和操作顺序。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.asset-toolbar, .inbox-toolbar, .inbox-tabs, .project-view-tabs, .asset-tabs) { height: auto; min-height: 54px; gap: 8px; padding-block: 10px; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .asset-toolbar label { min-width: 220px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .asset-toolbar input { width: 100%; min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.drawer-header-actions, .commit-plan-actions, .git-remote-actions, .git-credential-panel > div) { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .git-credential-panel > div { grid-template-columns: minmax(100px, .6fr) minmax(180px, 1fr); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .git-credential-panel > div > button { justify-self: start; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.hidden-project-dialog, .category-editor-dialog) { max-height: calc(100dvh - 40px); overflow-y: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.hidden-project-dialog, .category-editor-dialog, .jenkins-config-dialog, .mapping-list, .mapping-editor) > header { height: auto; min-height: 76px; gap: 12px; padding-block: 14px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.mapping-list, .mapping-editor) > header > div { min-width: 0; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .mapping-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .mapping-form-grid > label { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .mapping-editor > footer { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .mapping-editor > footer span { overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .inbox-actions { flex-wrap: wrap; max-width: 280px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .inbox-detail-tags { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .testing-title-row { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .testing-title-row select { max-width: 100%; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .testing-toolbar { height: auto; min-height: 62px; grid-template-columns: minmax(220px, 1fr) minmax(130px, .5fr) minmax(145px, .5fr); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .test-table { min-width: 820px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .test-report-v2 > header { height: auto; flex: 0 0 auto; min-height: 100px; padding-block: 14px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-header-actions { flex-wrap: wrap; max-width: 50%; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-overview-v2 { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-overview-v2 span { max-height: 4.5em; overflow-y: auto; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .report-body-v2 { min-height: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.problem-card h4, .problem-card header p, .scenario-row summary b) { overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .deployment-fields { grid-template-columns: minmax(260px, 1.2fr) minmax(220px, 1fr) auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .deployment-fields > label { min-width: 0; grid-template-rows: minmax(24px, auto) 43px minmax(20px, auto); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .publish-button { margin-top: 31px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .deployment-history-filters { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-docs-view > .page-header { flex: 0 0 auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-docs-layout { grid-template-columns: minmax(180px, .65fr) minmax(260px, 1fr) minmax(320px, 1.35fr); overflow-x: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-docs-layout.source-collapsed { grid-template-columns: 0 minmax(260px, 1fr) minmax(320px, 1.6fr); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.api-source-panel, .api-endpoint-panel, .api-detail-panel) > header { flex-shrink: 0; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-detail-panel > header > div { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.api-detail-panel h2, .api-path-copy code, .api-source-list b) { overflow-wrap: anywhere; white-space: normal; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-path-copy { min-width: 0; text-align: left; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .api-path-copy span { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-channel-switch { height: auto; min-height: 72px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .content-channel-switch button { white-space: normal; padding-block: 8px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .video-card footer { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .cockpit-screen { grid-template-rows: minmax(48px, auto) minmax(110px, auto) minmax(600px, 1fr); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .cockpit-header { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .workbench-confirm-dialog { max-height: calc(100dvh - 48px); display: flex; flex-direction: column; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .workbench-confirm-dialog > p { min-height: 0; overflow-y: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .workbench-confirm-dialog > header, :root:is([data-font-size="large"], [data-font-size="extra-large"]) .workbench-confirm-dialog > footer { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .queue-section { overflow-x: auto; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) :is(.queue-head, .queue-row) { min-width: 900px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .queue-section > header { flex-wrap: wrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .rule-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .rule-grid > label { min-width: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .project-rule > footer { flex-wrap: wrap; gap: 10px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .asset-table th:first-child { width: 62px; white-space: nowrap; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .dashboard-notifications .panel-head { height: auto; min-height: 64px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .dashboard-notification-list em { position: static; grid-column: 2; justify-self: end; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .large-token-chart { height: auto; min-height: 430px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .automation-summary b { line-height: 1.2; }
+/* 大字号的托盘预览改为两排，完整展示名称；图标本身仍沿用原资源尺寸。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .tray-style-options { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .tray-style-option { height: auto; min-height: 80px; grid-template-rows: 36px auto; padding: 8px 6px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .tray-style-option > i { height: 36px; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .tray-style-option > span { white-space: normal; line-height: 1.4; overflow: visible; }
+
+/* Jenkins 配置是贴边抽屉，不套用居中弹窗留白；只滚动表单，操作固定在底部。 */
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .jenkins-config-dialog { height: 100%; max-height: 100dvh; max-width: 100vw; display: flex; flex-direction: column; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .jenkins-config-dialog > header { flex-shrink: 0; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .jenkins-config-dialog > header > div { min-width: 0; overflow-wrap: anywhere; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .jenkins-config-dialog > div { flex: 1; min-height: 0; overflow-y: auto; align-content: start; }
+:root:is([data-font-size="large"], [data-font-size="extra-large"]) .jenkins-config-dialog > footer { flex-shrink: 0; height: auto; min-height: 64px; padding-block: 12px; }

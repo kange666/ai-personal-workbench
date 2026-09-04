@@ -7,6 +7,7 @@ import ThemeSwitch from "../components/ThemeSwitch.vue";
 import NavIcon from "../components/NavIcon.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, orderedNavigationItems, saveHiddenNavigationPaths, saveNavigationOrder, workbenchNavigationItems } from "../utils/navigation";
 import { confirmAction } from "../utils/confirm";
+import { fontSizeOptions, loadFontSize, saveFontSize, type FontSize } from "../utils/fontSize";
 import { refreshUpdateStatus as checkForUpdates } from "../services/updateStatus";
 import {
   clearDeepSeekKey,
@@ -58,6 +59,18 @@ const error = ref("");
 const loading = ref(false);
 const autostartEnabled = ref(false);
 const workGapMinutes = ref(45);
+const fontSize = ref(loadFontSize());
+const fontSizeRevision = ref(0);
+function changeFontSize(value: FontSize) {
+  try {
+    saveFontSize(value);
+    fontSize.value = value;
+  } catch {
+    // 原生单选框在 change 前已切换；重建选项，让保存失败时恢复已应用的选择。
+    fontSizeRevision.value += 1;
+    error.value = "字号设置保存失败，请重试。";
+  }
+}
 const tapdStatus = ref<TapdStatus>({ configured:false, source:"未配置", authMode:"token", workspaceId:"", workspaceName:"", owner:"", itemCount:0, warnings:[], autoFixEnabled:false, autoFixRepositoryPath:"", automationPaused:false, projects:[] });
 const tapdAuthMode = ref<"token" | "basic">("token");
 const tapdUser = ref("");
@@ -325,10 +338,24 @@ onMounted(() => { if (route.query.vip === "required") message.value="内容工�
           </div>
         </article>
         <article class="panel settings-card worktime-settings">
-          <div><h2>工时估算间隔</h2><p>相邻本地活动不超过该间隔时归为同一工作区间，默认 45 分钟。</p></div>
-          <label><input v-model.number="workGapMinutes" type="number" min="15" max="120"><span>分钟</span></label>
-          <button class="button primary" :disabled="loading" @click="saveWorkGap">保存</button>
-          <small>自动结果始终标注“估算工时”，不是精确考勤；可在工作记录中手工修正。</small>
+          <div class="worktime-setting-row">
+            <h2>工时估算间隔</h2>
+            <div class="worktime-setting-controls">
+              <label><input v-model.number="workGapMinutes" aria-label="工时估算间隔（分钟）" type="number" min="15" max="120"><span>分钟</span></label>
+              <button class="button primary" :disabled="loading" @click="saveWorkGap">保存</button>
+            </div>
+          </div>
+          <p class="worktime-setting-hint">间隔内的活动合为同一工作区间，默认 45 分钟。估算非考勤，可在工作记录中修正。</p>
+          <fieldset :key="fontSizeRevision" class="font-size-setting">
+            <legend>页面字号</legend>
+            <div class="font-size-options">
+              <label v-for="option in fontSizeOptions" :key="option.value" :class="{ active: fontSize === option.value }">
+                <input type="radio" name="page-font-size" :value="option.value" :checked="fontSize === option.value" @change="changeFontSize(option.value)">
+                <span>{{ option.label }}</span>
+              </label>
+            </div>
+            <small>中为默认 · 全部页面即时生效 · 最小 10px</small>
+          </fieldset>
         </article>
         <article class="panel settings-card vip-settings">
           <div><h2>VIP 功能</h2><p>启用后开放内容工坊和视频中心，状态仅保存在本机。</p></div>

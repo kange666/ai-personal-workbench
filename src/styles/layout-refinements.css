@@ -1,0 +1,46 @@
+/* 默认字号两轮筛查的基础排版修正。沿用原字号、主题和宽度；大字号专属规则仍由 typography.css 提供。 */
+
+/* 没有右侧操作的页头（例如设置）不能被 :last-child 误识别成横排按钮组。 */
+.page-header > div:only-child { display: block; }
+
+/* 发布连接配置采用贴边抽屉：内容区独立滚动，主要操作留在底部。 */
+:root .jenkins-config-dialog {
+  height: 100%;
+  max-height: 100dvh;
+  max-width: 100vw;
+  display: flex;
+  flex-direction: column;
+}
+:root .jenkins-config-dialog > header,
+:root .jenkins-config-dialog > footer { flex-shrink: 0; }
+:root .jenkins-config-dialog > div { flex: 1; min-height: 0; overflow-y: auto; align-content: start; }
+
+/* 测试配置会随测试类型增加表单，固定首尾，避免长表单把取消和执行按钮推出视口。 */
+:root .test-config-dialog { display: flex; flex-direction: column; overflow: hidden; }
+:root .test-config-dialog > header,
+:root .test-config-dialog > footer { flex-shrink: 0; }
+:root .test-config-dialog > header { height: auto; min-height: 68px; padding-block: 12px; gap: 12px; }
+:root .test-config-dialog > header > div { min-width: 0; overflow-wrap: anywhere; }
+:root .test-config-dialog > .test-config-body { min-height: 0; overflow-y: auto; }
+:root .test-config-body > * { flex-shrink: 0; }
+
+/* 工时编辑与其他编辑抽屉采用一致的底部操作位置；低窗口仍允许整体滚动。 */
+.worktime-editor { display: flex; flex-direction: column; }
+.worktime-editor > * { flex-shrink: 0; }
+.worktime-editor > footer { margin-top: auto; padding-top: 18px; }
+
+/* 搜索结果数量较多时保留窗口下沿留白，只滚动结果，不把最后一行裁在屏幕外。 */
+.workspace-search { max-height: min(650px, calc(100dvh - 114px)); max-width: calc(100vw - 32px); display: flex; flex-direction: column; }
+.workspace-search > header,
+.workspace-search > label { flex-shrink: 0; }
+.workspace-search-results { min-height: 0; }
+.workspace-search-results > button { grid-template-columns: 32px minmax(0, 1fr) 18px; }
+.workspace-search-results span { min-width: 0; overflow-wrap: anywhere; }
+
+/* 自动处理统计数字使用自然行高，避免字形超过原来的固定行高。 */
+.automation-summary b { line-height: 1.2; }
+
+/* 组合视图给十四天刻度保留可读宽度；窄内容区改为上下排列，不裁掉日期。 */
+.calendar-layout.mode-combined {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 600px), 1fr));
+}

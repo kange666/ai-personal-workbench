@@ -2,6 +2,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as backend from "../services/backend";
 import SettingsView from "./SettingsView.vue";
+import { applyFontSize, loadFontSize } from "../utils/fontSize";
 
 vi.mock("../services/backend");
 vi.mock("../services/updateStatus", () => ({ refreshUpdateStatus: vi.fn(async () => ({})) }));
@@ -18,11 +19,43 @@ async function renderView() {
 }
 
 beforeEach(() => {
+  localStorage.clear();
+  applyFontSize("medium");
   vi.resetAllMocks();
   vi.mocked(backend.isTauriRuntime).mockReturnValue(false);
   vi.mocked(backend.setTrayIconStyle).mockImplementation(async (style) => style);
 });
-afterEach(() => { wrapper?.unmount(); });
+afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks(); applyFontSize("medium"); localStorage.clear(); });
+
+describe("工时卡片中的页面字号", () => {
+  it("保留工时设置并默认选中中号", async () => {
+    await renderView();
+    const card = wrapper.get(".worktime-settings");
+    expect(card.get('input[type="number"]').element).toHaveProperty("value", "45");
+    expect(card.findAll('.font-size-options label').map((label) => label.text())).toEqual(["小", "中", "大", "超大"]);
+    expect(card.get('input[value="medium"]').element).toHaveProperty("checked", true);
+  });
+  it("切换即时应用且不提交工时设置，重进页面保留选择", async () => {
+    await renderView();
+    await wrapper.get('input[value="extra-large"]').setValue();
+    expect(loadFontSize()).toBe("extra-large");
+    expect(document.documentElement.style.getPropertyValue("--app-font-offset")).toBe("4px");
+    expect(backend.saveWorkTimeSettings).not.toHaveBeenCalled();
+    wrapper.unmount();
+    await renderView();
+    expect(wrapper.get('input[value="extra-large"]').element).toHaveProperty("checked", true);
+  });
+  it("字号无法保存时提示错误，不改变已应用的字号", async () => {
+    await renderView();
+    const save = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("denied"); });
+    await wrapper.get('input[value="large"]').setValue();
+    expect(wrapper.get(".scan-message.error").text()).toContain("字号设置保存失败");
+    expect(document.documentElement.dataset.fontSize).toBe("medium");
+    expect(wrapper.get('input[value="medium"]').element).toHaveProperty("checked", true);
+    expect(wrapper.get('input[value="large"]').element).toHaveProperty("checked", false);
+    save.mockRestore();
+  });
+});
 
 describe("外观与托盘风格", () => {
   it("显示八种有名称的样式，进度预览不含数字，移除冗余说明", async () => {

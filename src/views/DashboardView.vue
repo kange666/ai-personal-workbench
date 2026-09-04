@@ -110,7 +110,15 @@ onBeforeUnmount(() => {
       <article class="panel project-panel"><div class="panel-head"><div><h2>本周项目投入</h2><p>{{ projectProgress.length }} 个活跃项目 · 工时为估算/修正口径</p></div><RouterLink to="/work-records">工作记录 →</RouterLink></div><div v-for="item in projectProgress" :key="item.name" class="project-progress"><span><b>{{ item.name }}</b><em>{{ compactHours(item.minutes) }} · {{ item.progress }}%</em></span><div><i :style="{ width: `${item.progress}%` }"></i></div></div><p v-if="!projectProgress.length" class="panel-empty">本周暂无可估算的本地活动。</p></article>
       <article class="panel chart-panel clickable-card" tabindex="0" @click="router.push('/work-records')"><div class="panel-head"><div><h2>Codex 活跃趋势</h2><p>近 7 天对话次数 · 悬停查看数据</p></div><b>{{ activityTrend.reduce((sum,item) => sum + item.conversationCount, 0) }} 次</b></div><ActivityTrendChart :points="activityTrend" @select="router.push(`/calendar?date=${$event.date}`)" /></article>
       <article class="panel recent-panel"><div class="panel-head"><div><h2>最近报告</h2><p>日报与周报均可按历史周期查看</p></div><RouterLink to="/reports">全部报告 →</RouterLink></div><RouterLink v-for="report in reports.slice(0,3)" :key="report.id" class="dashboard-report" :to="`/reports?report=${report.id}`"><span>▤</span><div><b>{{ report.title }}</b><small>{{ report.status === 'locked' ? '已锁定' : '可编辑' }} · {{ report.periodStart }}</small></div></RouterLink><p v-if="!reports.length" class="panel-empty">尚无真实报告，可前往报告中心生成。</p></article>
-      <article class="panel risk-panel"><div class="panel-head"><div><h2>最近测试与需要关注</h2><p>这里只展示真实测试结果，不混入未维护的任务</p></div><RouterLink to="/testing">测试中心 →</RouterLink></div><div v-for="test in recentTests.slice(0,4)" :key="test.id" class="dashboard-risk test" @click="router.push('/testing')"><i></i><span><b>{{ test.menuName }}</b><small>{{ test.project }} · {{ test.status === 'passed' ? '测试通过' : '测试失败' }} · {{ test.startedAt.slice(0,10) }}</small></span></div><p v-if="!recentTests.length" class="panel-empty">当前没有测试记录。</p></article>
+      <article class="panel risk-panel">
+        <div class="panel-head"><div><h2>最近测试与需要关注</h2><p>这里只展示真实测试结果，不混入未维护的任务</p></div><RouterLink to="/testing">测试中心 →</RouterLink></div>
+        <div v-if="recentTests.length" class="dashboard-test-list" role="region" aria-label="最近测试记录" tabindex="0">
+          <div v-for="test in recentTests.slice(0,4)" :key="test.id" class="dashboard-risk test" @click="router.push('/testing')">
+            <i></i><span><b :title="test.menuName">{{ test.menuName }}</b><small :title="`${test.project} · ${test.status === 'passed' ? '测试通过' : '测试失败'} · ${test.startedAt.slice(0,10)}`">{{ test.project }} · {{ test.status === 'passed' ? '测试通过' : '测试失败' }} · {{ test.startedAt.slice(0,10) }}</small></span>
+          </div>
+        </div>
+        <p v-else class="panel-empty">当前没有测试记录。</p>
+      </article>
       <article class="panel history-panel"><div class="panel-head"><div><h2>今天和本周做了什么</h2><p>{{ history?.firstDate || '尚无数据' }}—{{ history?.lastDate || '尚无数据' }} · 普通与归档会话统一统计</p></div><RouterLink to="/work-records">全部工作记录 →</RouterLink></div><div class="dashboard-result-columns"><RouterLink :to="todayReport ? `/reports?report=${todayReport.id}` : '/reports'"><b>今天</b><span v-for="item in todayFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!todayFeatures.length">尚未生成今天的项目成果总结</em></RouterLink><RouterLink :to="weekReport ? `/reports?report=${weekReport.id}` : '/reports'"><b>本周</b><span v-for="item in weekFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!weekFeatures.length">尚未生成本周的项目成果总结</em></RouterLink></div></article>
     </section>
     <WorkTimeDrawer :open="Boolean(selectedTimePeriod)" :start-date="selectedTimePeriod?.start || ''" :end-date="selectedTimePeriod?.end || ''" :title="selectedTimePeriod?.title" @close="selectedTimePeriod=null" @changed="router.go(0)" />
@@ -119,6 +127,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 卡片仍占原有固定网格行；仅记录区滚动，不能把第 4 条挤到下一张卡片上。 */
+.risk-panel{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.risk-panel>.panel-head{height:auto;min-height:58px;flex:0 0 auto;gap:12px}
+.risk-panel>.panel-head>div{min-width:0;overflow-wrap:anywhere}
+.risk-panel>.panel-head>a{flex:0 0 auto;white-space:nowrap}
+.dashboard-test-list{flex:1 1 0;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+.dashboard-test-list:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+.dashboard-test-list>.dashboard-risk{height:auto;min-height:48px}
+.dashboard-test-list .dashboard-risk>i{flex:0 0 7px}
+.dashboard-test-list .dashboard-risk>span{min-width:0;flex:1}
+.dashboard-test-list b{overflow-wrap:anywhere}
+.dashboard-test-list small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.risk-panel>.panel-empty{margin:0;min-height:0;overflow:auto;padding:20px 16px}
 .dashboard-brand-header{height:auto;min-height:84px;gap:20px;align-items:center;padding:2px 0 18px}
 .dashboard-brand-intro{min-width:0;flex:1}
 .dashboard-brand-header h1{margin:0 0 10px;line-height:1}

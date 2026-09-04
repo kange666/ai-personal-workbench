@@ -50,5 +50,6 @@ function tooltipClass(index: number) { return index <= 1 ? "align-left" : index 
 </template>
 
 <style scoped>
-.activity-bar{fill:color-mix(in srgb,var(--primary) 68%,transparent);transition:opacity .15s}.activity-bar.hovered{fill:var(--primary)}
+/* 半透明柱形叠加卡片底色后，两主题仍保持至少 3:1 的图形对比。 */
+.activity-bar{fill:color-mix(in srgb,var(--primary) 72%,transparent);transition:opacity .15s}.activity-bar.hovered{fill:var(--primary)}
 </style>
