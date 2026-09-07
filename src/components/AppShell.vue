@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { isRegistered as isShortcutRegistered, register as registerShortcut, unregister as unregisterShortcut } from "@tauri-apps/plugin-global-shortcut";
 import { useWorkbenchStore } from "../stores/workbench";
-import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestCaseGenerations, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, retryFailedEmails, setCodexEmailEnabled, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestCaseGenerationJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
+import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestCaseGenerations, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, openRepositoryRuntimeUrl, retryFailedEmails, setCodexEmailEnabled, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestCaseGenerationJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
 import appLogoWarm from "../assets/app-logo-warm.png";
@@ -30,6 +30,7 @@ import { estimateTestRunProgress } from "../utils/testRunProgress";
 import { cockpitIdleSettingsChangedEvent, cockpitIdleState, loadCockpitIdleMinutes } from "../utils/cockpit";
 import { buildJenkinsActiveOperations } from "../utils/jenkinsActiveOperations";
 import { confirmAction } from "../utils/confirm";
+import { loadWorkbenchNotificationsEnabled, workbenchNotificationPreferenceChangedEvent } from "../utils/notificationPreference";
 
 const store = useWorkbenchStore();
 const router = useRouter();
@@ -52,6 +53,7 @@ const notificationLoading = ref(false);
 const notifications = ref<WorkbenchNotification[]>([]);
 const notificationToast = ref<WorkbenchNotification | null>(null);
 const selectedNotification = ref<WorkbenchNotification | null>(null);
+const workbenchNotificationsEnabled = ref(loadWorkbenchNotificationsEnabled());
 const emailStatus = ref<EmailNotificationStatus>({ configured:false, enabled:false, state:"unconfigured", maskedEmail:"", lastError:"", retryingCount:0, failedCount:0 });
 const emailLoading = ref(false);
 const vipStatus = ref<VipStatus>({ active:false });
@@ -89,13 +91,6 @@ const todayDay = new Date().getDate();
 const todayAlmanac = computed(() => getAlmanac(todayIso));
 const pageLoadingTitle = computed(() => String(router.currentRoute.value.meta.title || "工作数据"));
 const latestWorkSession = computed(() => [...todayWorkSessions.value].sort((left,right) => right.endTime.localeCompare(left.endTime))[0]);
-const currentWorkIsFresh = computed(() => {
-  const session=latestWorkSession.value;
-  if (!session) return false;
-  const endedAt=Date.parse(`${session.date}T${session.endTime}:00`);
-  const minutesSinceEnd=(railNow.value-endedAt)/60_000;
-  return session.source === "estimated" && minutesSinceEnd >= 0 && minutesSinceEnd <= 45;
-});
 const quotaWindows = computed(() => [quota.value.primary, quota.value.secondary].filter((item): item is CodexQuotaWindow => Boolean(item)));
 const primaryQuota = computed(() => quota.value.primary || quota.value.secondary);
 const remainingText = computed(() => primaryQuota.value ? `${Math.round(primaryQuota.value.remainingPercent)}%` : "--");
@@ -398,7 +393,7 @@ async function loadSystemHealth() {
 function notificationNumericId(value:string) { return Math.abs([...value].reduce((hash,character)=>(hash * 31 + character.charCodeAt(0)) | 0,0)); }
 async function sendSystemCompletionNotification(item:WorkbenchNotification) {
   const storageKey=`workbench-os-notification:${item.id}`;
-  if (!isTauriRuntime() || window.localStorage.getItem(storageKey)) return;
+  if (!workbenchNotificationsEnabled.value || !isTauriRuntime() || window.localStorage.getItem(storageKey)) return;
   let granted=await isPermissionGranted();
   if (!granted) granted=(await requestPermission()) === "granted";
   if (!granted) return;
@@ -420,19 +415,25 @@ async function initializeQuickCaptureShortcut() {
     }
   } catch(cause) { console.error("注册快速记录快捷键失败",cause); }
 }
-async function loadNotifications(sync = true) {
+async function loadNotifications(sync = true, announce = true) {
   if (!isTauriRuntime() || notificationLoading.value) return;
   notificationLoading.value=true;
   try {
     if (sync) await syncCodexNotifications();
+    if (!workbenchNotificationsEnabled.value) {
+      notifications.value=[];
+      notificationToast.value=null;
+      window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:[] }));
+      return;
+    }
     const knownIds = new Set(notifications.value.map(item => item.id));
     const latest = await listNotifications();
     const newUnread = latest.filter(item => !item.isRead && !knownIds.has(item.id));
     const newestUnread = newUnread[0];
     notifications.value=latest;
     window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:latest.slice(0,5) }));
-    for (const item of newUnread) void sendSystemCompletionNotification(item);
-    if (newestUnread) {
+    if (announce) for (const item of newUnread) void sendSystemCompletionNotification(item);
+    if (announce && newestUnread) {
       notificationToast.value=newestUnread;
       window.clearTimeout(notificationToastTimer);
       notificationToastTimer=window.setTimeout(() => notificationToast.value=null, 8000);
@@ -475,6 +476,17 @@ async function closeWindow() { if (isTauriRuntime()) await getCurrentWindow().cl
 function isTopbarInteractiveTarget(target:HTMLElement) {
   return Boolean(target.closest("button,a,input,select,textarea,[role='button'],.system-health-popover,.quota-popover,.notification-popover"));
 }
+function applyWorkbenchNotificationPreference(event:Event) {
+  workbenchNotificationsEnabled.value = Boolean((event as CustomEvent<boolean>).detail);
+  notificationOpen.value=false;
+  notificationToast.value=null;
+  window.clearTimeout(notificationToastTimer);
+  if (workbenchNotificationsEnabled.value) void loadNotifications(false,false);
+  else {
+    notifications.value=[];
+    window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:[] }));
+  }
+}
 async function loadActiveOperations() {
   if (!isTauriRuntime()) return;
   railNow.value=Date.now();
@@ -514,6 +526,11 @@ async function stopRailProject(project:RunningProjectProcess) {
     await Promise.all([loadActiveOperations(),loadProjectOptions()]);
   } catch (cause) { projectActionMessage.value=`停止失败：${String(cause)}`; }
   finally { projectActionPath.value=""; }
+}
+async function openRailProjectUrl(url:string) {
+  projectActionMessage.value="";
+  try { await openRepositoryRuntimeUrl(url); }
+  catch (cause) { projectActionMessage.value=`打开地址失败：${String(cause)}`; }
 }
 function prepareWindowDragging(event:MouseEvent) {
   if (!isTauriRuntime() || event.button !== 0) return;
@@ -647,6 +664,7 @@ onMounted(() => {
   window.addEventListener("open-workbench-notification", openNotificationFromPage);
   window.addEventListener("open-quick-capture", openQuickCaptureFromPage);
   window.addEventListener("tapd-items-synced", refreshNotificationsFromTapd);
+  window.addEventListener(workbenchNotificationPreferenceChangedEvent, applyWorkbenchNotificationPreference);
   window.addEventListener(navigationOrderChangedEvent, refreshNavigationSettings);
   window.addEventListener("workbench-active-operations-changed", loadActiveOperations);
   window.addEventListener("mousemove", continueWindowDragging);
@@ -683,6 +701,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("open-workbench-notification", openNotificationFromPage);
   window.removeEventListener("open-quick-capture", openQuickCaptureFromPage);
   window.removeEventListener("tapd-items-synced", refreshNotificationsFromTapd);
+  window.removeEventListener(workbenchNotificationPreferenceChangedEvent, applyWorkbenchNotificationPreference);
   window.removeEventListener(navigationOrderChangedEvent, refreshNavigationSettings);
   window.removeEventListener("workbench-active-operations-changed", loadActiveOperations);
   window.removeEventListener("workbench-backend-loading", handleBackendLoading);
@@ -744,7 +763,7 @@ onBeforeUnmount(() => {
         </section>
       </div>
       <div class="top-notifications" @focusout="closeNotificationOnBlur">
-        <button class="icon-button header-action-button notification-trigger" :class="{ active:notificationOpen }" title="查看工作台消息" @click="toggleNotifications"><HeaderIcon name="notification" /><b v-if="unreadCount">{{ unreadCount > 99 ? '99+' : unreadCount }}</b></button>
+        <button class="icon-button header-action-button notification-trigger" :class="{ active:notificationOpen }" :title="workbenchNotificationsEnabled ? '查看工作台消息' : '工作台消息通知已在设置中关闭'" :disabled="!workbenchNotificationsEnabled" @click="toggleNotifications"><HeaderIcon name="notification" /><b v-if="unreadCount">{{ unreadCount > 99 ? '99+' : unreadCount }}</b></button>
         <section v-if="notificationOpen" class="notification-popover panel">
           <header><div><b>消息中心</b><small>{{ unreadCount ? `${unreadCount} 条未读` : '全部已读' }} · {{ pendingReviewCount }} 条 Codex 结果待确认</small></div><button class="text-button" :disabled="!unreadCount" @click="readAllNotifications">全部已读</button></header>
           <div class="notification-list">
@@ -778,10 +797,13 @@ onBeforeUnmount(() => {
     <aside class="ai-rail work-status-rail">
       <div class="ai-rail-title"><span class="work-status-mark">●</span><div><b>工作状态</b></div><i>{{ workStatusCount }}</i></div>
       <section class="rail-almanac">
-        <div class="rail-almanac-main"><b>{{ todayDay }}</b><span><span class="rail-almanac-heading"><strong>{{ todayAlmanac.duty }} · {{ todayAlmanac.luck }}</strong><small>{{ todayAlmanac.lunarDate }}</small></span><em>{{ todayAlmanac.heavenlyGod }}值日 · {{ todayAlmanac.clash }} · {{ todayAlmanac.sha }}</em><span class="rail-almanac-yiji"><span><i>宜</i>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</span><span><i>忌</i>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</span></span><RouterLink class="rail-almanac-link" :to="`/calendar?date=${todayIso}`">查看详细黄历 ›</RouterLink></span></div>
+        <div class="rail-almanac-card">
+          <div class="rail-almanac-main"><b>{{ todayDay }}</b><span><span class="rail-almanac-heading"><strong>{{ todayAlmanac.duty }} · {{ todayAlmanac.luck }}</strong><small>{{ todayAlmanac.lunarDate }}</small></span><em>{{ todayAlmanac.heavenlyGod }}值日 · {{ todayAlmanac.clash }} · {{ todayAlmanac.sha }}</em></span></div>
+          <div class="rail-almanac-yiji"><span><i>宜</i><em>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</em></span><span><i>忌</i><em>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</em></span></div>
+        </div>
       </section>
       <section class="rail-work-session">
-        <header class="rail-section-header"><span><i></i><b>当前工作</b></span><em>{{ currentWorkIsFresh ? '进行中' : '今日' }}</em></header>
+        <header class="rail-section-header rail-section-header-success"><span><i></i><b>当前工作</b></span><em>{{ latestWorkSession ? 1 : 0 }}</em></header>
         <div class="rail-work-card">
           <div v-if="latestWorkSession" class="rail-work-session-main"><b>{{ latestWorkSession.project }}</b><span>{{ latestWorkSession.startTime }}—{{ latestWorkSession.endTime }}</span><small>{{ latestWorkSession.source === 'manual' ? '手工记录' : '估算中' }}</small></div>
           <div v-else class="rail-work-session-main empty"><b>{{ runningProjects[0]?.projectName || '尚未识别到工作区间' }}</b><span>有本地活动后自动估算</span></div>
@@ -789,15 +811,15 @@ onBeforeUnmount(() => {
         </div>
       </section>
       <section v-if="runningProjects.length" class="rail-projects">
-        <header><span><i></i><b>项目运行</b></span><em>{{ runningProjects.length }}</em></header>
+        <header class="rail-section-header rail-section-header-success"><span><i></i><b>项目运行</b></span><em>{{ runningProjects.length }}</em></header>
         <article v-for="project in runningProjects" :key="project.projectPath" class="rail-project-card">
-          <div><b :title="project.projectName">{{ project.projectName }}</b><small>{{ project.status === 'starting' ? '正在启动' : '运行中' }}<template v-if="project.localUrl"> · {{ project.localUrl }}</template></small></div>
+          <div><b :title="project.projectName">{{ project.projectName }}</b><small><span>{{ project.status === 'starting' ? '正在启动' : '运行中' }}</span><template v-if="project.localUrl"> · <button type="button" class="rail-project-url" :title="`使用默认浏览器打开 ${project.localUrl}`" :aria-label="`使用默认浏览器打开 ${project.localUrl}`" @click="openRailProjectUrl(project.localUrl)">{{ project.localUrl }} <i aria-hidden="true">↗</i></button></template></small></div>
           <button class="rail-project-stop" :disabled="Boolean(projectActionPath)" @click="stopRailProject(project)">{{ projectActionPath === project.projectPath ? '停止中…' : '停止' }}</button>
         </article>
         <p v-if="projectActionMessage" class="rail-project-message">{{ projectActionMessage }}</p>
       </section>
       <section v-if="activeOperations.length" class="rail-running">
-        <header><span><i></i><b>正在执行</b></span><em>{{ activeOperations.length }}</em></header>
+        <header class="rail-section-header rail-section-header-success"><span><i></i><b>正在执行</b></span><em>{{ activeOperations.length }}</em></header>
         <RouterLink v-for="item in activeOperations" :key="item.id" class="rail-running-item" :to="item.href">
           <span class="rail-running-item-head"><i :class="item.kind">{{ item.kind === 'test' ? '测试' : item.kind === 'jenkins' ? '发布' : 'TAPD' }}</i><b :title="item.title">{{ item.title }}</b><em>{{ item.status }}</em></span>
           <span class="rail-running-progress" :class="{ determinate:item.progressPercent !== undefined }" :role="item.progressPercent !== undefined ? 'progressbar' : undefined" :aria-valuenow="item.progressPercent" aria-valuemin="0" aria-valuemax="100"><i :style="item.progressPercent !== undefined ? { width:`${item.progressPercent}%` } : undefined"></i></span>

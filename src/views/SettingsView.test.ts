@@ -27,13 +27,15 @@ beforeEach(() => {
 });
 afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks(); applyFontSize("medium"); localStorage.clear(); });
 
-describe("工时卡片中的页面字号", () => {
-  it("保留工时设置并默认选中中号", async () => {
+describe("外观中的页面字号", () => {
+  it("与主题和托盘归在外观中，并保留独立的工时设置", async () => {
     await renderView();
+    const appearance = wrapper.get(".appearance-settings");
     const card = wrapper.get(".worktime-settings");
     expect(card.get('input[type="number"]').element).toHaveProperty("value", "45");
-    expect(card.findAll('.font-size-options label').map((label) => label.text())).toEqual(["小", "中", "大", "超大"]);
-    expect(card.get('input[value="medium"]').element).toHaveProperty("checked", true);
+    expect(card.find(".font-size-options").exists()).toBe(false);
+    expect(appearance.findAll('.font-size-options label').map((label) => label.text())).toEqual(["小", "中", "大", "超大"]);
+    expect(appearance.get('input[value="medium"]').element).toHaveProperty("checked", true);
   });
   it("切换即时应用且不提交工时设置，重进页面保留选择", async () => {
     await renderView();
@@ -54,6 +56,26 @@ describe("工时卡片中的页面字号", () => {
     expect(wrapper.get('input[value="medium"]').element).toHaveProperty("checked", true);
     expect(wrapper.get('input[value="large"]').element).toHaveProperty("checked", false);
     save.mockRestore();
+  });
+});
+
+describe("设置分类与工作台消息", () => {
+  it("把数据、VIP 和更新归为最后一个分类", async () => {
+    await renderView();
+    const categories = wrapper.findAll(".settings-navigation nav button").map((button) => button.text());
+    expect(categories).toHaveLength(6);
+    expect(categories.at(-1)).toContain("功能与数据");
+  });
+
+  it("工作台消息默认开启，关闭后保存本机偏好", async () => {
+    await renderView();
+    await wrapper.findAll(".settings-navigation nav button")[4].trigger("click");
+    const toggle = wrapper.get('.workbench-notification-settings [role="switch"]');
+    expect(toggle.attributes("aria-checked")).toBe("true");
+    await toggle.trigger("click");
+    expect(toggle.attributes("aria-checked")).toBe("false");
+    expect(localStorage.getItem("workbench-notifications-enabled")).toBe("false");
+    expect(wrapper.get(".scan-message").text()).toContain("工作台消息通知已关闭");
   });
 });
 

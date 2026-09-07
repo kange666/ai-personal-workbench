@@ -327,37 +327,47 @@ button:disabled{cursor:not-allowed}
 .rail-running-progress{height:5px;border-radius:3px}.rail-running-progress>i{border-radius:3px}.rail-running-progress.determinate>i{transform:none;animation:none;transition:width .35s ease}.rail-running-estimate{display:flex;align-items:center;justify-content:space-between;gap:8px}.rail-running-estimate>b{font-size:9px;color:var(--primary)}.rail-running-estimate>em{font-style:normal;font-size:9px;color:var(--muted);text-align:right}
 
 /* 小屏工作状态栏：把常用状态压缩到一屏，并保留必要操作。 */
-.work-status-rail{padding:12px}
+.work-status-rail{padding:12px 11px}
 .work-status-rail .ai-rail-title{min-height:45px;padding:0 2px 9px}
 .work-status-rail .work-status-mark{width:34px;height:34px;flex-basis:34px;border-radius:9px}
-.work-status-rail section{padding:9px 0}
-.work-status-rail .rail-almanac{margin-top:8px;padding:11px 10px;border:0;border-radius:9px;background:var(--surface-2)}
-.work-status-rail .rail-almanac-main{grid-template-columns:34px minmax(0,1fr);align-items:start;gap:9px;margin:0}
-.work-status-rail .rail-almanac-main>b{width:34px;height:40px;border-radius:9px;font-size:19px}
+.work-status-rail section{padding:11px 0}
+.work-status-rail .rail-almanac{margin-top:7px}
+.rail-almanac-card,.rail-work-card,.work-status-rail .rail-project-card,.work-status-rail .rail-running-item{border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+.rail-almanac-card{padding:11px 10px 5px}
+.work-status-rail .rail-almanac-main{grid-template-columns:38px minmax(0,1fr);align-items:center;gap:10px;margin:0}
+.work-status-rail .rail-almanac-main>b{width:38px;height:44px;border-radius:10px;font-size:21px}
 .work-status-rail .rail-almanac-main>span{gap:4px}
 .rail-almanac-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
 .rail-almanac-heading>strong,.rail-almanac-heading>small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rail-almanac-heading>small{color:var(--muted);font-size:9px;font-weight:400}
 .work-status-rail .rail-almanac-main em{font-size:9px}
-.work-status-rail .rail-almanac-yiji{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;margin:3px 0 0}
-.work-status-rail .rail-almanac-yiji>span{padding:4px 6px;border-radius:5px}
-.rail-almanac-link{align-self:flex-end;color:var(--primary);font-size:9px;text-decoration:none;line-height:1.2}
-.rail-almanac-link:hover{text-decoration:underline}
-.work-status-rail .rail-section-header,.work-status-rail .rail-projects>header,.work-status-rail .rail-running>header{height:22px;margin-bottom:7px}
-.rail-work-card{padding:11px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2)}
+.work-status-rail .rail-almanac-yiji{display:grid;grid-template-columns:1fr;gap:0;margin:10px 0 0}
+.work-status-rail .rail-almanac-yiji>span{min-width:0;padding:7px 3px;border-top:1px solid var(--line);border-radius:0;background:transparent;display:grid;grid-template-columns:20px minmax(0,1fr);align-items:center;gap:3px}
+.work-status-rail .rail-almanac-yiji>span>i{margin:0;font-size:11px}
+.work-status-rail .rail-almanac-yiji>span>em{min-width:0;color:var(--muted);font-style:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.work-status-rail .rail-section-header{height:24px;margin-bottom:9px}
+.work-status-rail .rail-section-header>span>b{font-size:12px}
+.rail-section-header-success>span>i{background:var(--success);box-shadow:0 0 0 4px color-mix(in srgb,var(--success) 13%,transparent)}
+.rail-work-card{padding:12px 10px}
 .work-status-rail .rail-work-session-main{min-height:24px;padding:0 0 9px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:9px}
 .work-status-rail .rail-work-session-main>b{font-size:13px}
 .work-status-rail .rail-work-session-main>small{color:var(--success)}
 .work-status-rail .rail-work-session-main.empty{grid-template-columns:minmax(0,1fr);gap:2px}
-.work-status-rail .rail-work-session-metrics{grid-template-columns:1fr 1fr auto;align-items:end;gap:12px;margin-top:8px}
+.work-status-rail .rail-work-session-metrics{grid-template-columns:1fr 1fr auto;align-items:end;gap:10px;margin-top:10px}
 .work-status-rail .rail-work-session-metrics>span{padding:0;background:transparent}
 .work-status-rail .rail-work-session-metrics .rail-inline-link{margin:0;white-space:nowrap}
-.work-status-rail .rail-project-card{min-height:61px;margin-top:0;padding:10px;grid-template-columns:minmax(0,1fr) 60px;align-items:center;gap:10px}
-.work-status-rail .rail-project-card>div{gap:3px}
-.rail-project-stop{height:30px;border:1px solid color-mix(in srgb,var(--danger) 42%,var(--line));border-radius:7px;background:color-mix(in srgb,var(--danger) 7%,var(--surface));color:var(--danger);font-size:10px;font-weight:700}
+.work-status-rail .rail-project-card{min-height:68px;margin-top:0;padding:11px 10px;grid-template-columns:minmax(0,1fr) 60px;align-items:center;gap:10px}
+.work-status-rail .rail-project-card>div{gap:5px}
+.work-status-rail .rail-project-card>div>b{font-size:13px}
+.work-status-rail .rail-project-card>div>small{min-width:0;display:flex;align-items:center;gap:3px}
+.work-status-rail .rail-project-card>div>small>span{flex:0 0 auto}
+.rail-project-url{min-width:0;padding:0;border:0;background:transparent;color:var(--success);font-size:9px;text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--success) 56%,transparent);text-underline-offset:2px;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.rail-project-url:hover{color:color-mix(in srgb,var(--success) 76%,#fff);text-decoration-color:currentColor}
+.rail-project-url>i{font-style:normal;font-size:10px}
+.rail-project-stop{height:34px;border:1px solid color-mix(in srgb,var(--danger) 42%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--danger) 7%,var(--surface));color:var(--danger);font-size:10px;font-weight:700}
 .rail-project-stop:hover{border-color:var(--danger);background:color-mix(in srgb,var(--danger) 13%,var(--surface))}
 .rail-project-stop:disabled{opacity:.5}
-.work-status-rail .rail-running-item{gap:7px;margin-top:0;padding:9px 10px}
+.work-status-rail .rail-running-item{gap:9px;margin-top:0;padding:11px 10px}
 .work-status-rail .rail-running-item-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:7px}
 .work-status-rail .rail-running-item-head>b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
 .work-status-rail .rail-running-progress{height:4px}
@@ -368,7 +378,7 @@ button:disabled{cursor:not-allowed}
 .rail-issue-list>p>b{color:var(--primary)}
 .work-status-rail .rail-recent-toggle{height:24px}
 .work-status-rail .rail-recent-list{margin-top:4px}
-.work-status-rail .rail-recent-list>a{min-height:33px;padding:0 2px;border:0}
+.work-status-rail .rail-recent-list>a{min-height:25px;padding:0 2px;border:0}
 .work-status-rail .rail-recent-list>a>span{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}
 .work-status-rail .rail-recent-list b{color:var(--muted);font-size:10px;font-weight:500;line-height:1.4}
 .work-status-rail .rail-recent-list>a>span>small{text-align:right}

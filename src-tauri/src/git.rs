@@ -2539,6 +2539,8 @@ fn refresh_basic_repository_state(state: &DatabaseState, path: &str) -> Result<(
     let branch = git_output(&["-C", path, "branch", "--show-current"])
         .unwrap_or_else(|_| "HEAD".to_string());
     let status = git_status_output(path)?;
+    let changed_file_count = parse_changed_files(&status).len() as i64;
+    let (ahead_count, behind_count) = repository_ahead_behind(path);
     let remote_url =
         git_output(&["-C", path, "config", "--get", "remote.origin.url"]).unwrap_or_default();
     let user_name = git_output(&["-C", path, "config", "user.name"]).unwrap_or_default();
@@ -2547,8 +2549,18 @@ fn refresh_basic_repository_state(state: &DatabaseState, path: &str) -> Result<(
     let connection = state.connect()?;
     connection
         .execute(
-            "UPDATE repository_assets SET default_branch=?2,remote_url=?3,has_uncommitted_changes=?4,last_scanned_at=?5,updated_at=?5 WHERE path=?1",
-            params![path, branch, remote_url, (!status.is_empty()) as i64, now],
+            "UPDATE repository_assets SET default_branch=?2,remote_url=?3,has_uncommitted_changes=?4,
+                    changed_file_count=?5,ahead_count=?6,behind_count=?7,last_scanned_at=?8,updated_at=?8 WHERE path=?1",
+            params![
+                path,
+                branch,
+                remote_url,
+                (changed_file_count > 0) as i64,
+                changed_file_count,
+                ahead_count,
+                behind_count,
+                now
+            ],
         )
         .map_err(|error| error.to_string())?;
     connection
@@ -4915,15 +4927,16 @@ mod tests {
         normalize_repository_category, normalized_commit_grouping_mode,
         parse_ai_indexed_commit_plan, parse_ai_single_commit_summary, parse_changed_files,
         parse_commits, reconcile_upstream, reconcile_upstream_outcome, redact_ai_commit_context,
-        repository_attention, resolve_conflicts_with_side, runtime_line_failed,
-        runtime_snapshot_requires_persistence, sensitive_path, smart_sync_selected_changes,
-        spawn_project_start_command, terminate_managed_process, valid_conventional_commit_message,
-        validate_ai_indexed_commit_groups, validated_branch, validated_changed_file,
-        validated_local_runtime_url, validated_stage_files, vscode_open_command,
-        workbench_stash_reference, GitScanConfiguration, ManagedProjectProcess,
-        RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
+        refresh_basic_repository_state, repository_attention, resolve_conflicts_with_side,
+        runtime_line_failed, runtime_snapshot_requires_persistence, sensitive_path,
+        smart_sync_selected_changes, spawn_project_start_command, terminate_managed_process,
+        valid_conventional_commit_message, validate_ai_indexed_commit_groups, validated_branch,
+        validated_changed_file, validated_local_runtime_url, validated_stage_files,
+        vscode_open_command, workbench_stash_reference, GitScanConfiguration,
+        ManagedProjectProcess, RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
         RUNTIME_SNAPSHOT_FALLBACK_INTERVAL,
     };
+    use crate::database::DatabaseState;
     use chrono::Utc;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -5900,6 +5913,93 @@ mod tests {
         assert!(!run(&["diff", "--cached", "--name-only"]).is_empty());
         run(&["restore", "--staged", "--", "main.txt"]);
         assert!(run(&["diff", "--cached", "--name-only"]).is_empty());
+
+        assert!(directory.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repository_refresh_updates_list_state_after_git_operations() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-git-refresh-{}", uuid::Uuid::new_v4()));
+        let repository_path = directory.join("repository");
+        let remote_path = directory.join("remote.git");
+        std::fs::create_dir_all(&repository_path).unwrap();
+        let repository = repository_path.display().to_string();
+        let remote = remote_path.display().to_string();
+        git_output(&["init", "--bare", &remote]).unwrap();
+        let run = |arguments: &[&str]| {
+            git_operation_output(
+                &repository,
+                &arguments
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap()
+        };
+        run(&["init"]);
+        run(&["config", "user.name", "lzsk"]);
+        run(&["config", "user.email", "lzsk@example.test"]);
+        std::fs::write(repository_path.join("main.txt"), "first\n").unwrap();
+        run(&["add", "--", "main.txt"]);
+        run(&["commit", "-m", "feat(core): 初始化测试仓库"]);
+        run(&["remote", "add", "origin", &remote]);
+        run(&["push", "--set-upstream", "origin", "HEAD"]);
+
+        let database_path = directory.join("workbench.sqlite3");
+        let state = DatabaseState::new(database_path).unwrap();
+        let now = Utc::now().to_rfc3339();
+        state
+            .connect()
+            .unwrap()
+            .execute(
+                "INSERT INTO repository_assets(path,name,last_scanned_at,updated_at) VALUES(?1,'测试仓库',?2,?2)",
+                rusqlite::params![repository, now],
+            )
+            .unwrap();
+
+        std::fs::write(repository_path.join("main.txt"), "second\n").unwrap();
+        std::fs::write(repository_path.join("extra.txt"), "new\n").unwrap();
+        refresh_basic_repository_state(&state, &repository).unwrap();
+        let dirty_state = state
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT has_uncommitted_changes,changed_file_count,ahead_count,behind_count FROM repository_assets WHERE path=?1",
+                [&repository],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)),
+            )
+            .unwrap();
+        assert_eq!(dirty_state, (1, 2, 0, 0));
+
+        run(&["add", "--", "main.txt", "extra.txt"]);
+        run(&["commit", "-m", "feat(core): 更新测试仓库"]);
+        refresh_basic_repository_state(&state, &repository).unwrap();
+        let committed_state = state
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT has_uncommitted_changes,changed_file_count,ahead_count,behind_count FROM repository_assets WHERE path=?1",
+                [&repository],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)),
+            )
+            .unwrap();
+        assert_eq!(committed_state, (0, 0, 1, 0));
+
+        run(&["push"]);
+        refresh_basic_repository_state(&state, &repository).unwrap();
+        let pushed_ahead = state
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT ahead_count FROM repository_assets WHERE path=?1",
+                [&repository],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(pushed_ahead, 0);
 
         assert!(directory.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(directory).unwrap();
