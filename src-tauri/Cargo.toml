@@ -1,6 +1,6 @@
 [package]
 name = "ai-personal-workbench"
-version = "1.9.11"
+version = "1.9.12"
 description = "星枢 ASTRION 本地桌面程序"
 authors = ["Local User"]
 edition = "2021"
@@ -33,7 +33,9 @@ tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
 # 显式设置 Windows 任务栏图标与应用身份；使用已有锁文件中的版本。
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# NVIDIA 设备存在时直接读取 NVML，避免定时启动 nvidia-smi 进程。
+nvml-wrapper = "0.13.0"
 
 [features]
 default = ["custom-protocol"]

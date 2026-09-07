@@ -27,6 +27,44 @@ export interface DatabaseHealth {
   schemaVersion: number;
 }
 
+export interface GpuPerformance {
+  index: number;
+  kind: "integrated" | "discrete" | "other";
+  name: string;
+  usagePercent: number | null;
+  temperatureCelsius: number | null;
+  dedicatedUsedBytes: number | null;
+  dedicatedTotalBytes: number | null;
+  sharedUsedBytes: number | null;
+  sharedTotalBytes: number | null;
+}
+
+export interface SystemPerformanceSnapshot {
+  available: boolean;
+  capturedAt: string;
+  cpuUsagePercent: number | null;
+  cpuFrequencyMhz: number | null;
+  memoryUsagePercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  memoryAvailableBytes: number | null;
+  diskUsagePercent: number | null;
+  diskReadBytesPerSecond: number | null;
+  diskWriteBytesPerSecond: number | null;
+  networkDownloadBytesPerSecond: number | null;
+  networkUploadBytesPerSecond: number | null;
+  gpus: GpuPerformance[];
+  message: string;
+}
+
+export interface MemoryOptimizationResult {
+  success: boolean;
+  beforeBytes: number | null;
+  afterBytes: number | null;
+  releasedBytes: number;
+  message: string;
+}
+
 export interface BackupEntry {
   path: string;
   fileName: string;
@@ -1301,6 +1339,14 @@ export async function deleteTask(id: string): Promise<void> {
 
 export async function databaseHealth(): Promise<DatabaseHealth> {
   return invoke<DatabaseHealth>("database_health");
+}
+
+export async function getSystemPerformanceSnapshot(): Promise<SystemPerformanceSnapshot> {
+  return invoke<SystemPerformanceSnapshot>("system_performance_snapshot");
+}
+
+export async function optimizeSystemMemory(): Promise<MemoryOptimizationResult> {
+  return invoke<MemoryOptimizationResult>("optimize_system_memory");
 }
 
 export interface VideoPublishRecord {

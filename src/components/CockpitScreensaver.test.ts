@@ -25,8 +25,14 @@ const notifications=Array.from({length:6},(_,index)=>({id:`notice-${index}`,kind
 const runningProject={projectPath:"C:/workbench",projectName:"个人工作台",command:"npm run dev",processId:1,status:"running" as const,startedAt:"2026-09-01T08:00:00",localUrl:"http://localhost:1420",logPath:"",logExcerpt:"",errorMessage:""};
 const runningTest={id:"test-1",menuId:"api",project:"个人工作台",projectPath:"C:/workbench",menuName:"接口回归",mode:"mock" as const,status:"running" as const,startedAt:"2026-09-01T14:00:00",reportMarkdown:"",outputExcerpt:"",errorMessage:"",selectedScenarios:["a","b"],scenarioResults:[],artifacts:[],totalCount:2,passedCount:1,failedCount:0,skippedCount:0,durationMs:0,environmentSummary:"",cleanupStatus:"unknown" as const};
 const runningTapd={id:"tapd-1",itemKey:"workspace:415",itemId:"415",workspaceId:"workspace",repositoryPath:"C:/workbench",status:"running" as const,output:"",errorMessage:"",baselineHead:"",baselineWorktree:"",resultHead:"",changedFiles:[],testSummary:"",reviewStatus:"pending" as const,reviewNote:"",triggerSource:"auto" as const,sourceModifiedAt:"",triggerReason:"",executionMode:"automatic" as const,executionBlockReason:"",testRequired:true,processReportPath:"",createdAt:"2026-09-01T14:00:00",updatedAt:"2026-09-01T14:00:00"};
+const performance={available:true,capturedAt:"2026-09-01T14:32:08Z",cpuUsagePercent:38,cpuFrequencyMhz:3400,memoryUsagePercent:71,memoryUsedBytes:12_000,memoryTotalBytes:16_000,memoryAvailableBytes:4_000,diskUsagePercent:4,diskReadBytesPerSecond:1_024,diskWriteBytesPerSecond:2_048,networkDownloadBytesPerSecond:1_258_291,networkUploadBytesPerSecond:24_576,gpus:[{index:0,kind:"integrated" as const,name:"Intel Iris Xe",usagePercent:32,temperatureCelsius:null,dedicatedUsedBytes:null,dedicatedTotalBytes:null,sharedUsedBytes:100,sharedTotalBytes:200},{index:1,kind:"discrete" as const,name:"NVIDIA RTX 3050",usagePercent:12,temperatureCelsius:70,dedicatedUsedBytes:700,dedicatedTotalBytes:4_000,sharedUsedBytes:0,sharedTotalBytes:8_000}],message:""};
+const performanceHistory=[
+  {capturedAt:"2026-09-01T14:32:06Z",cpu:32,memory:69,disk:4,networkDownload:1_100_000,networkUpload:21_000,integratedGpu:26,discreteGpu:8},
+  {capturedAt:"2026-09-01T14:32:07Z",cpu:41,memory:70,disk:5,networkDownload:1_320_000,networkUpload:25_000,integratedGpu:30,discreteGpu:15},
+  {capturedAt:"2026-09-01T14:32:08Z",cpu:38,memory:71,disk:4,networkDownload:1_258_291,networkUpload:24_576,integratedGpu:32,discreteGpu:12},
+];
 
-function mountCockpit(){return mount(CockpitScreensaver,{props:{quota:{available:true,freshness:"fresh",selectionReason:"test",primary:{usedPercent:32,remainingPercent:68,windowMinutes:300,resetsAt:0},secondary:{usedPercent:17,remainingPercent:83,windowMinutes:10080,resetsAt:0}},notifications,runningProjects:[runningProject],testRuns:[runningTest],tapdJobs:[runningTapd]}});}
+function mountCockpit(){return mount(CockpitScreensaver,{props:{quota:{available:true,freshness:"fresh",selectionReason:"test",primary:{usedPercent:32,remainingPercent:68,windowMinutes:300,resetsAt:0},secondary:{usedPercent:17,remainingPercent:83,windowMinutes:10080,resetsAt:0}},notifications,runningProjects:[runningProject],testRuns:[runningTest],tapdJobs:[runningTapd],performance,performanceHistory}});}
 
 describe("CockpitScreensaver",()=>{
   beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date(2026,8,1,14,32,8));mocks.getDailyActivity.mockClear();windowApi.startDragging.mockClear();});
@@ -57,10 +63,19 @@ describe("CockpitScreensaver",()=>{
     expect(wrapper.findAll(".animated-running-item")).toHaveLength(2);
     expect(wrapper.text()).not.toContain("视频");
     expect(wrapper.find(".cockpit-analytics > .timeline-panel").exists()).toBe(true);
+    expect(wrapper.find(".cockpit-analytics > .cockpit-performance-panel").exists()).toBe(true);
+    const performancePanel=wrapper.get(".cockpit-performance-panel");
+    expect(performancePanel.findAll(".cockpit-performance-list > div")).toHaveLength(3);
+    expect(performancePanel.findAll("polyline")).toHaveLength(3);
+    expect(performancePanel.text()).toContain("GPU12%");
+    expect(performancePanel.text()).not.toContain("集显");
+    expect(performancePanel.text()).not.toContain("磁盘");
+    expect(performancePanel.text()).not.toContain("网络");
+    expect(performancePanel.findAll(".cockpit-performance-list > div")[2].attributes("title")).toBe("NVIDIA RTX 3050");
     expect(wrapper.find(".cockpit-screen > .timeline-panel").exists()).toBe(false);
     expect(wrapper.find(".cockpit-status").exists()).toBe(false);
     expect(wrapper.find(".cockpit-exit-hint").exists()).toBe(false);
-    expect(wrapper.findAll(".cockpit-panel > header > h2")).toHaveLength(7);
+    expect(wrapper.findAll(".cockpit-panel > header > h2")).toHaveLength(8);
     expect(wrapper.find(".pulse-panel > header > .pulse-meta").text()).toContain("相对趋势");
     const pulseHits=wrapper.findAll(".pulse-hit");
     await pulseHits[0].trigger("mouseenter");
@@ -84,7 +99,7 @@ describe("CockpitScreensaver",()=>{
   });
 
   it("没有运行任务时不渲染虚假的项目、测试和自动处理行",async()=>{
-    const wrapper=mount(CockpitScreensaver,{props:{quota:{available:false,freshness:"",selectionReason:""},notifications:[],runningProjects:[],testRuns:[],tapdJobs:[]}});await flushPromises();
+    const wrapper=mount(CockpitScreensaver,{props:{quota:{available:false,freshness:"",selectionReason:""},notifications:[],runningProjects:[],testRuns:[],tapdJobs:[],performance,performanceHistory}});await flushPromises();
     expect(wrapper.findAll(".running-panel>div>button")).toHaveLength(0);
     expect(wrapper.find(".running-panel").text()).toContain("系统空闲");
     expect(wrapper.find(".running-panel").text()).toContain("暂无运行任务");

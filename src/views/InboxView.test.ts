@@ -10,7 +10,7 @@ const backend = vi.hoisted(() => ({
       sourceId: "capture-1",
       project: "未归类项目",
       title: "整理发布说明",
-      summary: "整理发布说明",
+      summary: "\u001b[31m整理发布说明\u001b[39m",
       detail: "来自快速记录",
       route: "",
       priority: "normal",
@@ -62,6 +62,8 @@ describe("InboxView", () => {
 
     expect(wrapper.text()).toContain("整理发布说明");
     expect(wrapper.text()).toContain("快速任务");
+    expect(wrapper.get(".inbox-main p").text()).toBe("整理发布说明");
+    expect(wrapper.text()).not.toContain("[31m");
     expect(wrapper.text()).not.toContain("视频需要处理");
     expect(wrapper.text()).not.toContain("视频生成失败");
   });

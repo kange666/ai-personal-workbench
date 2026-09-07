@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { isRegistered as isShortcutRegistered, register as registerShortcut, unregister as unregisterShortcut } from "@tauri-apps/plugin-global-shortcut";
 import { useWorkbenchStore } from "../stores/workbench";
-import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestCaseGenerations, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, openRepositoryRuntimeUrl, retryFailedEmails, setCodexEmailEnabled, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type TapdCodexJob, type TestCaseGenerationJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
+import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getSystemPerformanceSnapshot, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestCaseGenerations, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, openRepositoryRuntimeUrl, optimizeSystemMemory, retryFailedEmails, setCodexEmailEnabled, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type SystemPerformanceSnapshot, type TapdCodexJob, type TestCaseGenerationJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
 import appLogoWarm from "../assets/app-logo-warm.png";
@@ -23,6 +23,8 @@ import NotificationDrawer from "./NotificationDrawer.vue";
 import QuickCapture from "./QuickCapture.vue";
 import TranslationDialog from "./TranslationDialog.vue";
 import CockpitScreensaver from "./CockpitScreensaver.vue";
+import SystemPerformanceCard from "./SystemPerformanceCard.vue";
+import SystemPerformanceDialog from "./SystemPerformanceDialog.vue";
 import StartupSplash from "./StartupSplash.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
@@ -31,6 +33,7 @@ import { cockpitIdleSettingsChangedEvent, cockpitIdleState, loadCockpitIdleMinut
 import { buildJenkinsActiveOperations } from "../utils/jenkinsActiveOperations";
 import { confirmAction } from "../utils/confirm";
 import { loadWorkbenchNotificationsEnabled, workbenchNotificationPreferenceChangedEvent } from "../utils/notificationPreference";
+import { appendPerformanceHistory, emptySystemPerformanceSnapshot, formatPerformanceBytes, type SystemPerformanceHistoryPoint } from "../utils/systemPerformance";
 
 const store = useWorkbenchStore();
 const router = useRouter();
@@ -38,6 +41,7 @@ const editorOpen = ref(false);
 const searchOpen = ref(false);
 const quickCaptureOpen = ref(false);
 const translationOpen = ref(false);
+const performanceOpen = ref(false);
 const cockpitOpen = ref(false);
 const cockpitIdleWarningSeconds = ref(0);
 const refreshing = ref(false);
@@ -70,6 +74,10 @@ const repositoryAssets = ref<RepositoryAsset[]>([]);
 const todayWorkSessions = ref<WorkSession[]>([]);
 const todayWorkSummary = ref<WorkSummary>({ startDate:"", endDate:"", totalMinutes:0, estimatedMinutes:0, manualMinutes:0, hasManualCorrections:false, byProject:[], byType:[], daily:[] });
 const railNow = ref(Date.now());
+const systemPerformance = ref<SystemPerformanceSnapshot>(emptySystemPerformanceSnapshot());
+const performanceHistory = ref<SystemPerformanceHistoryPoint[]>([]);
+const memoryOptimizationState = ref<"idle" | "loading" | "done" | "error">("idle");
+const memoryOptimizationMessage = ref("");
 const recentActivitiesOpen = ref(window.localStorage.getItem("workbench-right-rail-recent-open") === "true");
 const projectActionPath = ref("");
 const projectActionMessage = ref("");
@@ -179,6 +187,9 @@ let healthTimer = 0;
 let activeOperationsTimer = 0;
 let railStatusTimer = 0;
 let cockpitIdleTimer = 0;
+let performanceTimer = 0;
+let memoryOptimizationResetTimer = 0;
+let performanceLoading = false;
 let cockpitLastActivityAt = Date.now();
 let cockpitIdleMinutes = loadCockpitIdleMinutes();
 let railStatusTicks = 0;
@@ -246,6 +257,7 @@ async function initializeStartup() {
     loadActiveOperations(),
     loadProjectOptions(),
     loadSidebarWorktime(),
+    loadSystemPerformance(),
   ]);
   const safetyLimit=new Promise<void>(resolve => {
     startupSafetyTimer=window.setTimeout(resolve,12_000);
@@ -320,8 +332,45 @@ async function navigateFromCockpit(route:string) {
   await router.push(route);
 }
 function handleCockpitVisibilityChange() {
-  if (document.visibilityState === "visible") evaluateCockpitIdle();
+  if (document.visibilityState === "visible") {
+    evaluateCockpitIdle();
+    void loadSystemPerformance();
+  }
   else cockpitIdleWarningSeconds.value=0;
+}
+async function loadSystemPerformance() {
+  if (!isTauriRuntime() || document.visibilityState === "hidden" || performanceLoading) return;
+  performanceLoading=true;
+  try {
+    const snapshot=await getSystemPerformanceSnapshot();
+    systemPerformance.value=snapshot;
+    performanceHistory.value=appendPerformanceHistory(performanceHistory.value,snapshot);
+  } catch {
+    systemPerformance.value={...systemPerformance.value,available:false,message:"暂时无法读取本机性能信息，将继续自动重试。"};
+  } finally {
+    performanceLoading=false;
+  }
+}
+async function optimizeMemory() {
+  if (memoryOptimizationState.value === "loading" || !isTauriRuntime()) return;
+  window.clearTimeout(memoryOptimizationResetTimer);
+  memoryOptimizationState.value="loading";
+  memoryOptimizationMessage.value="";
+  try {
+    const result=await optimizeSystemMemory();
+    memoryOptimizationState.value=result.success ? "done" : "error";
+    memoryOptimizationMessage.value=result.success
+      ? result.releasedBytes > 0 ? `已释放${formatPerformanceBytes(result.releasedBytes,0).replace(" ","")}` : "已完成"
+      : result.message;
+    await loadSystemPerformance();
+  } catch {
+    memoryOptimizationState.value="error";
+    memoryOptimizationMessage.value="内存优化暂时失败，请稍后重试。";
+  }
+  memoryOptimizationResetTimer=window.setTimeout(() => {
+    memoryOptimizationState.value="idle";
+    memoryOptimizationMessage.value="";
+  },4_000);
 }
 function handleKeydown(event: KeyboardEvent) {
   if (cockpitOpen.value) {
@@ -654,6 +703,7 @@ onMounted(() => {
   activeOperationsTimer = window.setInterval(() => void loadActiveOperations(), 3 * 1000);
   railStatusTimer = window.setInterval(() => { railNow.value=Date.now(); railStatusTicks+=1; if (railStatusTicks % 5 === 0) void Promise.all([loadSidebarWorktime(),loadProjectOptions()]); }, 60 * 1000);
   cockpitIdleTimer = window.setInterval(evaluateCockpitIdle,1_000);
+  performanceTimer = window.setInterval(() => void loadSystemPerformance(),1_000);
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("pointerdown",handleCockpitActivity,true);
   window.addEventListener("wheel",handleCockpitActivity,{capture:true,passive:true});
@@ -680,12 +730,14 @@ onBeforeUnmount(() => {
   window.clearInterval(activeOperationsTimer);
   window.clearInterval(railStatusTimer);
   window.clearInterval(cockpitIdleTimer);
+  window.clearInterval(performanceTimer);
   window.clearTimeout(notificationToastTimer);
   window.clearTimeout(pageLoadingFinishTimer);
   window.clearTimeout(pageLoadingSlowTimer);
   window.clearTimeout(startupSlowTimer);
   window.clearTimeout(startupFinishTimer);
   window.clearTimeout(startupSafetyTimer);
+  window.clearTimeout(memoryOptimizationResetTimer);
   emailUnlisten?.();
   vipUnlisten?.();
   codexDataUnlisten?.();
@@ -802,6 +854,9 @@ onBeforeUnmount(() => {
           <div class="rail-almanac-yiji"><span><i>宜</i><em>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</em></span><span><i>忌</i><em>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</em></span></div>
         </div>
       </section>
+      <section class="rail-performance">
+        <SystemPerformanceCard :snapshot="systemPerformance" :history="performanceHistory" :optimization-state="memoryOptimizationState" :optimization-message="memoryOptimizationMessage" @open="performanceOpen=true" @optimize="optimizeMemory" />
+      </section>
       <section class="rail-work-session">
         <header class="rail-section-header rail-section-header-success"><span><i></i><b>当前工作</b></span><em>{{ latestWorkSession ? 1 : 0 }}</em></header>
         <div class="rail-work-card">
@@ -840,9 +895,10 @@ onBeforeUnmount(() => {
     <NotificationDrawer :notification="selectedNotification" @close="selectedNotification=null" @reviewed="handleNotificationReviewed" />
     <QuickCapture :open="quickCaptureOpen" @close="quickCaptureOpen=false" />
     <TranslationDialog :open="translationOpen" @close="translationOpen=false" />
+    <SystemPerformanceDialog :open="performanceOpen" :snapshot="systemPerformance" :history="performanceHistory" @close="performanceOpen=false" />
     <ConfirmDialog />
     <Transition name="cockpit-overlay">
-      <CockpitScreensaver v-if="cockpitOpen" :quota="quota" :notifications="notifications" :running-projects="runningProjects" :test-runs="allTestRuns" :tapd-jobs="allTapdJobs" @close="closeCockpit" @navigate="navigateFromCockpit" />
+      <CockpitScreensaver v-if="cockpitOpen" :quota="quota" :notifications="notifications" :running-projects="runningProjects" :test-runs="allTestRuns" :tapd-jobs="allTapdJobs" :performance="systemPerformance" :performance-history="performanceHistory" @close="closeCockpit" @navigate="navigateFromCockpit" />
     </Transition>
     <Transition name="cockpit-warning">
       <aside v-if="cockpitIdleWarningSeconds&&!cockpitOpen" class="cockpit-idle-warning" role="status" aria-live="polite"><i></i><span><b>{{ cockpitIdleWarningSeconds }} 秒后进入数据驾驶舱</b><small>点击、输入或滚动可继续使用当前页面</small></span><button @click="resetCockpitIdle">继续使用</button></aside>

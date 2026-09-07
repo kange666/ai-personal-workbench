@@ -12,6 +12,7 @@ import {
   type DailyActivity,
   type ReportRecord,
   type RunningProjectProcess,
+  type SystemPerformanceSnapshot,
   type TapdCodexJob,
   type TestRun,
   type WorkbenchNotification,
@@ -19,6 +20,7 @@ import {
   type WorkSummary,
 } from "../services/backend";
 import { activityHeatLevel, cockpitHours, compactCockpitNumber, localDateIso, recentDateKeys } from "../utils/cockpit";
+import { findPerformanceGpu, formatPerformancePercent, type SystemPerformanceHistoryPoint } from "../utils/systemPerformance";
 import { estimateTestRunProgress } from "../utils/testRunProgress";
 import CockpitIcon from "./CockpitIcon.vue";
 
@@ -32,6 +34,8 @@ const props = defineProps<{
   runningProjects: RunningProjectProcess[];
   testRuns: TestRun[];
   tapdJobs: TapdCodexJob[];
+  performance: SystemPerformanceSnapshot;
+  performanceHistory: SystemPerformanceHistoryPoint[];
 }>();
 const emit = defineEmits<{ close: []; navigate: [route: string] }>();
 
@@ -50,6 +54,24 @@ const reports = ref<ReportRecord[]>([]);
 const workSessions = ref<WorkSession[]>([]);
 const workSummary = ref<WorkSummary>({ startDate:"", endDate:"", totalMinutes:0, estimatedMinutes:0, manualMinutes:0, hasManualCorrections:false, byProject:[], byType:[], daily:[] });
 const pulseHoverIndex = ref<number | null>(null);
+const discreteGpu = computed(() => findPerformanceGpu(props.performance,"discrete"));
+const performanceItems = computed(() => [
+  {key:"cpu",label:"CPU",value:props.performance.cpuUsagePercent,color:"#70bfff",samples:props.performanceHistory.map(item=>item.cpu)},
+  {key:"memory",label:"内存",value:props.performance.memoryUsagePercent,color:"#9b72ea",samples:props.performanceHistory.map(item=>item.memory)},
+  {key:"discrete-gpu",label:"GPU",value:discreteGpu.value?.usagePercent ?? null,color:"#42c9bd",samples:props.performanceHistory.map(item=>item.discreteGpu)},
+]);
+
+function performanceSparkline(values: Array<number | null>, currentValue: number | null) {
+  const recentValues = values.slice(-28);
+  const samples = recentValues.length ? recentValues : [currentValue, currentValue];
+  if (samples.length === 1) samples.push(samples[0]);
+  return samples.map((value,index)=>{
+    const x = 2 + (index / (samples.length - 1)) * 116;
+    const normalized = Math.max(0,Math.min(100,value ?? 0));
+    const y = 25 - normalized * 0.22;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+}
 let clockTimer = 0;
 let refreshTimer = 0;
 let loadSequence = 0;
@@ -410,6 +432,18 @@ onBeforeUnmount(() => {
               <div class="timeline-hours"><span v-for="hour in [0,4,8,12,16,20,24]" :key="hour">{{ String(hour).padStart(2,'0') }}:00</span></div>
             </div>
           </article>
+          <article class="cockpit-panel cockpit-performance-panel">
+            <header><h2>系统性能</h2><small><i></i>{{ performance.available ? '实时' : '暂不可用' }}</small></header>
+            <div class="cockpit-performance-list">
+              <div v-for="item in performanceItems" :key="item.key" :title="item.key === 'discrete-gpu' ? (discreteGpu?.name || '未识别到独立显卡') : undefined">
+                <small>{{ item.label }}</small>
+                <b>{{ formatPerformancePercent(item.value) }}</b>
+                <svg viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true">
+                  <polyline :points="performanceSparkline(item.samples,item.value)" :stroke="item.color" />
+                </svg>
+              </div>
+            </div>
+          </article>
         </div>
 
         <aside class="cockpit-live-rail">
@@ -561,9 +595,14 @@ onBeforeUnmount(() => {
 .cockpit-main,
 .cockpit-lower-grid { gap: 12px; }
 .cockpit-analytics {
+  grid-template-columns: minmax(0, 2.15fr) minmax(260px, 0.85fr);
   grid-template-rows: minmax(190px, 1fr) clamp(160px, 23vh, 235px) clamp(130px, 14vh, 150px);
   gap: 12px;
 }
+.pulse-panel,
+.cockpit-lower-grid { grid-column: 1 / -1; }
+.timeline-panel { grid-column: 1; grid-row: 3; }
+.cockpit-performance-panel { grid-column: 2; grid-row: 3; }
 .cockpit-panel { position: relative; }
 .cockpit-panel > header { padding: 10px 14px; }
 .cockpit-panel h2 {
@@ -936,6 +975,55 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 3px rgba(112, 191, 255, 0.22);
 }
 .timeline-track > i.report { width: 6px !important; }
+
+/* 24 小时轨迹缩窄后，右侧用同高卡片呈现当前本机资源。 */
+.cockpit-performance-panel {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 36px minmax(0, 1fr);
+}
+.cockpit-performance-panel > header { min-height: 36px; padding: 5px 10px; }
+.cockpit-performance-panel > header > h2 { font-size: 13px; }
+.cockpit-performance-panel > header > small { display: flex; align-items: center; gap: 6px; color: var(--c-live); }
+.cockpit-performance-panel > header > small > i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px rgba(84, 221, 189, 0.54); }
+.cockpit-performance-list {
+  min-height: 0;
+  padding: 0 11px 7px;
+  display: grid;
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+}
+.cockpit-performance-list > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 50px 46px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid rgba(100, 157, 198, 0.14);
+}
+.cockpit-performance-list small {
+  color: #8ca5b7;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.cockpit-performance-list b {
+  color: #edf7fd;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.cockpit-performance-list svg {
+  min-width: 0;
+  width: 100%;
+  height: 28px;
+  overflow: visible;
+}
+.cockpit-performance-list polyline {
+  fill: none;
+  stroke-width: 1.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 2px rgba(112, 191, 255, 0.18));
+}
 
 /* 切换统计周期时短暂遮罩旧值，避免用户把上一周期数据误认为新结果。 */
 .cockpit-main { position: relative; }

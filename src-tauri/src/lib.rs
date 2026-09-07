@@ -18,6 +18,7 @@ mod parity_catalog;
 mod project_identity;
 mod reports;
 mod suggestions;
+mod system_performance;
 mod tapd;
 mod testing;
 mod toolchain;
@@ -538,6 +539,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(git::ProjectProcessState::default())
+        .manage(system_performance::SystemPerformanceState::default())
         .manage(testing::TestProcessState::default())
         .manage(testing::TestCaseGenerationState::default())
         .setup(|app| {
@@ -814,6 +816,8 @@ pub fn run() {
             database::save_task,
             database::delete_task,
             suggestions::sync_task_suggestions,
+            system_performance::system_performance_snapshot,
+            system_performance::optimize_system_memory,
             tapd::tapd_status,
             tapd::list_tapd_projects,
             tapd::save_tapd_project,
