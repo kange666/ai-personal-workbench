@@ -1,4 +1,4 @@
-use crate::database::DatabaseState;
+use crate::{database::DatabaseState, project_identity};
 use chrono::{DateTime, Duration, FixedOffset, Local, Utc};
 use keyring::Entry;
 use lettre::{
@@ -251,28 +251,94 @@ pub fn reconcile_notifications_for_state(state: &DatabaseState) -> Result<usize,
     let enabled_at = meta(state, "codex_email_enabled_at");
     let now = Utc::now().to_rfc3339();
     let connection = state.connect()?;
+    connection
+        .execute(
+            "UPDATE email_deliveries
+             SET status='skipped_non_project',next_attempt_at=NULL,last_error='非项目对话不发送完成邮件',updated_at=?1
+             WHERE status IN ('pending','retrying')
+               AND notification_id IN (
+                 SELECT n.id FROM notifications n
+                 WHERE n.kind='codex_complete' AND COALESCE(n.source_id,'')=''
+               )",
+            [&now],
+        )
+        .map_err(|error| error.to_string())?;
+    let mut queued_statement = connection
+        .prepare(
+            "SELECT d.notification_id,COALESCE(c.project_override,''),COALESCE(c.cwd,'')
+             FROM email_deliveries d
+             JOIN notifications n ON n.id=d.notification_id
+             JOIN conversations c ON c.id=n.source_id
+             WHERE n.kind='codex_complete' AND d.status IN ('pending','retrying')",
+        )
+        .map_err(|error| error.to_string())?;
+    let queued = queued_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(queued_statement);
+    for (notification_id, project_override, cwd) in queued {
+        if !project_identity::conversation_belongs_to_project(&connection, &project_override, &cwd)?
+        {
+            connection
+                .execute(
+                    "UPDATE email_deliveries SET status='skipped_non_project',next_attempt_at=NULL,last_error='非项目对话不发送完成邮件',updated_at=?1 WHERE notification_id=?2",
+                    params![now, notification_id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
     let mut statement = connection
         .prepare(
-            "SELECT n.id,n.created_at FROM notifications n LEFT JOIN email_deliveries d ON d.notification_id=n.id WHERE n.kind='codex_complete' AND d.notification_id IS NULL ORDER BY n.created_at",
+            "SELECT n.id,n.created_at,COALESCE(c.project_override,''),COALESCE(c.cwd,'')
+             FROM notifications n
+             JOIN conversations c ON c.id=n.source_id
+             LEFT JOIN email_deliveries d ON d.notification_id=n.id
+             WHERE n.kind='codex_complete' AND d.notification_id IS NULL
+             ORDER BY n.created_at",
         )
         .map_err(|error| error.to_string())?;
     let missing = statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     drop(statement);
     let mut created = 0;
-    for (notification_id, completed_at) in missing {
-        let (status, reason) = delivery_decision(
-            &completed_at,
-            &runtime_started_at,
-            &enabled_at,
-            current_enabled,
-            configured,
-        );
+    for (notification_id, completed_at, project_override, cwd) in missing {
+        let (status, reason) = if project_identity::conversation_belongs_to_project(
+            &connection,
+            &project_override,
+            &cwd,
+        )? {
+            delivery_decision(
+                &completed_at,
+                &runtime_started_at,
+                &enabled_at,
+                current_enabled,
+                configured,
+            )
+        } else {
+            (
+                "skipped_non_project",
+                "非项目对话不发送完成邮件".to_string(),
+            )
+        };
         created += connection
             .execute(
                 "INSERT OR IGNORE INTO email_deliveries(notification_id,status,attempts,next_attempt_at,sent_at,last_error,created_at,updated_at) VALUES(?1,?2,0,NULL,NULL,?3,?4,?4)",
@@ -381,7 +447,12 @@ fn due_deliveries(state: &DatabaseState) -> Result<Vec<DeliveryMessage>, String>
     let now = Utc::now().to_rfc3339();
     let mut statement = connection
         .prepare(
-            "SELECT d.notification_id,n.title,n.body,n.output,COALESCE(n.source_id,''),COALESCE((SELECT project_override FROM conversations c WHERE c.id=n.source_id LIMIT 1),''),n.created_at,d.attempts FROM email_deliveries d JOIN notifications n ON n.id=d.notification_id WHERE d.status IN ('pending','retrying') AND (d.next_attempt_at IS NULL OR d.next_attempt_at<=?1) ORDER BY d.created_at LIMIT 5",
+            "SELECT d.notification_id,n.title,n.body,n.output,COALESCE(n.source_id,''),COALESCE(c.project_override,''),n.created_at,d.attempts
+             FROM email_deliveries d
+             JOIN notifications n ON n.id=d.notification_id
+             JOIN conversations c ON c.id=n.source_id
+             WHERE d.status IN ('pending','retrying') AND (d.next_attempt_at IS NULL OR d.next_attempt_at<=?1)
+             ORDER BY d.created_at LIMIT 5",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
@@ -812,7 +883,8 @@ mod tests {
         initialize_for_state(&state).unwrap();
         let completed_at = (Utc::now() + Duration::minutes(1)).to_rfc3339();
         let connection = state.connect().unwrap();
-        connection.execute("INSERT INTO notifications(id,kind,title,created_at) VALUES('codex-complete-once','codex_complete','Codex 完成',?1)", [&completed_at]).unwrap();
+        connection.execute("INSERT INTO conversations(id,source_file,title,project_override,imported_at) VALUES('session-once','session-once.jsonl','会话标题','个人工作台',?1)", [&completed_at]).unwrap();
+        connection.execute("INSERT INTO notifications(id,kind,title,source_id,created_at) VALUES('codex-complete-once','codex_complete','Codex 完成','session-once',?1)", [&completed_at]).unwrap();
         connection.execute("INSERT INTO notifications(id,kind,title,created_at) VALUES('report-ignore','report','报告完成',?1)", [&completed_at]).unwrap();
         drop(connection);
 
@@ -827,6 +899,36 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
 
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reconciliation_skips_non_project_conversations_and_cancels_queued_mail() {
+        let (directory, state) = test_state("non-project");
+        let connection = state.connect().unwrap();
+        connection.execute("INSERT INTO conversations(id,source_file,title,cwd,imported_at) VALUES('session-chat','session-chat.jsonl','普通对话','C:/Users/11429', '2026-08-07T10:00:00Z')", []).unwrap();
+        connection.execute("INSERT INTO notifications(id,kind,title,source_id,created_at) VALUES('codex-complete-chat','codex_complete','普通对话完成','session-chat','2026-08-07T10:00:00Z')", []).unwrap();
+        connection.execute("INSERT INTO email_deliveries(notification_id,status,attempts,next_attempt_at,created_at,updated_at) VALUES('codex-complete-chat','pending',0,NULL,'2026-08-07T10:00:00Z','2026-08-07T10:00:00Z')", []).unwrap();
+        connection.execute("INSERT INTO notifications(id,kind,title,source_id,created_at) VALUES('codex-complete-chat-new','codex_complete','另一普通对话完成','session-chat','2026-08-07T10:01:00Z')", []).unwrap();
+        drop(connection);
+
+        assert_eq!(reconcile_notifications_for_state(&state).unwrap(), 1);
+        let connection = state.connect().unwrap();
+        for notification_id in ["codex-complete-chat", "codex-complete-chat-new"] {
+            let (status, reason): (String, String) = connection
+                .query_row(
+                    "SELECT status,COALESCE(last_error,'') FROM email_deliveries WHERE notification_id=?1",
+                    [notification_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "skipped_non_project");
+            assert_eq!(reason, "非项目对话不发送完成邮件");
+        }
+        assert!(due_deliveries(&state).unwrap().is_empty());
+
+        drop(connection);
+        drop(state);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -1,4 +1,4 @@
-use crate::{database::DatabaseState, email};
+use crate::{database::DatabaseState, email, project_identity};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -220,15 +220,28 @@ fn completion_from_value(value: &Value) -> Option<CompletionEvent> {
     })
 }
 
-fn session_id(path: &Path) -> Option<String> {
-    let file = File::open(path).ok()?;
-    let first_line = BufReader::new(file).lines().next()?.ok()?;
-    let value = serde_json::from_str::<Value>(&first_line).ok()?;
-    value
+fn session_context(path: &Path) -> (Option<String>, String) {
+    let Some(first_line) = File::open(path)
+        .ok()
+        .and_then(|file| BufReader::new(file).lines().next())
+        .and_then(Result::ok)
+    else {
+        return (None, String::new());
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&first_line) else {
+        return (None, String::new());
+    };
+    let id = value
         .pointer("/payload/id")
         .or_else(|| value.pointer("/payload/session_id"))
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+        .map(ToOwned::to_owned);
+    let cwd = value
+        .pointer("/payload/cwd")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    (id, cwd)
 }
 
 fn completions_from_tail(path: &Path) -> Vec<CompletionEvent> {
@@ -295,10 +308,15 @@ pub fn sync_codex_notifications_for_state(
                 continue;
             }
             summary.files_scanned += 1;
-            let source_id = session_id(entry.path());
+            let (source_id, source_cwd) = session_context(entry.path());
             for event in completions_from_tail(entry.path()) {
                 if event.completed_at >= baseline {
-                    completed.push((entry.path().display().to_string(), source_id.clone(), event));
+                    completed.push((
+                        entry.path().display().to_string(),
+                        source_id.clone(),
+                        source_cwd.clone(),
+                        event,
+                    ));
                 }
             }
         }
@@ -308,8 +326,8 @@ pub fn sync_codex_notifications_for_state(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    for (source_file, source_id, event) in completed {
-        let (conversation_title, cwd, project_override) = transaction
+    for (source_file, source_id, source_cwd, event) in completed {
+        let (conversation_title, database_cwd, project_override) = transaction
             .query_row(
                 "SELECT COALESCE(NULLIF(title,''),'未命名 Codex 对话'),COALESCE(cwd,''),COALESCE(project_override,'') FROM conversations WHERE id=?1 OR source_file=?2 LIMIT 1",
                 params![source_id, source_file],
@@ -318,6 +336,18 @@ pub fn sync_codex_notifications_for_state(
             .optional()
             .map_err(|error| error.to_string())?
             .unwrap_or_else(|| ("Codex 对话任务".to_string(), String::new(), String::new()));
+        let cwd = if database_cwd.trim().is_empty() {
+            source_cwd
+        } else {
+            database_cwd
+        };
+        if !project_identity::conversation_belongs_to_project(
+            &transaction,
+            &project_override,
+            &cwd,
+        )? {
+            continue;
+        }
         let notification_id = format!("codex-complete-{}", event.turn_id);
         let title = notification_title(
             &project_override,
@@ -470,6 +500,7 @@ pub fn review_notification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn detects_real_codex_task_complete_event() {
@@ -493,6 +524,33 @@ mod tests {
     fn ignores_non_completion_events() {
         let value = serde_json::json!({"type":"event_msg","payload":{"type":"task_started"}});
         assert!(completion_from_value(&value).is_none());
+    }
+
+    #[test]
+    fn reads_session_id_and_cwd_from_session_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "workbench-notification-session-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type":"session_meta",
+                "payload":{"id":"session-1","cwd":"F:/TB-project/client"}
+            })
+        )
+        .unwrap();
+
+        assert_eq!(
+            session_context(&path),
+            (
+                Some("session-1".to_string()),
+                "F:/TB-project/client".to_string()
+            )
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

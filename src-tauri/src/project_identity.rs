@@ -96,6 +96,46 @@ fn profile_matches(profile: &ProjectProfile, raw_project: &str, source_path: &st
         })
 }
 
+fn path_belongs_to_root(path: &str, root: &str) -> bool {
+    let path = normalized(path);
+    let root = normalized(root);
+    path == root
+        || (!root.is_empty()
+            && path
+                .strip_prefix(&root)
+                .is_some_and(|suffix| suffix.starts_with('\\')))
+}
+
+pub fn conversation_belongs_to_project(
+    connection: &Connection,
+    project_override: &str,
+    cwd: &str,
+) -> Result<bool, String> {
+    let project_override = project_override.trim();
+    if !project_override.is_empty() && project_override != "未归类项目" {
+        return Ok(true);
+    }
+    if cwd.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT repository_path FROM project_profiles WHERE TRIM(repository_path)<>''
+             UNION
+             SELECT path FROM repository_assets WHERE TRIM(path)<>''",
+        )
+        .map_err(|error| error.to_string())?;
+    let project_paths = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(project_paths
+        .iter()
+        .any(|project_path| path_belongs_to_root(cwd, project_path)))
+}
+
 fn rewrite_path_references(value: &str, old_path: &str, new_path: &str) -> String {
     let old_windows = old_path.replace('/', "\\");
     let new_windows = new_path.replace('/', "\\");
@@ -634,6 +674,35 @@ mod tests {
     #[test]
     fn folder_name_handles_windows_paths() {
         assert_eq!(folder_name(r"F:\TB-project\client\"), "client");
+    }
+
+    #[test]
+    fn conversation_project_membership_uses_manual_assignment_or_registered_path_boundary() {
+        let directory = std::env::temp_dir().join(format!(
+            "workbench-project-membership-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let connection = state.connect().unwrap();
+        connection.execute(
+            "INSERT INTO repository_assets(path,name,remote_url,default_branch,last_scanned_at,updated_at) VALUES('F:/TB-project/client','client','','main','now','now')",
+            [],
+        ).unwrap();
+
+        assert!(conversation_belongs_to_project(&connection, "个人工作台", "").unwrap());
+        assert!(
+            conversation_belongs_to_project(&connection, "", r"f:\tb-project\CLIENT\src").unwrap()
+        );
+        assert!(
+            !conversation_belongs_to_project(&connection, "", r"F:\TB-project\client-copy")
+                .unwrap()
+        );
+        assert!(!conversation_belongs_to_project(&connection, "未归类项目", "").unwrap());
+
+        drop(connection);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
