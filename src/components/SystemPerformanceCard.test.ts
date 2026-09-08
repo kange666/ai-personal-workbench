@@ -13,6 +13,8 @@ describe("SystemPerformanceCard",() => {
     expect(wrapper.find(".rail-performance-cell.discrete > i").exists()).toBe(true);
     expect(wrapper.find(".rail-performance-cell.disk > i").exists()).toBe(false);
     expect(wrapper.find(".rail-performance-cell.disk b").text()).toBe("4%");
+    expect(wrapper.find(".rail-performance-cell.network b").text()).toBe("↓1MB/s");
+    expect(wrapper.find(".rail-performance-cell.network b").text()).not.toContain("↑");
     await wrapper.get(".rail-performance-grid").trigger("click");
     expect(wrapper.emitted("open")).toHaveLength(1);
     await wrapper.get(".rail-performance-head button").trigger("click");

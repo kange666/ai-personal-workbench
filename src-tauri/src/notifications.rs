@@ -192,6 +192,12 @@ fn notification_title(
     )
 }
 
+fn suppresses_completion_notification(output: &str) -> bool {
+    let normalized = output.to_ascii_uppercase();
+    normalized.contains("DONT_NOTIFY")
+        || (normalized.contains("<HEARTBEAT") && normalized.contains("<AUTOMATION_ID"))
+}
+
 fn completion_from_value(value: &Value) -> Option<CompletionEvent> {
     if value.get("type").and_then(Value::as_str) != Some("event_msg")
         || value.pointer("/payload/type").and_then(Value::as_str) != Some("task_complete")
@@ -211,6 +217,9 @@ fn completion_from_value(value: &Value) -> Option<CompletionEvent> {
         .filter(|message| !message.is_empty())
         .unwrap_or("Codex 已完成本轮任务。")
         .to_string();
+    if suppresses_completion_notification(&output) {
+        return None;
+    }
     let body = compact_message(&output);
     Some(CompletionEvent {
         turn_id,
@@ -220,16 +229,16 @@ fn completion_from_value(value: &Value) -> Option<CompletionEvent> {
     })
 }
 
-fn session_context(path: &Path) -> (Option<String>, String) {
+fn session_context(path: &Path) -> (Option<String>, String, bool) {
     let Some(first_line) = File::open(path)
         .ok()
         .and_then(|file| BufReader::new(file).lines().next())
         .and_then(Result::ok)
     else {
-        return (None, String::new());
+        return (None, String::new(), false);
     };
     let Ok(value) = serde_json::from_str::<Value>(&first_line) else {
-        return (None, String::new());
+        return (None, String::new(), false);
     };
     let id = value
         .pointer("/payload/id")
@@ -241,7 +250,11 @@ fn session_context(path: &Path) -> (Option<String>, String) {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    (id, cwd)
+    let is_automation = value
+        .pointer("/payload/thread_source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.eq_ignore_ascii_case("automation"));
+    (id, cwd, is_automation)
 }
 
 fn completions_from_tail(path: &Path) -> Vec<CompletionEvent> {
@@ -308,7 +321,10 @@ pub fn sync_codex_notifications_for_state(
                 continue;
             }
             summary.files_scanned += 1;
-            let (source_id, source_cwd) = session_context(entry.path());
+            let (source_id, source_cwd, is_automation) = session_context(entry.path());
+            if is_automation {
+                continue;
+            }
             for event in completions_from_tail(entry.path()) {
                 if event.completed_at >= baseline {
                     completed.push((
@@ -527,6 +543,26 @@ mod tests {
     }
 
     #[test]
+    fn ignores_heartbeat_and_dont_notify_completions() {
+        for output in [
+            "<heartbeat><automation_id>c-2</automation_id><decision>DONT_NOTIFY</decision></heartbeat>",
+            "<heartbeat><automation_id>c-3</automation_id><message>脚本正常退出</message></heartbeat>",
+            "无需处理 DONT_NOTIFY",
+        ] {
+            let value = serde_json::json!({
+                "timestamp":"2026-09-08T02:20:00Z",
+                "type":"event_msg",
+                "payload":{
+                    "type":"task_complete",
+                    "turn_id":"turn-automation",
+                    "last_agent_message":output
+                }
+            });
+            assert!(completion_from_value(&value).is_none());
+        }
+    }
+
+    #[test]
     fn reads_session_id_and_cwd_from_session_metadata() {
         let path = std::env::temp_dir().join(format!(
             "workbench-notification-session-{}.jsonl",
@@ -547,7 +583,40 @@ mod tests {
             session_context(&path),
             (
                 Some("session-1".to_string()),
-                "F:/TB-project/client".to_string()
+                "F:/TB-project/client".to_string(),
+                false
+            )
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reads_automation_thread_source_from_session_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "workbench-automation-session-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type":"session_meta",
+                "payload":{
+                    "id":"automation-session-1",
+                    "cwd":"C:/Users/11429/Documents/个人工作台",
+                    "thread_source":"automation"
+                }
+            })
+        )
+        .unwrap();
+
+        assert_eq!(
+            session_context(&path),
+            (
+                Some("automation-session-1".to_string()),
+                "C:/Users/11429/Documents/个人工作台".to_string(),
+                true
             )
         );
         std::fs::remove_file(path).unwrap();

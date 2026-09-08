@@ -258,7 +258,6 @@ button:disabled{cursor:not-allowed}
 @keyframes workbench-loader-core{50%{transform:translateY(-3px) scale(1.04);filter:brightness(1.12)}}
 
 /* 右侧栏只呈现可操作的工作状态：黄历、运行项目与后台执行。 */
-.work-status-mark{width:30px;height:30px;flex:0 0 30px;border-radius:8px;display:grid;place-items:center;background:var(--primary-soft);color:var(--success);font-size:10px;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--primary) 25%,transparent)}
 .work-status-rail .rail-almanac{padding-top:14px}
 .work-status-rail .rail-projects>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .work-status-rail .rail-projects>header>span{display:flex;align-items:center;gap:7px}
@@ -328,10 +327,8 @@ button:disabled{cursor:not-allowed}
 
 /* 小屏工作状态栏：把常用状态压缩到一屏，并保留必要操作。 */
 .work-status-rail{padding:12px 11px}
-.work-status-rail .ai-rail-title{min-height:45px;padding:0 2px 9px}
-.work-status-rail .work-status-mark{width:34px;height:34px;flex-basis:34px;border-radius:9px}
 .work-status-rail section{padding:11px 0}
-.work-status-rail .rail-almanac{margin-top:7px}
+.work-status-rail .rail-almanac{margin-top:0;padding-top:0}
 .rail-almanac-card,.rail-work-card,.work-status-rail .rail-project-card,.work-status-rail .rail-running-item{border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
 .rail-almanac-card{padding:11px 10px 5px}
 .work-status-rail .rail-almanac-main{grid-template-columns:38px minmax(0,1fr);align-items:center;gap:10px;margin:0}

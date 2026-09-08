@@ -26,8 +26,7 @@ const cpuPoints = computed(() => {
 });
 const networkText = computed(() => {
   const down = formatPerformanceRate(props.snapshot.networkDownloadBytesPerSecond, true);
-  const up = formatPerformanceRate(props.snapshot.networkUploadBytesPerSecond, true);
-  return `↓${down} ↑${up}`;
+  return `↓${down}`;
 });
 </script>
 

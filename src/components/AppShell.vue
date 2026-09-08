@@ -167,11 +167,10 @@ const recentActivities = computed(() => {
   if (latestWorkSession.value) activities.push({ id:`work:${latestWorkSession.value.id}`, title:`${latestWorkSession.value.project} · ${latestWorkSession.value.workType}`, detail:"工时区间已更新", at:latestWorkSession.value.updatedAt, to:"/work-records", tone:"primary" });
   return activities.filter(item => item.at).sort((left,right) => Date.parse(right.at)-Date.parse(left.at)).slice(0,5);
 });
-const workStatusCount = computed(() => activeOperations.value.length + runningProjects.value.length);
 const emailButtonText = computed(() => emailStatus.value.state === "error" ? "异常" : emailStatus.value.enabled ? "开" : emailStatus.value.state === "unverified" ? "待验" : emailStatus.value.state === "unconfigured" ? "未配" : "关");
 const emailTooltip = computed(() => [
   "Codex完成邮件通知",
-  emailStatus.value.enabled ? "开关已开启，新完成任务会发送邮件" : "开关已关闭",
+  emailStatus.value.enabled ? "开关已开启，项目中的普通对话完成后发送邮件；自动任务不发送" : "开关已关闭",
   `收件人：${emailStatus.value.maskedEmail || "尚未配置"}`,
   emailStatus.value.lastError || "",
 ].filter(Boolean).join("\n"));
@@ -847,7 +846,6 @@ onBeforeUnmount(() => {
       </Transition>
     </main>
     <aside class="ai-rail work-status-rail">
-      <div class="ai-rail-title"><span class="work-status-mark">●</span><div><b>工作状态</b></div><i>{{ workStatusCount }}</i></div>
       <section class="rail-almanac">
         <div class="rail-almanac-card">
           <div class="rail-almanac-main"><b>{{ todayDay }}</b><span><span class="rail-almanac-heading"><strong>{{ todayAlmanac.duty }} · {{ todayAlmanac.luck }}</strong><small>{{ todayAlmanac.lunarDate }}</small></span><em>{{ todayAlmanac.heavenlyGod }}值日 · {{ todayAlmanac.clash }} · {{ todayAlmanac.sha }}</em></span></div>
