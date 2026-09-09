@@ -2429,6 +2429,7 @@ pub async fn generate_commit_plan(
     state: tauri::State<'_, DatabaseState>,
     path: String,
     grouping_mode: String,
+    use_ai: Option<bool>,
 ) -> Result<CommitPlanView, String> {
     let grouping_mode = normalized_commit_grouping_mode(&grouping_mode)?;
     let status = git_status_output(&path)?;
@@ -2471,7 +2472,7 @@ pub async fn generate_commit_plan(
         "低"
     };
     let ai_model = ai::ai_status().model;
-    let (groups, generator, model, generation_warning) =
+    let (groups, generator, model, generation_warning) = if use_ai.unwrap_or(true) {
         match generate_ai_commit_groups(&path, &eligible_changed_files, grouping_mode).await {
             Ok(groups) => (groups, "deepseek".to_string(), ai_model, String::new()),
             Err(_) => (
@@ -2480,7 +2481,15 @@ pub async fn generate_commit_plan(
                 String::new(),
                 String::new(),
             ),
-        };
+        }
+    } else {
+        (
+            fallback_commit_groups(&eligible_files, grouping_mode),
+            "rules".to_string(),
+            String::new(),
+            String::new(),
+        )
+    };
     let now = Utc::now().to_rfc3339();
     let plan_id = uuid::Uuid::new_v4().to_string();
     let summary = format!(

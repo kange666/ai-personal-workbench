@@ -263,6 +263,50 @@ describe("项目资产列表操作", () => {
     expect(backend.discardGitRepositoryChanges).toHaveBeenCalledWith(projectPath, ["src/a.ts"]);
   });
 
+  it("已暂存文件可直接输入提交信息并提交，不调用 AI", async () => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({
+      hasUncommittedChanges: true,
+      changedFiles: [{ path: "src/a.ts", indexStatus: "M", worktreeStatus: " ", label: "已修改" }],
+    }));
+    await renderView();
+    await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
+    await flushPromises();
+
+    const commitMessage = "feat(projects): 支持手动提交信息";
+    await wrapper.get('textarea[aria-label="手动提交信息"]').setValue(commitMessage);
+    await wrapper.get(".manual-commit-editor .button.primary").trigger("click");
+    await flushPromises();
+
+    expect(backend.generateCommitPlan).toHaveBeenCalledWith(projectPath, "single", false);
+    expect(backend.commitGitPlanGroup).toHaveBeenCalledWith(projectPath, "group", commitMessage);
+  });
+
+  it("AI 生成时保留手动标题并追加修改明细", async () => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({
+      hasUncommittedChanges: true,
+      changedFiles: [{ path: "src/a.ts", indexStatus: "M", worktreeStatus: " ", label: "已修改" }],
+    }));
+    backend.generateCommitPlan.mockResolvedValueOnce({
+      id: "ai-plan", repositoryPath: projectPath, status: "suggested", riskLevel: "低", summary: "AI 提交建议",
+      groupingMode: "single", generator: "deepseek", model: "deepseek-v4-flash", generationWarning: "", excludedFiles: [], createdAt: new Date().toISOString(),
+      groups: [{ id: "ai-group", title: "项目修改", commitMessage: "feat(projects): 优化提交操作\n\n- 新增手动提交入口\n- AI 建议追加到已有内容", files: ["src/a.ts"], riskNotes: "", verificationNotes: "", status: "suggested" }],
+    });
+    await renderView();
+    await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
+    await flushPromises();
+
+    const input = wrapper.get('textarea[aria-label="手动提交信息"]');
+    await input.setValue("feat(projects): 使用自定义提交标题");
+    const aiButton = wrapper.findAll(".commit-plan-actions button").find((button) => button.text() === "AI 追加提交信息")!;
+    await aiButton.trigger("click");
+    await flushPromises();
+
+    expect(backend.generateCommitPlan).toHaveBeenCalledWith(projectPath, "single", true);
+    expect((input.element as HTMLTextAreaElement).value).toBe(
+      "feat(projects): 使用自定义提交标题\n\n- 新增手动提交入口\n- AI 建议追加到已有内容",
+    );
+  });
+
   it("智能提交按暂存、更新、同步、生成信息、提交和推送的顺序执行", async () => {
     const dirtyStatus = gitStatus({
       remoteUrl: "https://example.com/repo.git", upstream: "origin/main",

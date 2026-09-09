@@ -1673,8 +1673,8 @@ export async function saveRepositoryAsset(asset: RepositoryAssetUpdate): Promise
   await invoke("save_repository_asset", { asset });
 }
 
-export async function generateCommitPlan(path: string, groupingMode: CommitGroupingMode): Promise<CommitPlan> {
-  return invoke<CommitPlan>("generate_commit_plan", { path, groupingMode });
+export async function generateCommitPlan(path: string, groupingMode: CommitGroupingMode, useAi = true): Promise<CommitPlan> {
+  return invoke<CommitPlan>("generate_commit_plan", { path, groupingMode, useAi });
 }
 
 export async function setRepositoryPinned(path: string, pinned: boolean): Promise<void> {

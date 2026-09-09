@@ -63,4 +63,7 @@
   ; 新品牌注册完成后移除旧产品的残留注册项，避免“已安装应用”显示两条。
   DeleteRegKey HKCU "${LEGACY_UNINSTKEY}"
   DeleteRegKey HKCU "Software\${MANUFACTURER}\${LEGACY_PRODUCT_NAME}"
+
+  ; 旧版本可能仍留在登录启动项中，与新名称的启动项一起运行会打开两个工作台。
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_PRODUCT_NAME}"
 !macroend

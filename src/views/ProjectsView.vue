@@ -135,6 +135,7 @@ const remoteRefreshNote = ref("");
 const pullConflict = ref<GitPullConflict | null>(null);
 const resolvingConflict = ref(false);
 const commitGroupingMode = ref<CommitGroupingMode>("single");
+const manualCommitMessage = ref("");
 const discardConfirmationOpen = ref(false);
 const smartCommitRunning = ref(false);
 const smartCommitSteps = ref<SmartCommitStep[]>([]);
@@ -148,6 +149,7 @@ const hiddenAssets = computed(() => assets.value.filter((item) => item.isHidden)
 const categories = computed(() => Array.from(new Set(visibleAssets.value.map((item) => item.category.trim() || "待确认"))).sort((left, right) => left === "待确认" ? 1 : right === "待确认" ? -1 : left.localeCompare(right, "zh-CN")));
 const runtimeMap = computed(() => new Map(runningProcesses.value.map((item) => [item.projectPath, item])));
 const stageableFiles = computed(() => gitStatus.value?.changedFiles.filter(hasUnstagedFile) ?? []);
+const stagedFiles = computed(() => gitStatus.value?.changedFiles.filter(hasStagedFile) ?? []);
 const selectedStageableFiles = computed(() => stageableFiles.value.filter((file) => selectedStageFiles.value.includes(file.path)));
 const allChangedFilesSelected = computed(() => Boolean(gitStatus.value?.changedFiles.length) && gitStatus.value!.changedFiles.every((file) => selectedStageFiles.value.includes(file.path)));
 const canPush = computed(() => {
@@ -281,6 +283,30 @@ function projectRuntimeUrl(item: RepositoryAsset) {
 }
 function fillForm(item: RepositoryAsset) { Object.assign(form, { path: item.path, category: item.category, purpose: item.purpose, technologyStack: item.technologyStack, mainModules: item.mainModules, installCommand: item.installCommand, startCommand: item.startCommand, testCommand: item.testCommand, buildCommand: item.buildCommand, commandSource: item.commandSource }); }
 function syncCommitMessages() { for (const key of Object.keys(commitMessages)) delete commitMessages[key]; for (const group of details.value.commitPlan?.groups ?? []) commitMessages[group.id] = group.commitMessage; }
+function appendGeneratedCommitMessage(current: string, generated: string) {
+  const existing = current.trim().replace(/\r\n/g, "\n");
+  const suggestion = generated.trim().replace(/\r\n/g, "\n");
+  if (!existing) return suggestion;
+  const suggestionLines = suggestion.split("\n");
+  let additions = suggestionLines.slice(1).map((line) => line.trim()).filter((line) => line.startsWith("- "));
+  if (!additions.length) {
+    const description = suggestionLines[0]?.split(": ").slice(1).join(": ").trim();
+    if (description) additions = [`- ${description}`];
+  }
+  const existingItems = new Set(existing.split("\n").map((line) => line.trim().replace(/^-\s*/, "")));
+  additions = additions.filter((line) => !existingItems.has(line.replace(/^-\s*/, "")));
+  if (!additions.length) return existing;
+  return `${existing}${existing.includes("\n\n") ? "\n" : "\n\n"}${additions.join("\n")}`;
+}
+function currentSingleCommitGroup() {
+  const plan = details.value.commitPlan;
+  if (!plan || plan.groupingMode !== "single") return null;
+  const groups = plan.groups.filter((group) => group.status !== "committed");
+  if (groups.length !== 1) return null;
+  const current = new Set(stagedFiles.value.map((file) => normalizeGitPath(file.path)));
+  const planned = new Set([...groups[0].files, ...plan.excludedFiles].map(normalizeGitPath));
+  return current.size === planned.size && [...current].every((path) => planned.has(path)) ? groups[0] : null;
+}
 function discardStaleCommitPlan() {
   const plan = details.value.commitPlan;
   if (!plan || !gitStatus.value) return;
@@ -367,6 +393,7 @@ async function openAsset(item: RepositoryAsset, tab: "overview" | "relations" | 
     postCommitPrompt.value = null;
     discardConfirmationOpen.value = false;
     smartCommitSteps.value = [];
+    manualCommitMessage.value = "";
     gitStatus.value = null;
     details.value = { conversations: [], commits: [], associations: [], nextAction: "" };
   }
@@ -380,6 +407,9 @@ async function openAsset(item: RepositoryAsset, tab: "overview" | "relations" | 
     }
     discardStaleCommitPlan();
     syncCommitMessages();
+    if (assetChanged && details.value.commitPlan?.groupingMode === "single") {
+      manualCommitMessage.value = details.value.commitPlan.groups.find((group) => group.status !== "committed")?.commitMessage ?? "";
+    }
     if (tab === "git" && refreshRemote) await autoFetchRemoteStatus(item.path);
   } catch (cause) { error.value = String(cause); details.value = { conversations: [], commits: [], associations: [], nextAction: "" }; gitStatus.value = null; }
 }
@@ -562,7 +592,19 @@ async function openRuntimeUrl(url: string) {
 }
 async function planCommit() {
   if (!selected.value) return; loading.value = true; error.value = "";
-  try { details.value.commitPlan = await generateCommitPlan(selected.value.path, commitGroupingMode.value); syncCommitMessages(); message.value = "提交建议已生成，Git 暂存区没有变化。"; }
+  try {
+    const existing = manualCommitMessage.value;
+    details.value.commitPlan = await generateCommitPlan(selected.value.path, commitGroupingMode.value, true);
+    syncCommitMessages();
+    if (details.value.commitPlan.groupingMode === "single") {
+      const group = details.value.commitPlan.groups.find((item) => item.status !== "committed");
+      if (group) {
+        manualCommitMessage.value = appendGeneratedCommitMessage(existing, group.commitMessage);
+        commitMessages[group.id] = manualCommitMessage.value;
+      }
+    }
+    message.value = existing.trim() && commitGroupingMode.value === "single" ? "AI 修改明细已追加，Git 暂存区没有变化。" : "提交建议已生成，Git 暂存区没有变化。";
+  }
   catch (cause) { error.value = String(cause); } finally { loading.value = false; }
 }
 function recordGitOperation(action: string, status: "success" | "error", resultMessage: string, output = "") {
@@ -627,6 +669,34 @@ async function commitGroup(groupId: string, files: string[]) {
   if (!files.length) return;
   const result = await runGitAction("提交修改", () => commitGitPlanGroup(selected.value!.path, groupId, commitMessage));
   if (result?.commitHash) postCommitPrompt.value = { commitHash: result.commitHash, message: commitMessage.split("\n")[0] || "提交已完成" };
+}
+async function commitManualMessage() {
+  if (!selected.value || !stagedFiles.value.length) return;
+  const path = selected.value.path;
+  const commitMessage = manualCommitMessage.value.trim();
+  if (!commitMessage) { error.value = "请先输入提交信息。"; return; }
+  loading.value = true; error.value = ""; message.value = "";
+  try {
+    let group = currentSingleCommitGroup();
+    if (!group) {
+      details.value.commitPlan = await generateCommitPlan(path, "single", false);
+      syncCommitMessages();
+      group = currentSingleCommitGroup();
+    }
+    if (!group) throw new Error("暂存区文件已变化，请刷新状态后重试。");
+    if (details.value.commitPlan?.excludedFiles.length) {
+      throw new Error(`以下已暂存文件因安全规则未提交：${details.value.commitPlan.excludedFiles.join("、")}`);
+    }
+    const result = await commitGitPlanGroup(path, group.id, commitMessage);
+    recordGitOperation("手动提交", "success", result.message, result.output);
+    message.value = result.message;
+    manualCommitMessage.value = "";
+    postCommitPrompt.value = result.commitHash ? { commitHash: result.commitHash, message: commitMessage.split("\n")[0] } : null;
+    await refreshSelected();
+  } catch (cause) {
+    error.value = String(cause);
+    recordGitOperation("手动提交", "error", "提交失败", String(cause));
+  } finally { loading.value = false; }
 }
 async function saveCredential() {
   loading.value = true; error.value = "";
@@ -725,7 +795,7 @@ async function runSmartCommit() {
     setSmartCommitStep(2, "done", syncResult.conflictsResolved ? "冲突已由 AI 合并，双方修改均已保留" : syncResult.message);
 
     currentStep = 3; setSmartCommitStep(3, "running");
-    const plan = await generateCommitPlan(path, "single");
+    const plan = await generateCommitPlan(path, "single", true);
     details.value.commitPlan = plan;
     syncCommitMessages();
     if (plan.excludedFiles.length) throw new Error(`以下所选文件因敏感信息、二进制或生成内容未纳入提交：${plan.excludedFiles.join("、")}`);
@@ -917,9 +987,11 @@ onBeforeUnmount(() => {
           </details>
         </section>
         <section class="commit-plan">
-          <header><div><h3>提交修改</h3><p>提交前可编辑</p></div><div class="commit-plan-actions"><div class="commit-grouping-switch" role="group" aria-label="提交分组方式"><button :class="{ active: commitGroupingMode === 'single' }" @click="commitGroupingMode = 'single'">全部合成一次</button><button :class="{ active: commitGroupingMode === 'feature' }" @click="commitGroupingMode = 'feature'">按功能关联分组</button></div><button class="button secondary" :disabled="loading || !gitStatus?.hasUncommittedChanges" @click="planCommit">{{ loading ? "AI 分析中…" : details.commitPlan ? "重新生成" : "AI 生成提交建议" }}</button></div></header>
+          <header><div><h3>提交修改</h3><p>{{ commitGroupingMode === "single" ? "可直接输入提交信息；AI 只追加建议，不覆盖已有内容" : "AI 按功能生成分组，提交前仍可逐组编辑" }}</p></div><div class="commit-plan-actions"><div class="commit-grouping-switch" role="group" aria-label="提交分组方式"><button :class="{ active: commitGroupingMode === 'single' }" @click="commitGroupingMode = 'single'">全部合成一次</button><button :class="{ active: commitGroupingMode === 'feature' }" @click="commitGroupingMode = 'feature'">按功能关联分组</button></div><button class="button secondary" :disabled="loading || !stagedFiles.length" @click="planCommit">{{ loading ? "AI 分析中…" : commitGroupingMode === "single" ? "AI 追加提交信息" : details.commitPlan ? "重新生成" : "AI 生成提交建议" }}</button></div></header>
           <p v-if="!gitStatus?.hasUncommittedChanges" class="git-empty">当前工作区干净，没有可提交修改。</p>
-          <div v-if="details.commitPlan && gitStatus?.hasUncommittedChanges" class="commit-plan-summary"><div class="commit-plan-meta"><span>风险 {{ details.commitPlan.riskLevel }}</span><span>{{ details.commitPlan.generator === "deepseek" ? "AI 生成" : "系统规则生成" }}</span><span>{{ details.commitPlan.groupingMode === "single" ? "全部合成一次" : "按功能关联分组" }}</span></div><p>{{ details.commitPlan.summary }}</p><p v-if="details.commitPlan.generationWarning" class="commit-generation-warning">{{ details.commitPlan.generationWarning }}</p><details v-if="details.commitPlan.excludedFiles.length" class="commit-excluded-files"><summary>{{ details.commitPlan.excludedFiles.length }} 个敏感文件、二进制或生成物未纳入提交</summary><p v-for="file in details.commitPlan.excludedFiles" :key="file">{{ file }}</p></details><article v-for="group in details.commitPlan.groups" :key="group.id"><div class="commit-group-title"><b>{{ group.title }}</b><i :class="{ committed: group.status === 'committed' }">{{ group.status === "committed" ? "已提交" : `${group.files.length} 个文件` }}</i></div><textarea v-model="commitMessages[group.id]" rows="4" :disabled="group.status === 'committed'" aria-label="提交信息和修改明细" placeholder="第一行填写提交标题；后续行可列出修改"></textarea><small>{{ group.riskNotes }}</small><details><summary>查看文件</summary><p v-for="file in group.files" :key="file">{{ file }}</p></details><button class="button primary small" :disabled="loading || group.status === 'committed'" @click="commitGroup(group.id, group.files)">{{ details.commitPlan.groupingMode === "single" ? "提交全部修改" : "提交本组" }}</button></article></div>
+          <div v-else-if="commitGroupingMode === 'single'" class="manual-commit-editor"><textarea v-model="manualCommitMessage" rows="5" :disabled="loading || !stagedFiles.length" aria-label="手动提交信息" placeholder="例如：feat(projects): 优化项目资产提交操作&#10;&#10;- 支持手动输入提交信息"></textarea><div><small>{{ stagedFiles.length ? `将提交暂存区中的 ${stagedFiles.length} 个文件` : "请先在上方将需要提交的文件添加到暂存区" }}</small><button class="button primary" :disabled="loading || !stagedFiles.length || !manualCommitMessage.trim()" @click="commitManualMessage">{{ loading ? "提交中…" : "提交暂存修改" }}</button></div></div>
+          <p v-else-if="details.commitPlan?.groupingMode !== 'feature'" class="git-empty">请先使用 AI 生成按功能关联的提交分组。</p>
+          <div v-if="details.commitPlan && details.commitPlan.groupingMode === commitGroupingMode && gitStatus?.hasUncommittedChanges" class="commit-plan-summary"><div class="commit-plan-meta"><span>风险 {{ details.commitPlan.riskLevel }}</span><span>{{ details.commitPlan.generator === "deepseek" ? "AI 生成" : "系统规则生成" }}</span><span>{{ details.commitPlan.groupingMode === "single" ? "全部合成一次" : "按功能关联分组" }}</span></div><p>{{ details.commitPlan.summary }}</p><p v-if="details.commitPlan.generationWarning" class="commit-generation-warning">{{ details.commitPlan.generationWarning }}</p><details v-if="details.commitPlan.excludedFiles.length" class="commit-excluded-files"><summary>{{ details.commitPlan.excludedFiles.length }} 个敏感文件、二进制或生成物未纳入提交</summary><p v-for="file in details.commitPlan.excludedFiles" :key="file">{{ file }}</p></details><template v-if="details.commitPlan.groupingMode === 'feature'"><article v-for="group in details.commitPlan.groups" :key="group.id"><div class="commit-group-title"><b>{{ group.title }}</b><i :class="{ committed: group.status === 'committed' }">{{ group.status === "committed" ? "已提交" : `${group.files.length} 个文件` }}</i></div><textarea v-model="commitMessages[group.id]" rows="4" :disabled="group.status === 'committed'" aria-label="提交信息和修改明细" placeholder="第一行填写提交标题；后续行可列出修改"></textarea><small>{{ group.riskNotes }}</small><details><summary>查看文件</summary><p v-for="file in group.files" :key="file">{{ file }}</p></details><button class="button primary small" :disabled="loading || group.status === 'committed'" @click="commitGroup(group.id, group.files)">提交本组</button></article></template></div>
         </section>
         <section v-if="postCommitPrompt" class="post-commit-guide"><div><small>提交已完成</small><b>{{ postCommitPrompt.message }}</b><code>{{ postCommitPrompt.commitHash.slice(0, 7) }}</code><p>提交只保存在本地，确认后可以推送到远程。</p></div><div><button class="button secondary" @click="postCommitPrompt = null">继续修改</button><button class="button primary" :disabled="loading || !canPush" @click="pushAfterCommit">推送到远程</button></div></section>
         <section v-if="gitStatus" class="git-safety-panel"><header><div><h3>安全撤销</h3><p>这些操作不会删除提交历史；临时保存会包含未跟踪文件。</p></div></header><div><button class="button secondary" :disabled="loading || !gitStatus.hasUncommittedChanges || gitStatus.mergeInProgress" @click="saveChangesTemporarily">临时保存修改</button><button class="button secondary" :disabled="loading || gitStatus.hasUncommittedChanges || !gitStatus.hasWorkbenchStash" @click="restoreTemporaryChanges">恢复临时修改</button><button class="button secondary" :disabled="loading || !gitStatus.mergeInProgress" @click="abortCurrentMerge">取消当前合并</button></div><small>已暂存文件可在上方文件列表中逐个“移出暂存区”，本地修改仍会保留。</small></section>
@@ -953,6 +1025,7 @@ onBeforeUnmount(() => {
 @media(max-width:900px){.asset-metrics{grid-template-columns:repeat(2,1fr)}.asset-drawer{width:100vw}.association-grid,.pull-conflict-options{grid-template-columns:1fr}.pull-conflict-options button.ai{grid-column:auto}.runtime-metrics{grid-template-columns:1fr}.scan-settings-dialog{width:calc(100vw - 24px)}}
 .asset-table-wrap{overflow-x:hidden;overflow-y:auto}.asset-table{width:100%;min-width:0;max-width:100%;table-layout:fixed}.asset-table th:nth-child(1){width:52px}.asset-table th:nth-child(2){width:20%}.asset-table th:nth-child(3){width:16%}.asset-table th:nth-child(4){width:13%}.asset-table th:nth-child(5){width:15%}.asset-table th:nth-child(6){width:24%}.asset-table th:nth-child(7){width:10%}.asset-table td{overflow:hidden}.asset-table td b,.asset-table td small{max-width:100%}.asset-table th,.asset-table td{padding:9px 8px}.asset-row-actions{display:grid;grid-template-columns:1fr;gap:5px;white-space:normal}.asset-row-actions .asset-row-button{width:100%;min-width:0;padding:0 4px}.work-state,.runtime-cell{display:flex;align-items:flex-start;flex-direction:column;gap:6px;min-width:0}.work-state>*{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.clean-state{margin:0!important;color:var(--muted)}.branch-sync{margin-top:5px!important;color:var(--muted)}.branch-sync.behind{color:var(--warning)}.runtime-address-button{display:block;max-width:100%;border:0;background:transparent;color:var(--primary);padding:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;text-decoration:underline;text-underline-offset:2px;cursor:pointer}.runtime-address-empty{margin:0!important;color:var(--muted)}
 .commit-plan-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.commit-grouping-switch{height:36px;display:flex;align-items:center;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}.commit-grouping-switch button{height:28px;border:0;border-radius:6px;background:transparent;color:var(--muted);padding:0 10px;white-space:nowrap}.commit-grouping-switch button.active{background:var(--primary-soft);color:var(--primary);font-weight:800}.commit-plan-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:10px 0}.commit-plan-meta>span{margin:0;padding:5px 8px;border-radius:6px;background:var(--primary-soft);color:var(--primary);font-size:9px}.commit-plan-meta>span:first-child,.commit-plan-meta>span.fallback{background:color-mix(in srgb,var(--warning) 12%,transparent);color:var(--warning)}.commit-generation-warning{padding:8px 10px;border-radius:7px;background:color-mix(in srgb,var(--warning) 10%,transparent);color:var(--warning)!important}.commit-excluded-files{margin:9px 0;padding:9px 11px;border:1px solid color-mix(in srgb,var(--warning) 35%,var(--line));border-radius:8px;color:var(--warning)}.commit-excluded-files summary{cursor:pointer}.commit-excluded-files p{margin:5px 0 0;color:var(--muted);font:9px/1.5 monospace;overflow-wrap:anywhere}
+.manual-commit-editor{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2)}.manual-commit-editor textarea{width:100%;min-height:112px;border:1px solid var(--line);border-radius:7px;background:var(--surface);padding:10px 11px;resize:vertical;line-height:1.6;font-family:inherit;outline:0}.manual-commit-editor textarea:focus{border-color:var(--primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 16%,transparent)}.manual-commit-editor textarea:disabled{opacity:.55}.manual-commit-editor>div{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:9px}.manual-commit-editor small{color:var(--muted);line-height:1.5}
 @media(max-width:900px){.commit-plan>header{flex-direction:column}.commit-plan-actions{width:100%;justify-content:flex-start}.commit-grouping-switch{max-width:100%}.commit-grouping-switch button{padding:0 7px}}
 .git-history-entry{border-bottom:1px solid var(--line)}.git-history-entry>article{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:0;border:0}.git-history-toggle{display:grid;grid-template-columns:64px minmax(0,1fr) auto;align-items:center;gap:9px;min-width:0;border:0;background:transparent;color:inherit;padding:10px 0;text-align:left}.git-history-toggle:hover{background:var(--primary-soft)}.git-history-toggle>code{color:var(--primary)}.git-history-toggle>span{min-width:0}.git-history-toggle b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.git-history-toggle small{display:flex;align-items:center;gap:10px;margin-top:4px}.git-history-toggle small span{color:var(--muted)}.git-history-toggle time{color:var(--muted)}.git-history-toggle>em{font-style:normal;color:var(--primary);font-size:9px;white-space:nowrap}.git-commit-files{margin:0 0 10px 72px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface-2)}.git-commit-files>.git-empty{margin:0;padding:10px 12px}.git-commit-file-entry+.git-commit-file-entry{border-top:1px solid var(--line)}.git-commit-file-row{display:grid;grid-template-columns:54px minmax(0,1fr) auto;align-items:center;gap:9px;width:100%;border:0;background:transparent;color:inherit;padding:9px 11px;text-align:left}.git-commit-file-row:hover{background:var(--primary-soft)}.git-commit-file-row i{font-style:normal;color:var(--muted);font-size:9px}.git-commit-file-row code{min-width:0;overflow-wrap:anywhere}.git-commit-file-row span{color:var(--primary);font-size:9px;white-space:nowrap}.history-diff{margin:0 10px 10px}.history-diff .diff-code{max-height:320px}
 .drawer-git-feedback{position:sticky;top:89px;z-index:4;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;margin:10px 20px 0;padding:10px 12px;border:1px solid color-mix(in srgb,var(--success) 35%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--success) 10%,var(--surface));box-shadow:0 8px 24px rgba(0,0,0,.18)}.drawer-git-feedback b{color:var(--success)}.drawer-git-feedback span{min-width:0;overflow-wrap:anywhere;color:var(--muted)}.drawer-git-feedback.error{border-color:color-mix(in srgb,var(--danger) 40%,var(--line));background:color-mix(in srgb,var(--danger) 10%,var(--surface))}.drawer-git-feedback.error b{color:var(--danger)}.smart-commit-progress{margin:14px 20px 0;padding:14px;border:1px solid color-mix(in srgb,var(--primary) 40%,var(--line));border-radius:10px;background:var(--primary-soft)}.smart-commit-progress>header{display:flex;align-items:flex-start;justify-content:space-between}.smart-commit-progress header small{color:var(--primary);font-size:9px}.smart-commit-progress h3{margin:4px 0 0}.smart-commit-progress header>b{color:var(--primary);font-size:20px}.smart-commit-progress-bar{height:7px;margin:12px 0;border-radius:99px;overflow:hidden;background:var(--surface-2)}.smart-commit-progress-bar i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--primary),#8f84ff);transition:width .3s ease}.smart-commit-progress ol{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0;padding:0;list-style:none}.smart-commit-progress li{display:flex;gap:8px;padding:8px;border-radius:7px;color:var(--muted);background:color-mix(in srgb,var(--surface) 60%,transparent)}.smart-commit-progress li>i{display:flex;align-items:center;justify-content:center;width:18px;height:18px;flex:0 0 auto;border:1px solid var(--line);border-radius:50%;font-style:normal;font-size:10px}.smart-commit-progress li b,.smart-commit-progress li span{display:block}.smart-commit-progress li span{margin-top:3px;font-size:9px;line-height:1.4;overflow-wrap:anywhere}.smart-commit-progress li.running{color:var(--primary)}.smart-commit-progress li.running>i{border-color:var(--primary);animation:smart-step-pulse 1s ease-in-out infinite}.smart-commit-progress li.done{color:var(--success)}.smart-commit-progress li.failed{color:var(--danger)}.smart-commit-progress.failed{border-color:color-mix(in srgb,var(--danger) 40%,var(--line));background:color-mix(in srgb,var(--danger) 8%,var(--surface))}.smart-commit-progress.completed{border-color:color-mix(in srgb,var(--success) 40%,var(--line));background:color-mix(in srgb,var(--success) 8%,var(--surface))}@keyframes smart-step-pulse{50%{opacity:.35;transform:scale(.82)}}

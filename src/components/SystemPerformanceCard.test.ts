@@ -11,6 +11,8 @@ describe("SystemPerformanceCard",() => {
     expect(wrapper.findAll(".rail-performance-cell small").map(item => item.text())).toEqual(["CPU","内存","GPU 1 · 独显","网络","GPU 0 · 集显","磁盘"]);
     expect(wrapper.find(".rail-performance-cell.cpu svg").exists()).toBe(true);
     expect(wrapper.find(".rail-performance-cell.discrete > i").exists()).toBe(true);
+    expect(wrapper.find(".rail-performance-cell.discrete > i > em").attributes("style")).toContain("width: 17.5%");
+    expect(wrapper.find(".rail-performance-cell.discrete b").text()).toBe("12%");
     expect(wrapper.find(".rail-performance-cell.disk > i").exists()).toBe(false);
     expect(wrapper.find(".rail-performance-cell.disk b").text()).toBe("4%");
     expect(wrapper.find(".rail-performance-cell.network b").text()).toBe("↓1MB/s");

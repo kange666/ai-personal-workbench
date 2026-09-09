@@ -534,6 +534,14 @@ pub fn run() {
         eprintln!("{error}");
     }
     let app = tauri::Builder::default()
+        // 单实例插件必须最先注册，避免开机启动项或快捷方式重复拉起工作台。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

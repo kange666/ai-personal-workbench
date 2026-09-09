@@ -18,6 +18,12 @@ defineEmits<{ open: []; optimize: [] }>();
 
 const integratedGpu = computed(() => findPerformanceGpu(props.snapshot, "integrated"));
 const discreteGpu = computed(() => findPerformanceGpu(props.snapshot, "discrete"));
+const discreteGpuMemoryUsagePercent = computed(() => {
+  const used = discreteGpu.value?.dedicatedUsedBytes;
+  const total = discreteGpu.value?.dedicatedTotalBytes;
+  if (used === null || used === undefined || total === null || total === undefined || total <= 0) return 0;
+  return Math.min(100, Math.max(0, used / total * 100));
+});
 const cpuPoints = computed(() => {
   const values = props.history.slice(-20).map(point => point.cpu).filter((value): value is number => value !== null);
   if (!values.length) return "";
@@ -36,7 +42,7 @@ const networkText = computed(() => {
     <button class="rail-performance-grid" type="button" aria-label="打开系统性能详情" @click="$emit('open')">
       <span class="rail-performance-cell cpu"><small>CPU</small><b>{{ formatPerformancePercent(snapshot.cpuUsagePercent) }}</b><svg v-if="cpuPoints" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"><polyline :points="cpuPoints" /></svg></span>
       <span class="rail-performance-cell memory"><small>内存</small><b>{{ formatPerformancePercent(snapshot.memoryUsagePercent) }}</b><i><em :style="{width:`${snapshot.memoryUsagePercent || 0}%`}"></em></i></span>
-      <span class="rail-performance-cell discrete"><small>GPU 1 · 独显</small><b>{{ formatPerformancePercent(discreteGpu?.usagePercent) }}</b><i><em :style="{width:`${discreteGpu?.usagePercent || 0}%`}"></em></i></span>
+      <span class="rail-performance-cell discrete"><small>GPU 1 · 独显</small><b>{{ formatPerformancePercent(discreteGpu?.usagePercent) }}</b><i><em :style="{width:`${discreteGpuMemoryUsagePercent}%`}"></em></i></span>
       <span class="rail-performance-cell network"><small>网络</small><b>{{ networkText }}</b></span>
       <span class="rail-performance-cell integrated"><small>GPU 0 · 集显</small><b>{{ formatPerformancePercent(integratedGpu?.usagePercent) }}</b></span>
       <span class="rail-performance-cell disk"><small>磁盘</small><b>{{ formatPerformancePercent(snapshot.diskUsagePercent) }}</b></span>
