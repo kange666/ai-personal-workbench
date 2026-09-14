@@ -1306,9 +1306,22 @@ fn serve_export_request(state: &DatabaseState, mut stream: TcpStream) {
     }
 }
 
+fn bind_api_export_listener(preferred: &str) -> std::io::Result<(TcpListener, String)> {
+    // 多实例运行时让系统分配空闲端口，始终只监听本机回环地址。
+    let listener = match TcpListener::bind(preferred) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            TcpListener::bind("127.0.0.1:0")?
+        }
+        Err(error) => return Err(error),
+    };
+    let base_url = format!("http://{}", listener.local_addr()?);
+    Ok((listener, base_url))
+}
+
 pub fn start_api_export_server(state: DatabaseState) -> ApiExportServerState {
-    match TcpListener::bind(API_EXPORT_SERVER_ADDRESS) {
-        Ok(listener) => {
+    match bind_api_export_listener(API_EXPORT_SERVER_ADDRESS) {
+        Ok((listener, base_url)) => {
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     match stream {
@@ -1318,13 +1331,13 @@ pub fn start_api_export_server(state: DatabaseState) -> ApiExportServerState {
                 }
             });
             ApiExportServerState {
-                base_url: format!("http://{API_EXPORT_SERVER_ADDRESS}"),
+                base_url,
                 error: String::new(),
             }
         }
         Err(error) => ApiExportServerState {
             base_url: String::new(),
-            error: format!("本地 OpenAPI 导出服务无法启动（端口 17890）：{error}"),
+            error: format!("本地 OpenAPI 导出服务无法启动：{error}"),
         },
     }
 }
@@ -2529,6 +2542,19 @@ pub fn render_api_endpoint_request_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_listener_uses_actual_address_and_falls_back_when_occupied() {
+        let (first, first_url) = bind_api_export_listener("127.0.0.1:0").unwrap();
+        let address = first.local_addr().unwrap();
+        assert_eq!(first_url, format!("http://{address}"));
+        let (second, second_url) = bind_api_export_listener(&address.to_string()).unwrap();
+        let fallback = second.local_addr().unwrap();
+        assert!(fallback.ip().is_loopback());
+        assert_ne!(fallback.port(), address.port());
+        assert_eq!(second_url, format!("http://{fallback}"));
+        assert!(TcpStream::connect(fallback).is_ok());
+    }
 
     fn sample() -> Value {
         json!({

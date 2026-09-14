@@ -146,7 +146,10 @@ const activeOperations = computed(() => [
 const railIssues = computed(() => {
   const issues:Array<{ id:string; title:string; detail:string; tone:"danger"|"warning"; to:string | { path:string; query:Record<string,string> } }> = [];
   for (const project of repositoryAssets.value) {
-    if (project.runtimeStatus === "failed" || project.runtimeError) issues.push({ id:`runtime:${project.path}`, title:`${project.name} 启动异常`, detail:project.runtimeError || "项目最近一次启动失败", tone:"danger", to:{ path:"/projects", query:{ project:project.path } } });
+    const live = runningProjects.value.find(item => item.projectPath === project.path);
+    const runtimeStatus = live?.status ?? project.runtimeStatus;
+    const runtimeError = live?.errorMessage ?? project.runtimeError;
+    if (runtimeStatus === "failed" || runtimeError) issues.push({ id:`runtime:${project.path}`, title:`${project.name} ${live ? '编译异常' : '启动异常'}`, detail:runtimeError || "项目最近一次运行失败", tone:"danger", to:{ path:"/projects", query:{ project:project.path } } });
     else if (project.healthLevel === "失败") issues.push({ id:`health:${project.path}`, title:`${project.name} 健康检查失败`, detail:project.healthSummary || "项目目录或 Git 状态无法读取", tone:"danger", to:{ path:"/projects", query:{ project:project.path } } });
     else if (project.behindCount > 0) issues.push({ id:`behind:${project.path}`, title:`${project.name} 落后远程 ${project.behindCount} 个提交`, detail:`当前分支 ${project.defaultBranch || "未识别"}`, tone:"warning", to:{ path:"/projects", query:{ project:project.path, tab:"git" } } });
   }
@@ -547,7 +550,8 @@ async function loadActiveOperations() {
   else console.error("读取正在处理的 TAPD 缺陷失败",tapdResult.reason);
   if (jenkinsResult.status === "fulfilled") activeJenkinsPublishes.value=jenkinsResult.value.filter(item => item.status === "queued" || item.status === "running");
   else console.error("读取正在执行的 Jenkins 发布失败",jenkinsResult.reason);
-  if (projectsResult.status === "fulfilled") runningProjects.value=projectsResult.value.filter(item => item.status === "starting" || item.status === "running");
+  // 后端只返回工作台管理的存活进程；编译失败不代表进程已退出，仍需展示和允许停止。
+  if (projectsResult.status === "fulfilled") runningProjects.value=projectsResult.value;
   else console.error("读取正在运行的项目失败",projectsResult.reason);
 }
 async function loadSidebarWorktime() {
@@ -866,7 +870,7 @@ onBeforeUnmount(() => {
       <section v-if="runningProjects.length" class="rail-projects">
         <header class="rail-section-header rail-section-header-success"><span><i></i><b>项目运行</b></span><em>{{ runningProjects.length }}</em></header>
         <article v-for="project in runningProjects" :key="project.projectPath" class="rail-project-card">
-          <div><b :title="project.projectName">{{ project.projectName }}</b><small><span>{{ project.status === 'starting' ? '正在启动' : '运行中' }}</span><template v-if="project.localUrl"> · <button type="button" class="rail-project-url" :title="`使用默认浏览器打开 ${project.localUrl}`" :aria-label="`使用默认浏览器打开 ${project.localUrl}`" @click="openRailProjectUrl(project.localUrl)">{{ project.localUrl }} <i aria-hidden="true">↗</i></button></template></small></div>
+          <div><b :title="project.projectName">{{ project.projectName }}</b><small :title="project.status === 'failed' ? `进程仍在运行：${project.errorMessage}` : undefined" :style="project.status === 'failed' ? { color:'var(--danger)' } : undefined"><span>{{ project.status === 'starting' ? '正在启动' : project.status === 'failed' ? '编译异常' : '运行中' }}</span><template v-if="project.localUrl"> · <button type="button" class="rail-project-url" :title="`使用默认浏览器打开 ${project.localUrl}`" :aria-label="`使用默认浏览器打开 ${project.localUrl}`" @click="openRailProjectUrl(project.localUrl)">{{ project.localUrl }} <i aria-hidden="true">↗</i></button></template></small></div>
           <button class="rail-project-stop" :disabled="Boolean(projectActionPath)" @click="stopRailProject(project)">{{ projectActionPath === project.projectPath ? '停止中…' : '停止' }}</button>
         </article>
         <p v-if="projectActionMessage" class="rail-project-message">{{ projectActionMessage }}</p>

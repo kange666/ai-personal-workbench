@@ -42,11 +42,13 @@ import {
   unstageGitRepositoryChanges,
   type GitOperationResult,
   type CommitGroupingMode,
+  type CommitPlan,
   type GitChangedFile,
   type GitCommitFile,
   type GitCommitFileDiff,
   type GitFileDiff,
   type GitPullConflict,
+  type GitSmartConflict,
   type GitRepositoryStatus,
   type GitScanConfiguration,
   type RepositoryAsset,
@@ -67,7 +69,7 @@ interface GitOperationLogEntry {
 interface SmartCommitStep {
   id: string;
   label: string;
-  status: "pending" | "running" | "done" | "failed";
+  status: "pending" | "running" | "done" | "failed" | "waiting";
   detail: string;
 }
 
@@ -139,6 +141,8 @@ const manualCommitMessage = ref("");
 const discardConfirmationOpen = ref(false);
 const smartCommitRunning = ref(false);
 const smartCommitSteps = ref<SmartCommitStep[]>([]);
+const smartCommitMessage = ref("");
+const smartConflict = ref<{ path: string; files: string[]; conflict: GitSmartConflict } | null>(null);
 const form = reactive<RepositoryAssetUpdate>({
   path: "", category: "待确认", purpose: "", technologyStack: "", mainModules: "",
   installCommand: "", startCommand: "", testCommand: "", buildCommand: "", commandSource: "",
@@ -173,6 +177,7 @@ const smartCommitBlockedReason = computed(() => {
   if (gitStatus.value.mergeInProgress) return "请先完成或取消当前合并";
   if (!gitStatus.value.remoteUrl) return "当前项目没有配置 origin 远程仓库";
   if (!selectedStageFiles.value.length) return "请先选择要提交的变更文件";
+  if (gitStatus.value.changedFiles.some((file) => hasStagedFile(file) && hasUnstagedFile(file))) return "存在部分暂存文件，请使用“提交暂存修改”保留暂存范围，再同步远程";
   const unselectedStaged = gitStatus.value.changedFiles.filter((file) => hasStagedFile(file) && !selectedStageFiles.value.includes(file.path));
   if (unselectedStaged.length) return "暂存区还有未选择文件，请一并选择或先移出暂存区";
   return "";
@@ -259,7 +264,7 @@ function diffLineClass(line: string) {
   if (line.startsWith("@@")) return "hunk";
   return "context";
 }
-function runtimeLabel(value?: string) { return value === "starting" ? "启动中" : value === "running" ? "运行正常" : value === "failed" ? "编译失败" : value === "stopped" ? "已停止" : "未启动"; }
+function runtimeLabel(value?: string) { return value === "starting" ? "启动中" : value === "running" ? "运行中" : value === "failed" ? "编译失败" : value === "stopped" ? "已停止" : "未启动"; }
 function runtimeClass(value?: string) { return value || "idle"; }
 function formatTime(value?: string) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "暂无记录"; }
 function runtimeDuration(value?: string) {
@@ -298,6 +303,16 @@ function appendGeneratedCommitMessage(current: string, generated: string) {
   if (!additions.length) return existing;
   return `${existing}${existing.includes("\n\n") ? "\n" : "\n\n"}${additions.join("\n")}`;
 }
+// 两个 AI 入口共用完整信息格式；智能提交传入空原文，手动入口保留原文并追加。
+function applyGeneratedCommitPlan(plan: CommitPlan, existing: string) {
+  details.value.commitPlan = plan;
+  syncCommitMessages();
+  if (plan.groupingMode !== "single") return;
+  const group = plan.groups.find((item) => item.status !== "committed");
+  if (!group) return;
+  manualCommitMessage.value = appendGeneratedCommitMessage(existing, group.commitMessage);
+  commitMessages[group.id] = manualCommitMessage.value;
+}
 function currentSingleCommitGroup() {
   const plan = details.value.commitPlan;
   if (!plan || plan.groupingMode !== "single") return null;
@@ -328,13 +343,21 @@ async function load() {
 async function refreshRuntime() {
   if (!isTauriRuntime()) return;
   try {
-    const previousPaths = new Set(runningPaths.value);
+    const previousProcesses = new Map(runningProcesses.value.map((item) => [item.projectPath, item]));
     const runningProjects = await listRunningRepositoryProjects();
     const nextPaths = runningProjects.map((item) => item.projectPath);
-    const processListChanged = previousPaths.size !== nextPaths.length || nextPaths.some((path) => !previousPaths.has(path));
+    const processListChanged = previousProcesses.size !== runningProjects.length || runningProjects.some((item) => {
+      const previous = previousProcesses.get(item.projectPath);
+      return !previous || previous.processId !== item.processId || previous.status !== item.status
+        || previous.errorMessage !== item.errorMessage || previous.localUrl !== item.localUrl;
+    });
     runningProcesses.value = runningProjects;
     runningPaths.value = nextPaths;
-    if (runtimeStateInitialized && processListChanged) {
+    const initialSnapshotStale = !runtimeStateInitialized && runningProjects.some((item) => {
+      const asset = assets.value.find((asset) => asset.path === item.projectPath);
+      return asset && (asset.runtimeStatus !== item.status || (asset.runtimeError || "") !== item.errorMessage);
+    });
+    if ((runtimeStateInitialized && processListChanged) || initialSnapshotStale) {
       assets.value = await listRepositoryAssets();
       if (selected.value) selected.value = assets.value.find((item) => item.path === selected.value?.path) ?? selected.value;
     }
@@ -393,6 +416,8 @@ async function openAsset(item: RepositoryAsset, tab: "overview" | "relations" | 
     postCommitPrompt.value = null;
     discardConfirmationOpen.value = false;
     smartCommitSteps.value = [];
+    smartCommitMessage.value = "";
+    smartConflict.value = null;
     manualCommitMessage.value = "";
     gitStatus.value = null;
     details.value = { conversations: [], commits: [], associations: [], nextAction: "" };
@@ -594,15 +619,8 @@ async function planCommit() {
   if (!selected.value) return; loading.value = true; error.value = "";
   try {
     const existing = manualCommitMessage.value;
-    details.value.commitPlan = await generateCommitPlan(selected.value.path, commitGroupingMode.value, true);
-    syncCommitMessages();
-    if (details.value.commitPlan.groupingMode === "single") {
-      const group = details.value.commitPlan.groups.find((item) => item.status !== "committed");
-      if (group) {
-        manualCommitMessage.value = appendGeneratedCommitMessage(existing, group.commitMessage);
-        commitMessages[group.id] = manualCommitMessage.value;
-      }
-    }
+    const plan = await generateCommitPlan(selected.value.path, commitGroupingMode.value, true);
+    applyGeneratedCommitPlan(plan, existing);
     message.value = existing.trim() && commitGroupingMode.value === "single" ? "AI 修改明细已追加，Git 暂存区没有变化。" : "提交建议已生成，Git 暂存区没有变化。";
   }
   catch (cause) { error.value = String(cause); } finally { loading.value = false; }
@@ -761,14 +779,21 @@ async function discardSelectedFiles() {
 function setSmartCommitStep(index: number, status: SmartCommitStep["status"], detail = "") {
   smartCommitSteps.value = smartCommitSteps.value.map((step, stepIndex) => stepIndex === index ? { ...step, status, detail } : step);
 }
-async function runSmartCommit() {
-  if (!selected.value || !canSmartCommit.value) return;
+async function runSmartCommit(strategy: "ai" | "local" | "remote" = "ai") {
+  if (!selected.value || loading.value || smartCommitRunning.value) return;
+  if (smartConflict.value?.path === selected.value.path) {
+    selectedStageFiles.value = smartConflict.value.files.filter((file) => gitStatus.value?.changedFiles.some((changed) => changed.path === file));
+  }
+  if (!canSmartCommit.value) { error.value = smartCommitBlockedReason.value; return; }
   const path = selected.value.path;
-  const files = [...selectedStageFiles.value];
+  const files = [...(smartConflict.value?.path === path ? smartConflict.value.files : selectedStageFiles.value)];
+  smartConflict.value = null;
+  smartCommitMessage.value = "";
   smartCommitSteps.value = [
     { id: "stage", label: "添加选中文件到暂存区", status: "pending", detail: "" },
     { id: "fetch", label: "更新远程状态", status: "pending", detail: "" },
-    { id: "pull", label: "拉取代码并 AI 合并冲突", status: "pending", detail: "" },
+    { id: "pull", label: "同步远程代码", status: "pending", detail: "" },
+    { id: "restore", label: "恢复本地修改与处理冲突", status: "pending", detail: "" },
     { id: "plan", label: "AI 生成提交信息", status: "pending", detail: "" },
     { id: "commit", label: "提交代码", status: "pending", detail: "" },
     { id: "push", label: "推送远程", status: "pending", detail: "" },
@@ -777,7 +802,7 @@ async function runSmartCommit() {
   let currentStep = 0;
   try {
     setSmartCommitStep(0, "running", `${files.length} 个文件`);
-    const stageable = gitStatus.value?.changedFiles.filter((file) => files.includes(file.path) && hasUnstagedFile(file)).map((file) => file.path) ?? [];
+    const stageable = gitStatus.value?.changedFiles.filter((file) => files.includes(file.path) && hasUnstagedFile(file) && !hasStagedFile(file)).map((file) => file.path) ?? [];
     if (stageable.length) {
       const result = await stageGitRepositoryChanges(path, stageable);
       recordGitOperation("智能提交 · 添加文件", "success", result.message, result.output);
@@ -790,35 +815,62 @@ async function runSmartCommit() {
     setSmartCommitStep(1, "done", fetchResult.message);
 
     currentStep = 2; setSmartCommitStep(2, "running", "正在保护本地修改并同步远程");
-    const syncResult = await smartSyncGitRepository(path, files);
+    const syncResult = await smartSyncGitRepository(path, files, strategy, (progress) => {
+      if (progress.phase === "restore") {
+        setSmartCommitStep(2, "done", "远程同步完成");
+        currentStep = 3;
+      }
+      setSmartCommitStep(currentStep, "running", progress.detail);
+    });
+    if (syncResult.conflict) {
+      currentStep = syncResult.conflict.phase === "restore" ? 3 : 2;
+      if (currentStep === 3) setSmartCommitStep(2, "done", "同步后已随恢复操作回到原状态");
+      setSmartCommitStep(currentStep, "waiting", syncResult.message);
+      smartConflict.value = { path, files, conflict: syncResult.conflict };
+      recordGitOperation("智能提交 · 冲突待处理", "error", syncResult.message, syncResult.output);
+      return;
+    }
     recordGitOperation("智能提交 · 拉取与合并", "success", syncResult.message, syncResult.output);
-    setSmartCommitStep(2, "done", syncResult.conflictsResolved ? "冲突已由 AI 合并，双方修改均已保留" : syncResult.message);
-
-    currentStep = 3; setSmartCommitStep(3, "running");
-    const plan = await generateCommitPlan(path, "single", true);
-    details.value.commitPlan = plan;
-    syncCommitMessages();
-    if (plan.excludedFiles.length) throw new Error(`以下所选文件因敏感信息、二进制或生成内容未纳入提交：${plan.excludedFiles.join("、")}`);
-    const group = plan.groups.find((item) => item.status !== "committed");
-    if (!group) throw new Error("没有生成可执行的提交建议。");
-    const planned = new Set(group.files.map(normalizeGitPath));
-    const missing = files.filter((file) => !planned.has(normalizeGitPath(file)));
-    if (missing.length) throw new Error(`提交建议未覆盖全部所选文件：${missing.join("、")}`);
-    const commitMessage = commitMessages[group.id]?.trim() || group.commitMessage.trim();
-    setSmartCommitStep(3, "done", commitMessage.split("\n")[0]);
+    setSmartCommitStep(2, "done", syncResult.message);
+    setSmartCommitStep(3, "done", syncResult.conflictsResolved ? "冲突已自动处理" : "本地修改已恢复");
 
     currentStep = 4; setSmartCommitStep(4, "running");
-    const commitResult = await commitGitPlanGroup(path, group.id, commitMessage);
-    recordGitOperation("智能提交 · 提交代码", "success", commitResult.message, commitResult.output);
-    setSmartCommitStep(4, "done", commitResult.commitHash ? commitResult.commitHash.slice(0, 7) : commitResult.message);
+    let pushExpectedState = syncResult.expectedState;
+    if (!syncResult.stagedFiles.length) {
+      setSmartCommitStep(4, "done", "所选修改已与远程一致，无需新增提交");
+      setSmartCommitStep(5, "done", "无需新增提交");
+    } else {
+      const plan = await generateCommitPlan(path, "single", true);
+      if (plan.excludedFiles.length) throw new Error(`以下所选文件因敏感信息、二进制或生成内容未纳入提交：${plan.excludedFiles.join("、")}`);
+      const groups = plan.groups.filter((item) => item.status !== "committed");
+      if (plan.groupingMode !== "single" || groups.length !== 1) throw new Error("没有生成单次完整提交建议。");
+      const group = groups[0];
+      const planned = new Set(group.files.map(normalizeGitPath));
+      const staged = syncResult.stagedFiles.map(normalizeGitPath);
+      if (planned.size !== staged.length || staged.some((file) => !planned.has(file)) || staged.some((file) => !files.map(normalizeGitPath).includes(file))) throw new Error("提交建议与所选暂存范围不一致，请重新检查。");
+      applyGeneratedCommitPlan(plan, "");
+      smartCommitMessage.value = manualCommitMessage.value;
+      commitGroupingMode.value = "single";
+      setSmartCommitStep(4, "done", "完整提交信息已生成");
 
-    currentStep = 5; setSmartCommitStep(5, "running");
-    const pushResult = await pushGitRepository(path);
-    recordGitOperation("智能提交 · 推送远程", "success", pushResult.message, pushResult.output);
-    setSmartCommitStep(5, "done", pushResult.message);
-    message.value = `智能提交完成：${commitMessage.split("\n")[0]}`;
+      currentStep = 5; setSmartCommitStep(5, "running");
+      const result = await commitGitPlanGroup(path, group.id, smartCommitMessage.value, syncResult.expectedState);
+      recordGitOperation("智能提交 · 提交代码", "success", result.message, result.output);
+      setSmartCommitStep(5, "done", result.commitHash?.slice(0, 7) || result.message);
+      postCommitPrompt.value = { commitHash: result.commitHash, message: smartCommitMessage.value.split("\n")[0] };
+      manualCommitMessage.value = "";
+      // 提交只改变 HEAD，暂存树应保持一致。推送前再次校验，避免夹带并发提交或暂存修改。
+      const stagedTree = syncResult.expectedState.split(":")[1];
+      if (!result.commitHash || !stagedTree) throw new Error("提交完成，但无法校验推送范围，已停止自动推送。");
+      pushExpectedState = `${result.commitHash}:${stagedTree}`;
+    }
+    currentStep = 6; setSmartCommitStep(6, "running");
+    const pushed = await pushGitRepository(path, pushExpectedState);
+    recordGitOperation("智能提交 · 推送远程", "success", pushed.message, pushed.output);
+    setSmartCommitStep(6, "done", pushed.message);
+    message.value = "智能提交完成，已推送远程。";
+    manualCommitMessage.value = "";
     postCommitPrompt.value = null;
-    await refreshSelected();
   } catch (cause) {
     const failure = String(cause);
     setSmartCommitStep(currentStep, "failed", failure);
@@ -829,8 +881,13 @@ async function runSmartCommit() {
       selectedStageFiles.value = files.filter((file) => gitStatus.value?.changedFiles.some((changed) => changed.path === file));
     } catch { /* 保留原始错误，刷新失败不覆盖失败节点。 */ }
   } finally {
-    loading.value = false;
-    smartCommitRunning.value = false;
+    const operationError = error.value;
+    try { await refreshSelected(); }
+    catch { /* 刷新失败不改变提交/推送结果，也不覆盖原始错误。 */ }
+    finally {
+      if (operationError) error.value = operationError;
+      loading.value = false; smartCommitRunning.value = false;
+    }
   }
 }
 async function pushAfterCommit() {
@@ -947,9 +1004,23 @@ onBeforeUnmount(() => {
       </template>
       <template v-else-if="activeTab === 'git'">
         <section v-if="smartCommitSteps.length" class="smart-commit-progress" :class="{ failed: smartCommitSteps.some((step) => step.status === 'failed'), completed: smartCommitSteps.every((step) => step.status === 'done') }" aria-live="polite">
-          <header><div><small>SMART COMMIT</small><h3>{{ smartCommitRunning ? "智能提交正在执行" : smartCommitSteps.every((step) => step.status === 'done') ? "智能提交已完成" : "智能提交已停止" }}</h3></div><b>{{ smartCommitProgress }}%</b></header>
+          <header><div><small>SMART COMMIT</small><h3>{{ smartCommitRunning ? "智能提交正在执行" : smartConflict ? "冲突未解决，自动提交已停止" : smartCommitSteps.every((step) => step.status === 'done') ? "智能提交已完成" : "智能提交已停止" }}</h3></div><b>{{ smartCommitProgress }}%</b></header>
           <div class="smart-commit-progress-bar"><i :style="{ width: `${smartCommitProgress}%` }"></i></div>
           <ol><li v-for="step in smartCommitSteps" :key="step.id" :class="step.status"><i>{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '×' : step.status === 'running' ? '●' : '' }}</i><div><b>{{ step.label }}</b><span v-if="step.detail">{{ step.detail }}</span></div></li></ol>
+          <details v-if="smartCommitMessage" class="smart-commit-message"><summary>查看完整提交信息</summary><pre>{{ smartCommitMessage }}</pre></details>
+        </section>
+        <section v-if="smartConflict" class="git-safety-panel smart-conflict-choice">
+          <h3>{{ smartConflict.conflict.phase === 'restore' ? '恢复本地修改时发生冲突' : '同步远程时发生冲突' }}</h3>
+          <p>自动合并未完成，已恢复到同步前状态，未提交推送。可选择处理方式重试，成功后会自动提交推送。</p>
+          <p v-for="file in smartConflict.conflict.files" :key="file"><code>{{ file }}</code></p>
+          <p class="pull-conflict-warning">{{ smartConflict.conflict.reason }}</p>
+          <div>
+            <button class="button secondary" :disabled="loading" @click="runSmartCommit('local')">冲突文件保留我的</button>
+            <button class="button secondary" :disabled="loading" @click="runSmartCommit('remote')">冲突文件保留远程</button>
+            <button class="button primary" :disabled="loading || smartConflict.conflict.aiBlockedFiles.length > 0" @click="runSmartCommit('ai')">AI 智能合并</button>
+            <button class="button secondary" :disabled="loading" @click="smartConflict = null">稍后处理</button>
+          </div>
+          <small v-if="smartConflict.conflict.aiBlockedFiles.length">不能使用 AI 的文件：{{ smartConflict.conflict.aiBlockedFiles.join('、') }}</small>
         </section>
         <section v-if="gitStatus" class="git-dashboard">
           <header><div><h3>仓库状态</h3><p>{{ gitStatus.remoteUrl || "未配置 origin 远程仓库" }}</p></div><button class="button secondary small" :disabled="loading" @click="loadGitStatus(selected.path)">刷新状态</button></header>
@@ -960,10 +1031,10 @@ onBeforeUnmount(() => {
             <button class="button danger-button" :disabled="loading || smartCommitRunning || !selectedStageFiles.length || gitStatus.mergeInProgress" :title="gitStatus.mergeInProgress ? '合并期间不能放弃文件修改' : selectedStageFiles.length ? `放弃 ${selectedStageFiles.length} 个文件的全部本地修改` : '请先选择要还原的文件'" @click="discardConfirmationOpen = true">还原（放弃更改）</button>
             <button class="button secondary" :class="{ 'remote-update-available': gitStatus.behind > 0 }" :disabled="loading || !gitStatus.remoteUrl" :title="gitStatus.behind > 0 ? `远程有 ${gitStatus.behind} 个新提交` : '当前没有可拉取的新代码'" @click="pullRepository">{{ gitStatus.behind > 0 ? `拉取代码（${gitStatus.behind}）` : "拉取代码" }}</button>
             <button class="button primary" :disabled="loading || !canPush" :title="canPush ? (gitStatus.upstream ? `有 ${gitStatus.ahead} 个提交待推送` : '首次推送并建立上游分支') : '当前没有待推送提交'" @click="pushAfterCommit">推送</button>
-            <button class="button smart-commit-button" :disabled="!canSmartCommit" :title="smartCommitBlockedReason || `智能提交 ${selectedStageFiles.length} 个文件`" @click="runSmartCommit">{{ smartCommitRunning ? "智能提交中…" : "智能提交" }}</button>
+            <button class="button smart-commit-button" :disabled="!canSmartCommit" :title="smartCommitBlockedReason || `智能提交 ${selectedStageFiles.length} 个文件`" @click="runSmartCommit()">{{ smartCommitRunning ? "智能提交中…" : "智能提交" }}</button>
           </div>
           <div v-if="discardConfirmationOpen" class="discard-confirmation" role="alert"><div><b>确认放弃 {{ selectedStageFiles.length }} 个文件的修改？</b><span>这会同时清除所选文件的已暂存和未暂存内容，新文件会被删除，操作无法撤销。</span></div><button class="button secondary small" @click="discardConfirmationOpen = false">取消</button><button class="button danger-button small" @click="discardSelectedFiles">确认放弃</button></div>
-          <small class="git-action-help" title="打开时自动更新远程状态；冲突时使用 AI 语义合并并保留双方有效修改。">仅处理选中文件，其他修改保持不变</small>
+          <small class="git-action-help" title="智能提交仅处理选中文件，自动合并、生成提交信息、提交并推送；失败时停止。">智能提交会自动生成、提交并推送，无需再次确认</small>
           <small v-if="remoteRefreshNote" class="remote-refresh-note" :class="{ updates: gitStatus.behind > 0 }">{{ remoteRefreshNote }}</small>
           <details v-if="gitStatus.changedFiles.length" class="git-changed-files" open>
             <summary>查看 {{ gitStatus.changedFiles.length }} 个变更文件</summary>
@@ -990,7 +1061,7 @@ onBeforeUnmount(() => {
           <header><div><h3>提交修改</h3><p>{{ commitGroupingMode === "single" ? "可直接输入提交信息；AI 只追加建议，不覆盖已有内容" : "AI 按功能生成分组，提交前仍可逐组编辑" }}</p></div><div class="commit-plan-actions"><div class="commit-grouping-switch" role="group" aria-label="提交分组方式"><button :class="{ active: commitGroupingMode === 'single' }" @click="commitGroupingMode = 'single'">全部合成一次</button><button :class="{ active: commitGroupingMode === 'feature' }" @click="commitGroupingMode = 'feature'">按功能关联分组</button></div><button class="button secondary" :disabled="loading || !stagedFiles.length" @click="planCommit">{{ loading ? "AI 分析中…" : commitGroupingMode === "single" ? "AI 追加提交信息" : details.commitPlan ? "重新生成" : "AI 生成提交建议" }}</button></div></header>
           <p v-if="!gitStatus?.hasUncommittedChanges" class="git-empty">当前工作区干净，没有可提交修改。</p>
           <div v-else-if="commitGroupingMode === 'single'" class="manual-commit-editor"><textarea v-model="manualCommitMessage" rows="5" :disabled="loading || !stagedFiles.length" aria-label="手动提交信息" placeholder="例如：feat(projects): 优化项目资产提交操作&#10;&#10;- 支持手动输入提交信息"></textarea><div><small>{{ stagedFiles.length ? `将提交暂存区中的 ${stagedFiles.length} 个文件` : "请先在上方将需要提交的文件添加到暂存区" }}</small><button class="button primary" :disabled="loading || !stagedFiles.length || !manualCommitMessage.trim()" @click="commitManualMessage">{{ loading ? "提交中…" : "提交暂存修改" }}</button></div></div>
-          <p v-else-if="details.commitPlan?.groupingMode !== 'feature'" class="git-empty">请先使用 AI 生成按功能关联的提交分组。</p>
+          <p v-if="commitGroupingMode === 'feature' && gitStatus?.hasUncommittedChanges && details.commitPlan?.groupingMode !== 'feature'" class="git-empty">请先使用 AI 生成按功能关联的提交分组。</p>
           <div v-if="details.commitPlan && details.commitPlan.groupingMode === commitGroupingMode && gitStatus?.hasUncommittedChanges" class="commit-plan-summary"><div class="commit-plan-meta"><span>风险 {{ details.commitPlan.riskLevel }}</span><span>{{ details.commitPlan.generator === "deepseek" ? "AI 生成" : "系统规则生成" }}</span><span>{{ details.commitPlan.groupingMode === "single" ? "全部合成一次" : "按功能关联分组" }}</span></div><p>{{ details.commitPlan.summary }}</p><p v-if="details.commitPlan.generationWarning" class="commit-generation-warning">{{ details.commitPlan.generationWarning }}</p><details v-if="details.commitPlan.excludedFiles.length" class="commit-excluded-files"><summary>{{ details.commitPlan.excludedFiles.length }} 个敏感文件、二进制或生成物未纳入提交</summary><p v-for="file in details.commitPlan.excludedFiles" :key="file">{{ file }}</p></details><template v-if="details.commitPlan.groupingMode === 'feature'"><article v-for="group in details.commitPlan.groups" :key="group.id"><div class="commit-group-title"><b>{{ group.title }}</b><i :class="{ committed: group.status === 'committed' }">{{ group.status === "committed" ? "已提交" : `${group.files.length} 个文件` }}</i></div><textarea v-model="commitMessages[group.id]" rows="4" :disabled="group.status === 'committed'" aria-label="提交信息和修改明细" placeholder="第一行填写提交标题；后续行可列出修改"></textarea><small>{{ group.riskNotes }}</small><details><summary>查看文件</summary><p v-for="file in group.files" :key="file">{{ file }}</p></details><button class="button primary small" :disabled="loading || group.status === 'committed'" @click="commitGroup(group.id, group.files)">提交本组</button></article></template></div>
         </section>
         <section v-if="postCommitPrompt" class="post-commit-guide"><div><small>提交已完成</small><b>{{ postCommitPrompt.message }}</b><code>{{ postCommitPrompt.commitHash.slice(0, 7) }}</code><p>提交只保存在本地，确认后可以推送到远程。</p></div><div><button class="button secondary" @click="postCommitPrompt = null">继续修改</button><button class="button primary" :disabled="loading || !canPush" @click="pushAfterCommit">推送到远程</button></div></section>
@@ -1008,6 +1079,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.smart-commit-message{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}
+.smart-commit-message summary{cursor:pointer;color:var(--primary)}
+.smart-commit-message pre{max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.7;margin:10px 0 0}
+.smart-conflict-choice p{color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.smart-commit-progress li.waiting{color:var(--warning)}
 .asset-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px}.asset-metrics article{padding:15px 17px;min-height:92px}.asset-metrics small,.asset-metrics span{color:var(--muted)}.asset-metrics b{display:block;font-size:27px;margin:7px 0}.asset-metrics span{font-size:9px}.asset-metrics .warning b{color:var(--warning)}.asset-metrics .failed b{color:var(--danger)}.asset-workspace{overflow:hidden}.asset-toolbar{height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px;padding:0 14px}.asset-toolbar label{flex:1;max-width:410px;height:35px;border:1px solid var(--line);border-radius:7px;display:flex;align-items:center;gap:8px;padding:0 10px;color:var(--muted)}.asset-toolbar input{flex:1;border:0;outline:0;background:transparent}.asset-toolbar select{height:35px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);padding:0 10px}.asset-toolbar>span{margin-left:auto;color:var(--muted)}.asset-table-wrap{max-height:590px;overflow:auto}.asset-table{width:100%;border-collapse:collapse}.asset-table th{text-align:left;color:var(--muted);font-size:9px;background:var(--surface-2);position:sticky;top:0;z-index:2}.asset-table th,.asset-table td{padding:11px 12px;border-bottom:1px solid var(--line)}.asset-table th.pin-column{width:54px}.asset-table tbody tr{cursor:pointer}.asset-table tbody tr:hover,.asset-table tbody tr.pinned{background:var(--primary-soft)}.asset-table td b,.asset-table td small{display:block;max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.asset-table td small{color:var(--muted);font-size:9px;margin-top:5px}.pin-button{min-width:34px;height:30px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:var(--muted);padding:0 9px}.pin-button.active{color:var(--warning);border-color:color-mix(in srgb,var(--warning) 45%,var(--line));background:color-mix(in srgb,var(--warning) 10%,var(--surface))}.health-pill,.dirty-pill{display:inline-flex;padding:5px 8px;border-radius:12px;font-style:normal;font-size:9px}.health-pill.healthy{color:var(--success);background:color-mix(in srgb,var(--success) 12%,transparent)}.health-pill.warning,.dirty-pill{color:var(--warning);background:color-mix(in srgb,var(--warning) 12%,transparent)}.health-pill.failed{color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}.health-pill.unknown{color:var(--muted);background:var(--surface-2)}.clean-text{color:var(--success);font-size:10px}.asset-drawer{width:780px;height:100%;margin-left:auto;border-radius:0;overflow:auto;padding-bottom:30px}.asset-drawer>header{position:sticky;top:0;z-index:5;background:var(--surface);padding:18px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.asset-drawer h2{margin:4px 0}.asset-drawer header p,.asset-drawer header small{margin:0;color:var(--muted)}.drawer-header-actions{display:flex;align-items:flex-start;gap:8px}.asset-status-strip{display:flex;gap:8px;align-items:center;padding:12px 20px;background:var(--surface-2);border-bottom:1px solid var(--line)}.asset-status-strip>span:not(.health-pill){padding:5px 8px;border:1px solid var(--line);border-radius:12px;font-size:9px;color:var(--muted)}.asset-tabs{height:48px;padding:6px 20px;border-bottom:1px solid var(--line);display:flex;gap:6px}.asset-tabs button{height:34px;border:0;border-radius:7px;background:transparent;color:var(--muted);padding:0 16px}.asset-tabs button.active{background:var(--primary-soft);color:var(--primary);font-weight:800}.asset-overview,.asset-commands,.asset-form{padding:18px 20px;border-bottom:1px solid var(--line)}.asset-drawer h3{margin:0 0 13px}.asset-overview dl{display:grid;grid-template-columns:1fr 1fr;gap:9px}.asset-overview dl div{padding:11px;background:var(--surface-2);border-radius:7px}.asset-overview dt{color:var(--muted);font-size:9px}.asset-overview dd{margin:6px 0 0;line-height:1.5}.asset-commands>div{display:grid;grid-template-columns:55px 1fr;align-items:center;margin-bottom:7px}.asset-commands code{padding:8px;background:var(--surface-2);border-radius:6px}.asset-commands small{color:var(--muted)}.asset-form label{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:10px;margin-bottom:11px}.asset-form input,.asset-form textarea{border:1px solid var(--line);border-radius:7px;background:var(--surface-2);padding:9px;outline:0}.asset-form input:focus,.asset-form textarea:focus{border-color:var(--primary)}.asset-form footer{display:flex;justify-content:flex-end;gap:8px}.asset-related{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:18px 20px}.asset-related>div{min-width:0}.asset-related button,.asset-related article{width:100%;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);color:inherit;padding:9px;margin-bottom:7px;display:flex;align-items:center;gap:9px;text-align:left}.asset-related button span,.asset-related article span{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}.asset-related b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.asset-related small,.asset-related em,.asset-related p{color:var(--muted);font-size:9px}.asset-related em{font-style:normal}.asset-related article code{color:var(--primary)}
 .asset-row-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}.muted-action{color:var(--muted)}.row-launch-button{height:29px;border:1px solid color-mix(in srgb,var(--primary) 45%,var(--line));border-radius:7px;background:var(--primary-soft);color:var(--primary);padding:0 9px;font-weight:700;white-space:nowrap}.row-launch-button:disabled{opacity:.45;cursor:not-allowed}.category-button{max-width:150px;border:0;border-radius:99px;background:var(--primary-soft);color:var(--primary);padding:5px 9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hidden-project-backdrop,.category-editor-backdrop{z-index:230;align-items:center;justify-content:center;padding:30px}.hidden-project-dialog{display:flex;flex-direction:column;width:min(720px,calc(100vw - 80px));max-height:min(720px,calc(100vh - 80px));overflow:hidden}.hidden-project-dialog>header{flex-shrink:0;height:72px;padding:0 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.hidden-project-dialog h2{margin:0 0 5px}.hidden-project-dialog header p{margin:0;color:var(--muted)}.hidden-project-list{min-height:0;max-height:620px;overflow:auto;padding:8px 18px 18px}.hidden-project-list article{min-height:68px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}.hidden-project-list article>div{min-width:0;flex:1;display:flex;flex-direction:column;gap:6px}.hidden-project-list small{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.category-editor-dialog{width:min(520px,calc(100vw - 80px));overflow:hidden}.category-editor-dialog>header{height:72px;padding:0 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.category-editor-dialog h2{margin:0 0 5px}.category-editor-dialog header p{margin:0;color:var(--muted)}.category-editor-dialog>label{display:flex;flex-direction:column;gap:8px;padding:20px;color:var(--muted)}.category-editor-dialog input{height:40px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:0 11px;outline:0}.category-editor-dialog input:focus{border-color:var(--primary)}.category-editor-dialog>footer{display:flex;justify-content:flex-end;gap:8px;padding:0 20px 20px}
 .git-dashboard,.git-branch-panel,.git-credential-panel,.commit-plan,.git-history,.git-output{padding:18px 20px;border-bottom:1px solid var(--line)}.git-dashboard>header,.git-credential-panel>header,.commit-plan>header,.git-history>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.git-dashboard header p,.git-credential-panel header p,.commit-plan header p,.git-history header p{margin:4px 0 0;color:var(--muted);font-size:10px;overflow-wrap:anywhere}.git-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:13px 0}.git-metrics article{min-width:0;padding:11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}.git-metrics small{display:block;color:var(--muted);font-size:9px}.git-metrics b{display:block;margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.git-remote-actions{display:flex;align-items:center;gap:8px}.git-remote-actions small{flex:1;color:var(--muted);line-height:1.5}.git-branch-panel>div{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:9px}.git-branch-panel label{display:grid;grid-template-columns:110px 1fr;align-items:center;gap:8px;color:var(--muted)}.git-branch-panel select,.git-credential-panel input{height:36px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);padding:0 10px;outline:0}.git-credential-panel>header>span{padding:5px 8px;border-radius:6px;background:var(--surface-2);color:var(--muted);font-size:9px}.git-credential-panel>header>span.configured{color:var(--success);background:color-mix(in srgb,var(--success) 12%,transparent)}.git-credential-panel>div{display:grid;grid-template-columns:140px minmax(180px,1fr) auto auto;gap:8px;margin:13px 0 8px}.git-credential-panel>small{color:var(--muted);line-height:1.5}.commit-plan-summary>span{display:inline-block;color:var(--warning);margin:10px 0}.commit-plan-summary>p{color:var(--muted)}.commit-plan-summary article{padding:11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);margin-top:8px}.commit-group-title{display:flex;justify-content:space-between;align-items:center}.commit-group-title i{font-style:normal;color:var(--muted);font-size:9px}.commit-group-title i.committed{color:var(--success)}.commit-plan-summary textarea{width:100%;min-height:98px;margin:10px 0 7px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);padding:9px 10px;resize:vertical;line-height:1.6;font-family:inherit;outline:0}.commit-plan-summary article small{color:var(--muted)}.commit-message-help{display:block;margin-bottom:6px;line-height:1.5}.commit-plan-summary details{margin:8px 0;color:var(--muted)}.commit-plan-summary details p{margin:4px 0;font-family:monospace;font-size:9px;overflow-wrap:anywhere}.git-history article{display:grid;grid-template-columns:64px minmax(0,1fr) auto;align-items:center;gap:9px;padding:10px 0;border-bottom:1px solid var(--line)}.git-history article>code{color:var(--primary)}.git-history article>span{min-width:0;display:flex;flex-direction:column;gap:4px}.git-history b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.git-history small,.git-empty{color:var(--muted);font-size:9px}.danger-text{color:var(--danger)}.git-output pre{max-height:180px;margin:0;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:11px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font:10px/1.6 monospace}

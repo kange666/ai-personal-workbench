@@ -302,6 +302,27 @@ pub struct GitSmartSyncResult {
     pub message: String,
     pub output: String,
     pub conflicts_resolved: bool,
+    pub conflict: Option<GitSmartConflict>,
+    pub review_diff: String,
+    pub review_truncated: bool,
+    pub expected_state: String,
+    pub staged_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSmartConflict {
+    pub phase: String,
+    pub files: Vec<String>,
+    pub ai_blocked_files: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSmartProgress {
+    pub phase: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3027,7 +3048,7 @@ pub fn open_repository_in_editor(
 }
 
 fn runtime_line_failed(line: &str) -> bool {
-    let lower = line.to_lowercase();
+    let lower = strip_ansi_escape_sequences(line).to_lowercase();
     [
         "failed to compile",
         "compile failed",
@@ -3051,13 +3072,24 @@ fn append_runtime_line(telemetry: &Arc<Mutex<RuntimeTelemetry>>, line: &str) {
                 telemetry.status = "running".to_string();
             }
         }
-        let lower = line.to_lowercase();
-        if telemetry.status != "failed"
-            && (lower.contains("compiled successfully")
-                || lower.contains("ready in")
-                || lower.contains("app running at"))
-        {
+        let lower = strip_ansi_escape_sequences(line).to_lowercase();
+        let ready = lower.contains("compiled successfully")
+            || lower.contains("compiled with warnings")
+            || lower.contains("ready in")
+            || lower.contains("app running at");
+        // Vite 按请求编译，没有每轮“编译成功”日志。后续热更新表示开发服务
+        // 重新工作；若新一轮仍有错误，随后的错误日志会再次标记异常。
+        // 仅恢复 Vite 请求错误，不能让热更新掩盖 npm 退出等其他失败。
+        let vite_resumed = lower.starts_with("[stdout]")
+            && (lower.contains("[vite] hmr update ") || lower.contains("[vite] page reload "))
+            && telemetry.error_message.to_lowercase().contains("[vite]")
+            && telemetry
+                .error_message
+                .to_lowercase()
+                .contains("internal server error");
+        if ready || vite_resumed {
             telemetry.status = "running".to_string();
+            telemetry.error_message.clear();
         }
         if runtime_line_failed(line) {
             telemetry.status = "failed".to_string();
@@ -3817,12 +3849,20 @@ fn begin_conflicted_merge(path: &str, upstream: &str) -> Result<Vec<String>, Str
 }
 
 async fn ai_resolve_conflict_file(path: &str, file: &str) -> Result<(), String> {
+    ai_resolve_conflict_file_with_sides(path, file, false).await
+}
+
+async fn ai_resolve_conflict_file_with_sides(
+    path: &str,
+    file: &str,
+    restoring_stash: bool,
+) -> Result<(), String> {
     let base =
         git_conflict_blob(path, file, 1)?.unwrap_or_else(|| "<文件在共同版本中不存在>".to_string());
-    let local =
-        git_conflict_blob(path, file, 2)?.unwrap_or_else(|| "<文件已在本地删除>".to_string());
-    let remote =
-        git_conflict_blob(path, file, 3)?.unwrap_or_else(|| "<文件已在线上删除>".to_string());
+    let local = git_conflict_blob(path, file, if restoring_stash { 3 } else { 2 })?
+        .unwrap_or_else(|| "<文件已在本地删除>".to_string());
+    let remote = git_conflict_blob(path, file, if restoring_stash { 2 } else { 3 })?
+        .unwrap_or_else(|| "<文件已在线上删除>".to_string());
     let context = format!(
         "文件：{file}\n\n共同版本：\n<<<BASE\n{base}\nBASE\n\n我的版本：\n<<<LOCAL\n{local}\nLOCAL\n\n线上版本：\n<<<REMOTE\n{remote}\nREMOTE"
     );
@@ -3835,6 +3875,15 @@ async fn ai_resolve_conflict_file(path: &str, file: &str) -> Result<(), String> 
     let response = ai::complete_with_limit(system, &context, 8_000).await?;
     let resolution = serde_json::from_str::<AiMergeResolution>(ai_json_object(&response)?)
         .map_err(|error| format!("AI 合并结果格式错误：{error}"))?;
+    if resolution.resolved_content.trim().is_empty()
+        && (!local.trim().is_empty() || !remote.trim().is_empty())
+    {
+        return Err(format!("AI 返回了空文件，已停止合并：{file}"));
+    }
+    if file.ends_with(".json") {
+        serde_json::from_str::<serde_json::Value>(&resolution.resolved_content)
+            .map_err(|error| format!("AI 合并后的 JSON 无效：{file}：{error}"))?;
+    }
     if resolution
         .resolved_content
         .lines()
@@ -3900,6 +3949,11 @@ async fn resolve_pull_conflicts_inner(
     if !remaining.is_empty() {
         return Err(format!("仍有未解决的冲突文件：{}", remaining.join("、")));
     }
+    git_operation_output(
+        path,
+        &["diff".into(), "--cached".into(), "--check".into()],
+        false,
+    )?;
     git_operation_output(path, &["commit".into(), "--no-edit".into()], false)
 }
 
@@ -4072,6 +4126,63 @@ pub fn git_pull_repository(
     Ok(pull_result(&message, output, commit_hash, None))
 }
 
+fn drop_smart_stash(path: &str, stash_hash: &str) -> Result<String, String> {
+    let entries = git_output(&["-C", path, "stash", "list", "--format=%H %gd"])?;
+    let reference = entries
+        .lines()
+        .find_map(|line| {
+            let (hash, reference) = line.split_once(' ')?;
+            (hash == stash_hash).then_some(reference)
+        })
+        .ok_or_else(|| "临时保存记录已变化，保留备份等待人工检查。".to_string())?;
+    git_operation_output(
+        path,
+        &["stash".into(), "drop".into(), reference.into()],
+        false,
+    )
+}
+
+// stash apply 可能已经恢复未跟踪文件。只移除与备份完全一致的副本，避免再次恢复时报重名。
+fn remove_restored_smart_untracked(path: &str, stash_hash: &str) -> Result<(), String> {
+    let parent = format!("{stash_hash}^3");
+    let Ok(files) = git_output(&[
+        "-C",
+        path,
+        "-c",
+        "core.quotepath=false",
+        "ls-tree",
+        "-r",
+        "--name-only",
+        &parent,
+    ]) else {
+        return Ok(());
+    };
+    for file in files.lines() {
+        let target = repository_file_path(path, file)?;
+        if !target.exists() {
+            continue;
+        }
+        if !git_output(&["-C", path, "ls-files", "--", file])?.is_empty() {
+            continue;
+        }
+        let expected = git_output(&["-C", path, "rev-parse", &format!("{parent}:{file}")])?;
+        let actual = git_output(&["-C", path, "hash-object", "--path", file, "--", file])?;
+        if expected != actual {
+            return Err(format!("未跟踪文件已变化，保留备份和当前文件：{file}"));
+        }
+        fs::remove_file(target).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn smart_review_state(path: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}:{}",
+        git_output(&["-C", path, "rev-parse", "HEAD"])?,
+        git_output(&["-C", path, "write-tree"])?
+    ))
+}
+
 fn restore_smart_submit_original(
     path: &str,
     original_head: &str,
@@ -4080,6 +4191,7 @@ fn restore_smart_submit_original(
     if merge_in_progress(path) {
         let _ = git_operation_output(path, &["merge".into(), "--abort".into()], false);
     }
+    remove_restored_smart_untracked(path, stash_reference)?;
     // 本地改动已经完整保存在专用 stash 中，先回到原 HEAD，再恢复执行前的暂存区和工作区。
     git_operation_output(
         path,
@@ -4096,12 +4208,8 @@ fn restore_smart_submit_original(
         ],
         false,
     )?;
-    let drop_output = git_operation_output(
-        path,
-        &["stash".into(), "drop".into(), stash_reference.to_string()],
-        false,
-    )
-    .unwrap_or_else(|error| format!("执行前状态已恢复，但临时保存需要人工清理：{error}"));
+    let drop_output = drop_smart_stash(path, stash_reference)
+        .unwrap_or_else(|error| format!("执行前状态已恢复，但临时保存需要人工清理：{error}"));
     Ok([output, drop_output]
         .into_iter()
         .filter(|value| !value.trim().is_empty())
@@ -4112,7 +4220,12 @@ fn restore_smart_submit_original(
 async fn smart_sync_selected_changes(
     path: &str,
     files: &[String],
+    strategy: &str,
+    progress: impl Fn(&str, &str),
 ) -> Result<GitSmartSyncResult, String> {
+    if !matches!(strategy, "ai" | "local" | "remote") {
+        return Err("冲突处理方式无效。".to_string());
+    }
     if merge_in_progress(path) {
         return Err("当前正在合并，不能开始智能提交。".to_string());
     }
@@ -4150,12 +4263,19 @@ async fn smart_sync_selected_changes(
         ));
     }
 
+    // 智能同步按文件合并，部分暂存请走已有的普通提交入口，避免扩大提交范围。
+    if changed_files
+        .iter()
+        .any(|file| is_staged_change(file) && has_unstaged_change(file))
+    {
+        return Err(
+            "存在同一文件仅部分暂存的修改，请使用“提交暂存修改”保留暂存范围，再同步远程。"
+                .to_string(),
+        );
+    }
+
     let original_head = git_output(&["-C", path, "rev-parse", "HEAD"])
         .map_err(|_| "当前仓库还没有初始提交，不能自动同步远程。".to_string())?;
-    let mut stage_arguments = vec!["add".into(), "--".into()];
-    stage_arguments.extend(selected.iter().cloned());
-    git_operation_output(path, &stage_arguments, false)?;
-
     let stash_label = format!("workbench-smart-submit-{}", uuid::Uuid::new_v4());
     let stash_output = git_operation_output(
         path,
@@ -4168,11 +4288,15 @@ async fn smart_sync_selected_changes(
         ],
         false,
     )?;
-    let stash_reference = "stash@{0}";
+    let stash_hash = git_output(&["-C", path, "rev-parse", "stash@{0}"])?;
+    let stash_reference = stash_hash.as_str();
     let mut outputs = vec![stash_output];
+    let mut pending_conflict: Option<GitSmartConflict> = None;
+    let mut resolved_files = Vec::new();
 
     let synchronized = async {
         ensure_clean_worktree(path)?;
+        progress("sync", "正在同步远程提交");
         let upstream = git_output(&[
             "-C",
             path,
@@ -4213,24 +4337,37 @@ async fn smart_sync_selected_changes(
                     message
                 }
                 UpstreamReconcileOutcome::Conflict {
-                    ai_blocked_files, ..
+                    files,
+                    ai_blocked_files,
+                    ..
                 } => {
-                    if !ai_blocked_files.is_empty() {
+                    pending_conflict = Some(GitSmartConflict {
+                        phase: "sync".into(),
+                        files: files.clone(),
+                        ai_blocked_files: ai_blocked_files.clone(),
+                        reason: String::new(),
+                    });
+                    if strategy == "ai" && !ai_blocked_files.is_empty() {
                         return Err(format!(
                             "冲突文件不适合交给 AI 自动合并：{}",
                             ai_blocked_files.join("、")
                         ));
                     }
                     outputs.push(
-                        resolve_pull_conflicts_inner(path, "ai", &local_head, &remote_head).await?,
+                        resolve_pull_conflicts_inner(path, strategy, &local_head, &remote_head)
+                            .await?,
                     );
+                    resolved_files.extend(files);
+                    pending_conflict = None;
                     conflicts_resolved = true;
-                    "检测到远程冲突，AI 已保留双方有效修改并创建合并提交。".to_string()
+                    "远程冲突已处理，继续自动提交流程。".to_string()
                 }
             }
         };
 
-        let apply_result = git_operation_output(
+        progress("restore", "远程同步完成，正在恢复本地修改");
+        let synchronized_head = git_output(&["-C", path, "rev-parse", "HEAD"])?;
+        let mut apply_result = git_operation_output(
             path,
             &[
                 "stash".into(),
@@ -4240,6 +4377,26 @@ async fn smart_sync_selected_changes(
             ],
             false,
         );
+        // --index 的补丁失败未必产生未合并条目。清理本次应用后，改用内容三方合并。
+        if apply_result.is_err() && git_conflicted_files(path)?.is_empty() {
+            remove_restored_smart_untracked(path, stash_reference)?;
+            git_operation_output(
+                path,
+                &["reset".into(), "--hard".into(), synchronized_head],
+                false,
+            )?;
+            apply_result = git_operation_output(
+                path,
+                &[
+                    "-c".into(),
+                    "stash.index=false".into(),
+                    "stash".into(),
+                    "apply".into(),
+                    stash_reference.into(),
+                ],
+                false,
+            );
+        }
         match apply_result {
             Ok(output) => outputs.push(output),
             Err(error) => {
@@ -4248,21 +4405,42 @@ async fn smart_sync_selected_changes(
                     return Err(format!("恢复本地修改失败：{error}"));
                 }
                 let blocked = ai_blocked_conflict_files(path, &conflicts);
-                if !blocked.is_empty() {
+                pending_conflict = Some(GitSmartConflict {
+                    phase: "restore".into(),
+                    files: conflicts.clone(),
+                    ai_blocked_files: blocked.clone(),
+                    reason: String::new(),
+                });
+                if strategy == "ai" && !blocked.is_empty() {
                     return Err(format!(
                         "恢复本地修改时发生冲突，以下文件不能由 AI 自动合并：{}",
                         blocked.join("、")
                     ));
                 }
-                for file in &conflicts {
-                    ai_resolve_conflict_file(path, file).await?;
+                progress("restore", "本地修改与远程有冲突，正在合并");
+                if strategy == "ai" {
+                    for file in &conflicts {
+                        ai_resolve_conflict_file_with_sides(path, file, true).await?;
+                    }
+                } else {
+                    // stash 冲突中 ours 是同步后的远程，theirs 才是保存的本地修改。
+                    resolve_conflicts_with_side(
+                        path,
+                        &conflicts,
+                        if strategy == "local" {
+                            "theirs"
+                        } else {
+                            "ours"
+                        },
+                    )?;
                 }
                 let remaining = git_conflicted_files(path)?;
                 if !remaining.is_empty() {
                     return Err(format!("仍有未解决的冲突文件：{}", remaining.join("、")));
                 }
                 conflicts_resolved = true;
-                outputs.push(format!("AI 已合并恢复本地修改时产生的冲突：{error}"));
+                resolved_files.extend(conflicts);
+                outputs.push(format!("已处理恢复本地修改时产生的冲突：{error}"));
             }
         }
 
@@ -4274,6 +4452,13 @@ async fn smart_sync_selected_changes(
         let mut restage_arguments = vec!["add".into(), "--".into()];
         restage_arguments.extend(selected.iter().cloned());
         outputs.push(git_operation_output(path, &restage_arguments, false)?);
+        git_operation_output(
+            path,
+            &["diff".into(), "--cached".into(), "--check".into()],
+            false,
+        )
+        .map_err(|error| format!("合并后的暂存内容检查未通过：{error}"))?;
+        pending_conflict = None;
         Ok::<_, String>((remote_message, conflicts_resolved))
     }
     .await;
@@ -4282,21 +4467,44 @@ async fn smart_sync_selected_changes(
         Ok(value) => value,
         Err(error) => {
             return match restore_smart_submit_original(path, &original_head, stash_reference) {
-                Ok(_) => Err(format!("{error}。已恢复到智能提交前状态。")),
+                Ok(_) => {
+                    if let Some(mut conflict) = pending_conflict {
+                        conflict.reason = error.clone();
+                        Ok(GitSmartSyncResult {
+                            message: "冲突未解决，已恢复到同步前状态，请选择处理方式。".into(),
+                            output: error,
+                            conflicts_resolved: false,
+                            conflict: Some(conflict),
+                            review_diff: String::new(),
+                            review_truncated: false,
+                            expected_state: String::new(),
+                            staged_files: Vec::new(),
+                        })
+                    } else {
+                        Err(format!("{error}。已恢复到同步前状态。"))
+                    }
+                }
                 Err(restore_error) => Err(format!(
                     "{error}。自动恢复失败，原修改仍保存在 {stash_reference}：{restore_error}"
                 )),
             };
         }
     };
-    match git_operation_output(
-        path,
-        &["stash".into(), "drop".into(), stash_reference.into()],
-        false,
-    ) {
+    match drop_smart_stash(path, stash_reference) {
         Ok(output) => outputs.push(output),
         Err(error) => outputs.push(format!("本地修改已恢复，但清理临时保存失败：{error}")),
     }
+    let mut review_arguments = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        original_head,
+        "--".into(),
+    ];
+    review_arguments.extend(selected);
+    review_arguments.extend(resolved_files);
+    let review_diff = git_operation_output(path, &review_arguments, false)?;
+    let review_truncated = review_diff.chars().count() > 100_000;
     Ok(GitSmartSyncResult {
         message: remote_message,
         output: outputs
@@ -4305,6 +4513,15 @@ async fn smart_sync_selected_changes(
             .collect::<Vec<_>>()
             .join("\n"),
         conflicts_resolved,
+        conflict: None,
+        review_diff: review_diff.chars().take(100_000).collect(),
+        review_truncated,
+        expected_state: smart_review_state(path)?,
+        staged_files: parse_changed_files(&git_status_output(path)?)
+            .into_iter()
+            .filter(is_staged_change)
+            .map(|file| file.path)
+            .collect(),
     })
 }
 
@@ -4313,9 +4530,22 @@ pub async fn git_smart_sync_repository(
     state: tauri::State<'_, DatabaseState>,
     path: String,
     files: Vec<String>,
+    strategy: Option<String>,
+    on_progress: tauri::ipc::Channel<GitSmartProgress>,
 ) -> Result<GitSmartSyncResult, String> {
     ensure_managed_repository(&state, &path)?;
-    let result = smart_sync_selected_changes(&path, &files).await;
+    let result = smart_sync_selected_changes(
+        &path,
+        &files,
+        strategy.as_deref().unwrap_or("ai"),
+        |phase, detail| {
+            let _ = on_progress.send(GitSmartProgress {
+                phase: phase.into(),
+                detail: detail.into(),
+            });
+        },
+    )
+    .await;
     if result.is_ok() {
         let _ = import_head_commit(&state, &path);
     }
@@ -4708,8 +4938,16 @@ pub fn git_restore_repository_stash(
 pub fn git_push_repository(
     state: tauri::State<'_, DatabaseState>,
     path: String,
+    expected_state: Option<String>,
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
+    if let Some(expected) = expected_state {
+        if smart_review_state(&path)? != expected {
+            return Err(
+                "操作期间分支或暂存内容发生变化，已停止自动推送，请检查仓库状态。".to_string(),
+            );
+        }
+    }
     let remote =
         git_output(&["-C", &path, "config", "--get", "remote.origin.url"]).unwrap_or_default();
     if remote.is_empty() {
@@ -4846,8 +5084,16 @@ pub fn execute_commit_plan_group(
     path: String,
     group_id: String,
     commit_message: String,
+    expected_state: Option<String>,
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
+    if let Some(expected) = expected_state {
+        if smart_review_state(&path)? != expected {
+            return Err(
+                "操作期间分支或暂存内容发生变化，已停止自动提交，请重新运行智能提交。".to_string(),
+            );
+        }
+    }
     if !valid_conventional_commit_message(&commit_message) {
         return Err(
             "提交信息格式应为 type(scope): 描述，例如 feat(workflow): 新增通用提交审核页面。"
@@ -4925,8 +5171,8 @@ pub fn execute_commit_plan_group(
 #[cfg(test)]
 mod tests {
     use super::{
-        ai_blocked_conflict_files, ai_context_contains_sensitive_content, begin_conflicted_merge,
-        binary_path, commit_group_for_path, commit_message_with_details,
+        ai_blocked_conflict_files, ai_context_contains_sensitive_content, append_runtime_line,
+        begin_conflicted_merge, binary_path, commit_group_for_path, commit_message_with_details,
         commit_selected_staged_files, conventional_commit_message, detect_project_commands,
         diff_change_summary, discard_repository_files, discover_repository_candidates,
         ensure_clean_worktree, excluded_commit_path, extract_local_url, fallback_commit_groups,
@@ -5027,6 +5273,68 @@ mod tests {
         assert!(runtime_line_failed("Failed to compile with 1 error"));
         assert!(runtime_line_failed("Module parse failed: Unexpected token"));
         assert!(!runtime_line_failed("0 errors found"));
+    }
+
+    #[test]
+    fn runtime_recovers_after_compile_success_without_losing_error_history() {
+        let telemetry = Arc::new(Mutex::new(RuntimeTelemetry::default()));
+        append_runtime_line(&telemetry, "[stderr] Failed to compile with 1 error");
+        append_runtime_line(&telemetry, "[stdout] Local: http://localhost:82/");
+        assert_eq!(telemetry.lock().unwrap().status, "failed");
+        append_runtime_line(
+            &telemetry,
+            "[stdout] Compiled \u{1b}[32msuccessfully\u{1b}[0m",
+        );
+        let current = telemetry.lock().unwrap();
+        assert_eq!(current.status, "running");
+        assert!(current.error_message.is_empty());
+        assert_eq!(current.local_url, "http://localhost:82/");
+        assert!(current.log_lines[0].contains("Failed to compile"));
+    }
+
+    #[test]
+    fn vite_hot_update_recovers_request_errors_but_new_errors_take_precedence() {
+        let telemetry = Arc::new(Mutex::new(RuntimeTelemetry::default()));
+        append_runtime_line(
+            &telemetry,
+            "[stderr] [vite] Internal server error: invalid v-else",
+        );
+        append_runtime_line(
+            &telemetry,
+            "[stdout] 10:42:06 [vite] hmr update /src/Editor.vue",
+        );
+        assert_eq!(telemetry.lock().unwrap().status, "running");
+        assert!(telemetry.lock().unwrap().error_message.is_empty());
+        append_runtime_line(&telemetry, "[stderr] [vite] Internal server error: ENOENT");
+        assert_eq!(telemetry.lock().unwrap().status, "failed");
+        append_runtime_line(
+            &telemetry,
+            "[stdout] 10:43:00 [vite] page reload src/Editor.vue",
+        );
+        assert_eq!(telemetry.lock().unwrap().status, "running");
+        append_runtime_line(&telemetry, "[stderr] npm ERR! process failed");
+        append_runtime_line(
+            &telemetry,
+            "[stdout] 10:44:00 [vite] hmr update /src/Editor.vue",
+        );
+        assert_eq!(telemetry.lock().unwrap().status, "failed");
+    }
+
+    #[test]
+    fn runtime_ready_and_warning_builds_clear_old_errors() {
+        for ready in [
+            "[stdout] VITE ready in 100 ms",
+            "[stdout] Compiled with warnings",
+            "[stdout] App running at:",
+        ] {
+            let telemetry = Arc::new(Mutex::new(RuntimeTelemetry::default()));
+            append_runtime_line(&telemetry, "[stderr] Module build failed: example");
+            append_runtime_line(&telemetry, ready);
+            assert_eq!(telemetry.lock().unwrap().status, "running");
+            assert!(telemetry.lock().unwrap().error_message.is_empty());
+            append_runtime_line(&telemetry, "[stdout] ready in 10ms; Failed to compile");
+            assert_eq!(telemetry.lock().unwrap().status, "failed");
+        }
     }
 
     #[test]
@@ -5561,6 +5869,138 @@ mod tests {
     }
 
     #[test]
+    fn smart_sync_restores_index_conflicts_and_uses_correct_local_remote_sides() {
+        for strategy in ["local", "remote", "ai"] {
+            let directory = std::env::temp_dir()
+                .join(format!("workbench-smart-conflict-{}", uuid::Uuid::new_v4()));
+            let source = directory.join("source");
+            let local = directory.join("local");
+            std::fs::create_dir_all(&directory).unwrap();
+            let run = |repository: &std::path::Path, args: &[&str]| {
+                git_operation_output(
+                    &repository.display().to_string(),
+                    &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+                    false,
+                )
+                .unwrap()
+            };
+            run(&directory, &["init", "-b", "main", "source"]);
+            run(&source, &["config", "user.name", "test"]);
+            run(&source, &["config", "user.email", "test@example.com"]);
+            run(&source, &["config", "core.autocrlf", "false"]);
+            // .env 被安全规则拦截，验证 AI 不可用后的选择路径，无需真实外部调用。
+            let file = if strategy == "ai" {
+                ".env"
+            } else {
+                "selected.txt"
+            };
+            std::fs::write(source.join(file), "base\n").unwrap();
+            run(&source, &["add", "--", file]);
+            run(&source, &["commit", "-m", "base"]);
+            run(&directory, &["clone", "source", "local"]);
+            run(&local, &["config", "core.autocrlf", "false"]);
+            std::fs::write(source.join(file), "remote change\n").unwrap();
+            run(&source, &["commit", "-am", "remote"]);
+            std::fs::write(local.join(file), "local change\n").unwrap();
+            std::fs::write(local.join("unselected.txt"), "keep unselected\n").unwrap();
+            run(&local, &["add", "--", file]);
+            run(&local, &["fetch", "origin"]);
+            let before = run(&local, &["rev-parse", "HEAD"]);
+            let before_tree = run(&local, &["write-tree"]);
+            let local_path = local.display().to_string();
+            let phases = std::cell::RefCell::new(Vec::new());
+            let result = tauri::async_runtime::block_on(smart_sync_selected_changes(
+                &local_path,
+                &[file.into()],
+                strategy,
+                |phase, _| phases.borrow_mut().push(phase.to_string()),
+            ))
+            .unwrap();
+            assert_eq!(*phases.borrow().first().unwrap(), "sync");
+            assert!(phases.borrow().iter().any(|phase| phase == "restore"));
+            assert_eq!(
+                std::fs::read_to_string(local.join("unselected.txt")).unwrap(),
+                "keep unselected\n"
+            );
+            assert!(
+                !parse_changed_files(&git_status_output(&local_path).unwrap())
+                    .iter()
+                    .any(|entry| entry.path == "unselected.txt" && is_staged_change(entry))
+            );
+            if strategy == "ai" {
+                let conflict = result.conflict.unwrap();
+                assert_eq!(conflict.phase, "restore");
+                assert_eq!(conflict.files, vec![file]);
+                assert_eq!(conflict.ai_blocked_files, vec![file]);
+                assert_eq!(run(&local, &["rev-parse", "HEAD"]), before);
+                assert_eq!(run(&local, &["write-tree"]), before_tree);
+                assert_eq!(
+                    std::fs::read_to_string(local.join(file)).unwrap(),
+                    "local change\n"
+                );
+            } else {
+                assert!(result.conflicts_resolved);
+                assert!(result.conflict.is_none());
+                assert_eq!(
+                    std::fs::read_to_string(local.join(file)).unwrap(),
+                    if strategy == "local" {
+                        "local change\n"
+                    } else {
+                        "remote change\n"
+                    }
+                );
+                assert!(result.review_diff.contains("diff --git"));
+                assert!(!result.expected_state.is_empty());
+                if strategy == "remote" {
+                    assert!(result.staged_files.is_empty());
+                }
+            }
+            assert!(run(&local, &["stash", "list"]).is_empty());
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn smart_sync_rejects_partial_staging_without_changing_files() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-smart-partial-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.display().to_string();
+        let run = |args: &[&str]| {
+            git_operation_output(
+                &path,
+                &args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap()
+        };
+        run(&["init"]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "user.email", "test@example.com"]);
+        std::fs::write(directory.join("a.txt"), "base\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-m", "base"]);
+        std::fs::write(directory.join("a.txt"), "staged\n").unwrap();
+        run(&["add", "a.txt"]);
+        std::fs::write(directory.join("a.txt"), "unstaged\n").unwrap();
+        let before = run(&["write-tree"]);
+        let result = tauri::async_runtime::block_on(smart_sync_selected_changes(
+            &path,
+            &["a.txt".into()],
+            "ai",
+            |_, _| {},
+        ));
+        assert!(result.unwrap_err().contains("部分暂存"));
+        assert_eq!(run(&["write-tree"]), before);
+        assert_eq!(
+            std::fs::read_to_string(directory.join("a.txt")).unwrap(),
+            "unstaged\n"
+        );
+        assert!(run(&["stash", "list"]).is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn smart_sync_keeps_unselected_changes_and_restages_only_selected_files() {
         let directory =
             std::env::temp_dir().join(format!("workbench-git-smart-{}", uuid::Uuid::new_v4()));
@@ -5615,6 +6055,8 @@ mod tests {
         let result = tauri::async_runtime::block_on(smart_sync_selected_changes(
             &local_path,
             &["selected.txt".to_string()],
+            "ai",
+            |_, _| {},
         ))
         .unwrap();
 

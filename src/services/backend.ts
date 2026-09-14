@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { WorkTask } from "../types/workbench";
 
 let activeBackendRequests = 0;
@@ -665,6 +665,23 @@ export interface GitSmartSyncResult {
   message: string;
   output: string;
   conflictsResolved: boolean;
+  conflict: GitSmartConflict | null;
+  reviewDiff: string;
+  reviewTruncated: boolean;
+  expectedState: string;
+  stagedFiles: string[];
+}
+
+export interface GitSmartConflict {
+  phase: "sync" | "restore";
+  files: string[];
+  aiBlockedFiles: string[];
+  reason: string;
+}
+
+export interface GitSmartProgress {
+  phase: "sync" | "restore";
+  detail: string;
 }
 
 export interface TapdWorkItem {
@@ -1801,8 +1818,10 @@ export async function discardGitRepositoryChanges(path: string, files: string[])
   return invoke<GitOperationResult>("git_discard_repository_changes", { path, files });
 }
 
-export async function smartSyncGitRepository(path: string, files: string[]): Promise<GitSmartSyncResult> {
-  return invoke<GitSmartSyncResult>("git_smart_sync_repository", { path, files });
+export async function smartSyncGitRepository(path: string, files: string[], strategy: "ai" | "local" | "remote" = "ai", progress?: (value: GitSmartProgress) => void): Promise<GitSmartSyncResult> {
+  const onProgress = new Channel<GitSmartProgress>();
+  onProgress.onmessage = (value) => progress?.(value);
+  return invoke<GitSmartSyncResult>("git_smart_sync_repository", { path, files, strategy, onProgress });
 }
 
 export async function unstageGitRepositoryChanges(path: string, files: string[]): Promise<GitOperationResult> {
@@ -1821,8 +1840,8 @@ export async function restoreGitRepositoryStash(path: string): Promise<GitOperat
   return invoke<GitOperationResult>("git_restore_repository_stash", { path });
 }
 
-export async function pushGitRepository(path: string): Promise<GitOperationResult> {
-  return invoke<GitOperationResult>("git_push_repository", { path });
+export async function pushGitRepository(path: string, expectedState?: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("git_push_repository", { path, expectedState });
 }
 
 export async function switchGitRepositoryBranch(path: string, branch: string): Promise<GitOperationResult> {
@@ -1837,8 +1856,8 @@ export async function revertGitRepositoryCommit(path: string, commitHash: string
   return invoke<GitOperationResult>("git_revert_repository_commit", { path, commitHash });
 }
 
-export async function commitGitPlanGroup(path: string, groupId: string, commitMessage: string): Promise<GitOperationResult> {
-  return invoke<GitOperationResult>("execute_commit_plan_group", { path, groupId, commitMessage });
+export async function commitGitPlanGroup(path: string, groupId: string, commitMessage: string, expectedState?: string): Promise<GitOperationResult> {
+  return invoke<GitOperationResult>("execute_commit_plan_group", { path, groupId, commitMessage, expectedState });
 }
 
 export async function getTapdStatus(): Promise<TapdStatus> {
