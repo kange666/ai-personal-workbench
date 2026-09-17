@@ -93,10 +93,13 @@ const visibleNavItems = computed(() => {
   const hidden = new Set(hiddenNavigationPaths.value);
   return orderedNavigationItems(navigationOrder.value).filter(item => !hidden.has(item.path) && (!item.vip || vipStatus.value.active));
 });
-const dateText = computed(() => new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(new Date()));
-const todayIso = new Date().toLocaleDateString("sv-SE");
-const todayDay = new Date().getDate();
-const todayAlmanac = computed(() => getAlmanac(todayIso));
+// 复用侧栏时钟，避免应用跨天运行后日期和黄历仍停留在启动当天。
+const currentDate = computed(() => new Date(railNow.value));
+const dateText = computed(() => new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(currentDate.value));
+const todayIso = computed(() => currentDate.value.toLocaleDateString("sv-SE"));
+const todayDay = computed(() => currentDate.value.getDate());
+const todayAlmanac = computed(() => getAlmanac(todayIso.value));
+watch(todayIso, () => { void loadSidebarWorktime(); });
 const pageLoadingTitle = computed(() => String(router.currentRoute.value.meta.title || "工作数据"));
 const latestWorkSession = computed(() => [...todayWorkSessions.value].sort((left,right) => right.endTime.localeCompare(left.endTime))[0]);
 const quotaWindows = computed(() => [quota.value.primary, quota.value.secondary].filter((item): item is CodexQuotaWindow => Boolean(item)));
@@ -335,6 +338,7 @@ async function navigateFromCockpit(route:string) {
 }
 function handleCockpitVisibilityChange() {
   if (document.visibilityState === "visible") {
+    railNow.value=Date.now();
     evaluateCockpitIdle();
     void loadSystemPerformance();
   }
@@ -556,7 +560,9 @@ async function loadActiveOperations() {
 }
 async function loadSidebarWorktime() {
   if (!isTauriRuntime()) return;
-  const [summaryResult,sessionsResult]=await Promise.allSettled([getWorkSummary(todayIso,todayIso,true),listWorkSessions(todayIso,todayIso,false)]);
+  const date=todayIso.value;
+  const [summaryResult,sessionsResult]=await Promise.allSettled([getWorkSummary(date,date,true),listWorkSessions(date,date,false)]);
+  if (date !== todayIso.value) return;
   if (summaryResult.status === "fulfilled") todayWorkSummary.value=summaryResult.value;
   else console.error("读取今日工时汇总失败",summaryResult.reason);
   if (sessionsResult.status === "fulfilled") todayWorkSessions.value=sessionsResult.value;

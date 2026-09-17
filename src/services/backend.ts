@@ -680,7 +680,7 @@ export interface GitSmartConflict {
 }
 
 export interface GitSmartProgress {
-  phase: "sync" | "restore";
+  phase: "sync" | "restore" | "merge" | "commit";
   detail: string;
 }
 
@@ -762,6 +762,7 @@ export interface CommitPlanGroup {
 export type CommitGroupingMode = "single" | "feature";
 
 export interface CommitPlan {
+  expectedState?: string | null;
   id: string;
   repositoryPath: string;
   status: string;
@@ -1818,10 +1819,10 @@ export async function discardGitRepositoryChanges(path: string, files: string[])
   return invoke<GitOperationResult>("git_discard_repository_changes", { path, files });
 }
 
-export async function smartSyncGitRepository(path: string, files: string[], strategy: "ai" | "local" | "remote" = "ai", progress?: (value: GitSmartProgress) => void): Promise<GitSmartSyncResult> {
+export async function smartSyncGitRepository(path: string, files: string[], strategy: "ai" | "local" | "remote" = "ai", progress?: (value: GitSmartProgress) => void, expectedState?: string): Promise<GitSmartSyncResult> {
   const onProgress = new Channel<GitSmartProgress>();
   onProgress.onmessage = (value) => progress?.(value);
-  return invoke<GitSmartSyncResult>("git_smart_sync_repository", { path, files, strategy, onProgress });
+  return invoke<GitSmartSyncResult>("git_smart_sync_repository", { path, files, strategy, onProgress, expectedState });
 }
 
 export async function unstageGitRepositoryChanges(path: string, files: string[]): Promise<GitOperationResult> {

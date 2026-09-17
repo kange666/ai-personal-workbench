@@ -128,6 +128,25 @@ describe("ApiDocsView", () => {
     expect(wrapper.text()).toContain("敏感示例值已遮盖");
   });
 
+  it.each([false, true])("HTML 响应按文档声明决定是否提示异常（已声明：%s）", async (declaredHtml) => {
+    if (declaredHtml) mocks.detail.mockImplementationOnce(async (id:string) => {
+      const detail = mocks.detailResult(id);
+      Object.assign(detail.document.responses[200], {content:{"text/html":{}}});
+      return detail;
+    });
+    mocks.execute.mockResolvedValueOnce({url:"https://api.example.com/users/1",method:"GET",status:200,statusText:"OK",success:true,elapsedMs:18,contentType:"text/html; charset=utf-8",requestData:{"path.id":"1"},responseData:"<!DOCTYPE html><html>前端页面</html>" as never,truncated:false});
+    const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView}]});
+    await router.push("/api-docs");await router.isReady();
+    const wrapper=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    await wrapper.findAll("button").find(button=>button.text().includes("接口测试"))!.trigger("click");await flushPromises();
+    await wrapper.findAll("button").find(button=>button.text().includes("发送 GET 请求"))!.trigger("click");await flushPromises();
+    expect(wrapper.get(".api-test-result").classes()).toContain(declaredHtml ? "success" : "error");
+    if (!declaredHtml) expect(wrapper.get('[role="alert"]').text()).toContain("请求基地址是否包含 API 前缀");
+    else expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("前端页面");
+    wrapper.unmount();
+  });
+
   it("写操作必须在预览中明确确认后才能发送", async () => {
     const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView},{path:"/settings",component:{template:"<div />"}}]});
     await router.push("/api-docs");await router.isReady();

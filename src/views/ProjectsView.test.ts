@@ -61,9 +61,9 @@ beforeEach(() => {
   backend.getGitRepositoryCommitFiles.mockResolvedValue([]);
   backend.getGitRepositoryCommitFileDiff.mockResolvedValue({ path: "", diff: "", truncated: false, additions: 0, modifications: 0, deletions: 0 });
   backend.stageGitRepositoryChanges.mockResolvedValue({ message: "文件已暂存。", output: "", commitHash: "" });
-  backend.smartSyncGitRepository.mockResolvedValue({ message: "远程已同步。", output: "", conflictsResolved: false, conflict: null, reviewDiff: "diff --git a/src/a.ts b/src/a.ts\n+change", reviewTruncated: false, expectedState: "head:tree", stagedFiles: ["src/a.ts"] });
+  backend.smartSyncGitRepository.mockResolvedValue({ message: "远程已同步。", output: "", conflictsResolved: false, conflict: null, reviewDiff: "", reviewTruncated: false, expectedState: "abcdef123456:tree", stagedFiles: [] });
   backend.generateCommitPlan.mockResolvedValue({
-    id: "plan", repositoryPath: projectPath, status: "suggested", riskLevel: "低", summary: "提交所选修改",
+    id: "plan", expectedState: "head:tree", repositoryPath: projectPath, status: "suggested", riskLevel: "低", summary: "提交所选修改",
     groupingMode: "single", generator: "rules", model: "", generationWarning: "", excludedFiles: [], createdAt: new Date().toISOString(),
     groups: [{ id: "group", title: "项目修改", commitMessage: "feat(project): 更新项目", files: ["src/a.ts"], riskNotes: "", verificationNotes: "", status: "suggested" }],
   });
@@ -335,7 +335,7 @@ describe("项目资产列表操作", () => {
 
   it("智能提交替换手写内容，一次点击后自动提交完整明细并推送", async () => {
     backend.generateCommitPlan.mockResolvedValue({
-      id: "plan", repositoryPath: projectPath, status: "suggested", riskLevel: "低", summary: "修改附件显示",
+      id: "plan", expectedState: "head:tree", repositoryPath: projectPath, status: "suggested", riskLevel: "低", summary: "修改附件显示",
       groupingMode: "single", generator: "deepseek", model: "test-model", generationWarning: "", excludedFiles: [], createdAt: new Date().toISOString(),
       groups: [{ id: "group", title: "附件显示", commitMessage: "refactor(safe): 调整附件显示\n\n- 修改附件标签为电子附件\n- 调整附件列宽", files: ["src/a.ts"], riskNotes: "", verificationNotes: "", status: "suggested" }],
     });
@@ -375,32 +375,39 @@ describe("项目资产列表操作", () => {
 
     const order = [
       backend.fetchGitRepository,
-      backend.smartSyncGitRepository,
       backend.generateCommitPlan,
       backend.commitGitPlanGroup,
+      backend.smartSyncGitRepository,
       backend.pushGitRepository,
     ].map((mock) => mock.mock.invocationCallOrder[0]);
     expect(order).toEqual([...order].sort((left, right) => left - right));
+    expect(backend.smartSyncGitRepository).toHaveBeenCalledExactlyOnceWith(projectPath, [], "ai", expect.any(Function), "abcdef123456:tree");
+    expect(wrapper.findAll(".smart-commit-progress li b").map((item) => item.text())).toEqual([
+      "添加选中文件到暂存区", "更新远程状态", "AI 生成提交信息", "提交本地代码", "拉取远程代码", "AI 智能合并冲突", "完成合并提交", "推送远程",
+    ]);
     expect(wrapper.get(".smart-commit-progress").classes()).toContain("completed");
     expect(wrapper.get(".smart-commit-progress").text()).toContain("100%");
     expect(wrapper.get(".drawer-git-feedback").text()).toContain("智能提交完成");
   });
 
-  it("无法自动解决冲突时停止，选择处理方式重试后自动提交推送", async () => {
+  it("合并失败保留本地提交，重试只合并远程而不重复生成或提交", async () => {
     backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteUrl: "https://example.com/repo.git", hasUncommittedChanges: true, changedFiles: [{ path: "src/a.ts", indexStatus: "M", worktreeStatus: " ", label: "已暂存" }] }));
-    backend.smartSyncGitRepository.mockResolvedValueOnce({ message: "已恢复到同步前状态", output: "", conflictsResolved: false, conflict: { phase: "restore", files: ["src/a.ts"], aiBlockedFiles: [], reason: "AI 合并未完成" } });
+    backend.smartSyncGitRepository.mockResolvedValueOnce({ message: "本地提交已保留", expectedState: "abcdef123456:tree", output: "", conflictsResolved: false, conflict: { phase: "sync", files: ["src/a.ts"], aiBlockedFiles: [], reason: "AI 合并未完成" } });
     await renderView();
     await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
     await flushPromises();
     await wrapper.get('.git-changed-file-entry input[type="checkbox"]').setValue(true);
     await wrapper.get(".smart-commit-button").trigger("click");
     await flushPromises();
-    expect(wrapper.get(".smart-conflict-choice").text()).toContain("恢复本地修改时发生冲突");
-    expect(backend.generateCommitPlan).not.toHaveBeenCalled();
+    expect(wrapper.get(".smart-conflict-choice").text()).toContain("本地提交已保留");
+    expect(backend.generateCommitPlan).toHaveBeenCalledTimes(1);
+    expect(backend.commitGitPlanGroup).toHaveBeenCalledTimes(1);
     expect(backend.pushGitRepository).not.toHaveBeenCalled();
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteUrl: "https://example.com/repo.git" }));
     await wrapper.get(".smart-conflict-choice button").trigger("click");
     await flushPromises();
-    expect(backend.smartSyncGitRepository).toHaveBeenLastCalledWith(projectPath, ["src/a.ts"], "local", expect.any(Function));
+    expect(backend.smartSyncGitRepository).toHaveBeenLastCalledWith(projectPath, [], "local", expect.any(Function), "abcdef123456:tree");
+    expect(backend.generateCommitPlan).toHaveBeenCalledTimes(1);
     expect(wrapper.find(".smart-commit-review").exists()).toBe(false);
     expect(backend.commitGitPlanGroup).toHaveBeenCalledTimes(1);
     expect(backend.pushGitRepository).toHaveBeenCalledTimes(1);
@@ -417,9 +424,49 @@ describe("项目资产列表操作", () => {
     expect(backend.stageGitRepositoryChanges).not.toHaveBeenCalled();
   });
 
-  it("合并后没有新增修改时跳过 AI 和空提交，直接校验状态并推送", async () => {
+  it("新增文件先暂存，拉取冲突自动合并提交后使用最终状态推送", async () => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteUrl: "https://example.com/repo.git", hasUncommittedChanges: true, changedFiles: [{ path: "src/a.ts", indexStatus: "?", worktreeStatus: "?", label: "未跟踪" }] }));
+    backend.smartSyncGitRepository.mockImplementation(async (_path, _files, _strategy, progress) => {
+      expect(backend.commitGitPlanGroup).toHaveBeenCalledTimes(1);
+      expect(backend.pushGitRepository).not.toHaveBeenCalled();
+      progress({ phase: "sync", detail: "拉取远程" });
+      progress({ phase: "merge", detail: "AI 正在合并" });
+      progress({ phase: "commit", detail: "创建合并提交" });
+      return { message: "合并提交已完成", output: "", conflictsResolved: true, conflict: null, expectedState: "merged:merged-tree", stagedFiles: [] };
+    });
+    await renderView();
+    await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
+    await flushPromises();
+    vi.clearAllMocks();
+    await wrapper.get('.git-changed-file-entry input[type="checkbox"]').setValue(true);
+    await wrapper.get(".smart-commit-button").trigger("click");
+    await flushPromises();
+    const order = [backend.stageGitRepositoryChanges, backend.fetchGitRepository, backend.generateCommitPlan, backend.commitGitPlanGroup, backend.smartSyncGitRepository, backend.pushGitRepository].map((mock) => mock.mock.invocationCallOrder[0]);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(backend.stageGitRepositoryChanges).toHaveBeenCalledExactlyOnceWith(projectPath, ["src/a.ts"]);
+    expect(backend.pushGitRepository).toHaveBeenCalledExactlyOnceWith(projectPath, "merged:merged-tree");
+    expect(wrapper.get(".smart-commit-progress").classes()).toContain("completed");
+    expect(wrapper.get(".smart-commit-progress").text()).toContain("冲突已自动处理");
+  });
+
+  it("提交建议缺少状态凭证时不提交、不拉取", async () => {
     backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteUrl: "https://example.com/repo.git", hasUncommittedChanges: true, changedFiles: [{ path: "src/a.ts", indexStatus: "M", worktreeStatus: " ", label: "已暂存" }] }));
-    backend.smartSyncGitRepository.mockResolvedValue({ message: "远程已同步", output: "", conflictsResolved: true, conflict: null, reviewDiff: "+remote", reviewTruncated: false, expectedState: "head:tree", stagedFiles: [] });
+    backend.generateCommitPlan.mockResolvedValue({ groupingMode: "single", excludedFiles: [], groups: [{ status: "suggested", files: ["src/a.ts"] }] });
+    await renderView();
+    await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
+    await flushPromises();
+    await wrapper.get('.git-changed-file-entry input[type="checkbox"]').setValue(true);
+    await wrapper.get(".smart-commit-button").trigger("click");
+    await flushPromises();
+    expect(backend.commitGitPlanGroup).not.toHaveBeenCalled();
+    expect(backend.smartSyncGitRepository).not.toHaveBeenCalled();
+    expect(backend.pushGitRepository).not.toHaveBeenCalled();
+    expect(wrapper.get(".drawer-git-feedback").text()).toContain("无法校验");
+  });
+
+  it("本地提交后没有远程变更时不额外创建提交，校验状态后推送", async () => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteUrl: "https://example.com/repo.git", hasUncommittedChanges: true, changedFiles: [{ path: "src/a.ts", indexStatus: "M", worktreeStatus: " ", label: "已暂存" }] }));
+    backend.smartSyncGitRepository.mockResolvedValue({ message: "远程没有新提交", output: "", conflictsResolved: false, conflict: null, reviewDiff: "", reviewTruncated: false, expectedState: "abcdef123456:tree", stagedFiles: [] });
     await renderView();
     await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
     await flushPromises();
@@ -427,9 +474,10 @@ describe("项目资产列表操作", () => {
     await wrapper.get('.git-changed-file-entry input[type="checkbox"]').setValue(true);
     await wrapper.get(".smart-commit-button").trigger("click");
     await flushPromises();
-    expect(backend.generateCommitPlan).not.toHaveBeenCalled();
-    expect(backend.commitGitPlanGroup).not.toHaveBeenCalled();
-    expect(backend.pushGitRepository).toHaveBeenCalledExactlyOnceWith(projectPath, "head:tree");
+    expect(backend.generateCommitPlan).toHaveBeenCalledTimes(1);
+    expect(backend.commitGitPlanGroup).toHaveBeenCalledTimes(1);
+    expect(backend.pushGitRepository).toHaveBeenCalledExactlyOnceWith(projectPath, "abcdef123456:tree");
+    expect(wrapper.get(".smart-commit-progress").text()).toContain("无需新增合并提交");
     expect(wrapper.find(".smart-commit-review").exists()).toBe(false);
     expect(wrapper.get(".smart-commit-progress").classes()).toContain("completed");
   });
@@ -444,13 +492,14 @@ describe("项目资产列表操作", () => {
     await wrapper.get(".smart-commit-button").trigger("click");
     await flushPromises();
     expect(backend.commitGitPlanGroup).not.toHaveBeenCalled();
+    expect(backend.smartSyncGitRepository).not.toHaveBeenCalled();
     expect(backend.pushGitRepository).not.toHaveBeenCalled();
     expect(wrapper.get(".smart-commit-progress").classes()).toContain("failed");
   });
 
-  it.each(["generate", "commit", "push"])("智能提交在 %s 失败后停止，不重试提交或继续推送", async (phase) => {
+  it.each(["generate", "commit", "sync", "push"])("智能提交在 %s 失败后停止，不重试提交或继续推送", async (phase) => {
     backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteUrl: "https://example.com/repo.git", hasUncommittedChanges: true, changedFiles: [{ path: "src/a.ts", indexStatus: "M", worktreeStatus: " ", label: "已暂存" }] }));
-    const target = phase === "generate" ? backend.generateCommitPlan : phase === "commit" ? backend.commitGitPlanGroup : backend.pushGitRepository;
+    const target = phase === "generate" ? backend.generateCommitPlan : phase === "commit" ? backend.commitGitPlanGroup : phase === "sync" ? backend.smartSyncGitRepository : backend.pushGitRepository;
     target.mockRejectedValueOnce(new Error("校验失败，操作已停止"));
     await renderView();
     await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
@@ -459,6 +508,7 @@ describe("项目资产列表操作", () => {
     await wrapper.get(".smart-commit-button").trigger("click");
     await flushPromises();
     expect(backend.commitGitPlanGroup).toHaveBeenCalledTimes(phase === "generate" ? 0 : 1);
+    expect(backend.smartSyncGitRepository).toHaveBeenCalledTimes(phase === "generate" || phase === "commit" ? 0 : 1);
     expect(backend.pushGitRepository).toHaveBeenCalledTimes(phase === "push" ? 1 : 0);
     expect(wrapper.get(".smart-commit-progress").classes()).toContain("failed");
     expect(wrapper.get(".drawer-git-feedback").text()).toContain("校验失败");

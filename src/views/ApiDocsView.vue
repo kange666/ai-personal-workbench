@@ -62,6 +62,18 @@ const testTokenConfigured = ref(false);
 const testConfig = reactive<ApiTestConfigUpdate>({ sourceId:"", baseUrl:"", tokenHeader:"Authorization", token:"" });
 const testingEndpointId = ref("");
 const testResult = ref<ApiTestResult|null>(null);
+const testResponseWarning = computed(() => {
+  const result = testResult.value;
+  if (!result) return "";
+  const isHtml = result.contentType.toLowerCase().includes("text/html") ||
+    (typeof result.responseData === "string" && /^\s*(<!doctype html|<html[\s>])/i.test(result.responseData));
+  const responses = asObject(selected.value?.document.responses);
+  const response = asObject(responses[String(result.status)] ?? responses[`${Math.floor(result.status / 100)}XX`] ?? responses.default);
+  if (isHtml && !("text/html" in asObject(response.content))) {
+    return "收到的是 HTML 页面，尚未确认取得预期接口数据。请检查项目请求基地址是否包含 API 前缀，以及登录或代理配置。";
+  }
+  return "";
+});
 const testPreviewOpen = ref(false);
 const testPreviewLoading = ref(false);
 const testPreview = ref<ApiTestPreview|null>(null);
@@ -328,7 +340,11 @@ async function sendEndpointTest() {
   testingEndpointId.value=testPreview.value.endpointId;error.value="";message.value="";testPreviewError.value="";
   try {
     testResult.value=await executeApiEndpointTest({endpointId:testPreview.value.endpointId,url:testPreviewUrl.value.trim(),body,confirmed:testPreviewConfirmed.value});
-    testPreviewOpen.value=false;message.value=`接口测试完成：HTTP ${testResult.value.status}，耗时 ${testResult.value.elapsedMs} ms。`;
+    testPreviewOpen.value=false;
+    const summary=`收到响应：HTTP ${testResult.value.status}，耗时 ${testResult.value.elapsedMs} ms。`;
+    if(testResponseWarning.value) error.value=`${summary}${testResponseWarning.value}`;
+    else if(!testResult.value.success) error.value=summary;
+    else message.value=summary;
   } catch(cause){testPreviewError.value=String(cause);}
   finally{testingEndpointId.value="";}
 }
@@ -377,7 +393,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown",closeProjectSwi
           <header><div><span class="api-method large" :class="selected.method.toLowerCase()">{{ selected.method }}</span><div><h2>{{ selected.title }}</h2><button class="api-path-copy" title="复制接口路径" @click="copyPath"><code>{{ selected.path }}</code><span>复制</span></button></div></div><div><button class="button secondary small" :disabled="testingEndpointId===selected.id || testPreviewLoading" @click="runEndpointTest">{{ testPreviewLoading ? "生成预览…" : testingEndpointId===selected.id ? "测试中…" : "接口测试" }}</button><button class="button secondary small" @click="copyRequestCode">复制接口代码</button><button class="button primary small" @click="copyMarkdown">复制 Markdown</button></div></header>
           <div class="api-detail-scroll">
             <section class="api-summary"><p>{{ selected.description || "暂无接口说明。" }}</p><div><span v-for="item in selected.tags" :key="item">{{ item }}</span><span v-if="selected.operationId">{{ selected.operationId }}</span><span v-if="selected.deprecated" class="danger">已弃用</span></div></section>
-            <section v-if="testResult" class="api-test-result" :class="{success:testResult.success,error:!testResult.success}"><header><div><h3>接口测试结果</h3><p><b>HTTP {{ testResult.status }}</b> {{ testResult.statusText }} · {{ testResult.elapsedMs }} ms</p></div><span>{{ testResult.method }} {{ testResult.url }}</span></header><div class="api-test-result-grid"><article><b>自动生成的请求数据</b><pre>{{ pretty(testResult.requestData) }}</pre></article><article><b>实际响应数据</b><small v-if="testResult.contentType">{{ testResult.contentType }}</small><pre>{{ testResult.responseData===null ? '（空响应）' : pretty(testResult.responseData) }}</pre><p v-if="testResult.truncated">响应超过 1 MB，当前只展示前 1 MB。</p></article></div></section>
+            <section v-if="testResult" class="api-test-result" :class="{success:testResult.success && !testResponseWarning,error:!testResult.success || !!testResponseWarning}"><header><div><h3>接口测试结果</h3><p><b>HTTP {{ testResult.status }}</b> {{ testResult.statusText }} · {{ testResult.elapsedMs }} ms</p></div><span>{{ testResult.method }} {{ testResult.url }}</span></header><p v-if="testResponseWarning" role="alert">{{ testResponseWarning }}</p><div class="api-test-result-grid"><article><b>请求数据</b><pre>{{ pretty(testResult.requestData) }}</pre></article><article><b>实际响应数据</b><small v-if="testResult.contentType">{{ testResult.contentType }}</small><pre>{{ testResult.responseData===null ? '（空响应）' : pretty(testResult.responseData) }}</pre><p v-if="testResult.truncated">响应超过 1 MB，当前只展示前 1 MB。</p></article></div></section>
             <section><h3>请求参数</h3><div class="api-table-wrap"><table><thead><tr><th>名称</th><th>位置</th><th>类型</th><th>必填</th><th>说明</th><th>示例</th></tr></thead><tbody><tr v-for="(item,index) in parameters" :key="index"><td><code>{{ asText(item.name) }}</code></td><td>{{ asText(item.in) }}</td><td>{{ schemaType(asObject(item.schema)) }}</td><td>{{ asBoolean(item.required) ? '是' : '否' }}</td><td>{{ asText(item.description) || '—' }}</td><td><pre>{{ parameterExample(item) || '—' }}</pre></td></tr><tr v-if="!parameters.length"><td colspan="6">无请求参数</td></tr></tbody></table></div></section>
             <section><h3>请求体 <small v-if="asBoolean(requestBody.required)">必填</small></h3><article v-for="item in requestContent" :key="item.contentType" class="api-schema-card"><b>{{ item.contentType }}</b><div class="api-table-wrap"><table><thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th><th>示例</th></tr></thead><tbody><tr v-for="row in schemaRows(item.body.schema)" :key="row.name"><td><code>{{ row.name }}</code></td><td>{{ row.type }}</td><td>{{ row.required ? '是':'否' }}</td><td>{{ row.description || '—' }}</td><td><pre>{{ row.example || '—' }}</pre></td></tr><tr v-if="!schemaRows(item.body.schema).length"><td colspan="5">未声明字段结构</td></tr></tbody></table></div><details v-if="item.body.example"><summary>请求示例</summary><pre>{{ pretty(item.body.example) }}</pre></details></article><p v-if="!requestContent.length">无请求体。</p></section>
             <section><h3>响应</h3><article v-for="item in responses" :key="item.status" class="api-response-card"><header><b>{{ item.status }}</b><span>{{ asText(item.response.description) || '未填写说明' }}</span></header><div v-for="content in responseContents(item.response)" :key="content.contentType" class="api-schema-card"><b>{{ content.contentType }}</b><div class="api-table-wrap"><table><thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th><th>示例</th></tr></thead><tbody><tr v-for="row in schemaRows(content.body.schema)" :key="row.name"><td><code>{{ row.name }}</code></td><td>{{ row.type }}</td><td>{{ row.required ? '是':'否' }}</td><td>{{ row.description || '—' }}</td><td><pre>{{ row.example || '—' }}</pre></td></tr><tr v-if="!schemaRows(content.body.schema).length"><td colspan="5">未声明字段结构</td></tr></tbody></table></div><details v-if="content.body.example || content.body.examples"><summary>响应示例</summary><pre>{{ pretty(content.body.example || content.body.examples) }}</pre></details></div></article><p v-if="!responses.length">暂无响应定义。</p></section>

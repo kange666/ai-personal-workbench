@@ -142,7 +142,7 @@ const discardConfirmationOpen = ref(false);
 const smartCommitRunning = ref(false);
 const smartCommitSteps = ref<SmartCommitStep[]>([]);
 const smartCommitMessage = ref("");
-const smartConflict = ref<{ path: string; files: string[]; conflict: GitSmartConflict } | null>(null);
+const smartConflict = ref<{ path: string; files: string[]; expectedState: string; conflict: GitSmartConflict } | null>(null);
 const form = reactive<RepositoryAssetUpdate>({
   path: "", category: "待确认", purpose: "", technologyStack: "", mainModules: "",
   installCommand: "", startCommand: "", testCommand: "", buildCommand: "", commandSource: "",
@@ -781,21 +781,20 @@ function setSmartCommitStep(index: number, status: SmartCommitStep["status"], de
 }
 async function runSmartCommit(strategy: "ai" | "local" | "remote" = "ai") {
   if (!selected.value || loading.value || smartCommitRunning.value) return;
-  if (smartConflict.value?.path === selected.value.path) {
-    selectedStageFiles.value = smartConflict.value.files.filter((file) => gitStatus.value?.changedFiles.some((changed) => changed.path === file));
-  }
-  if (!canSmartCommit.value) { error.value = smartCommitBlockedReason.value; return; }
+  const resume = smartConflict.value?.path === selected.value.path ? smartConflict.value : null;
+  if (!resume && !canSmartCommit.value) { error.value = smartCommitBlockedReason.value; return; }
   const path = selected.value.path;
   const files = [...(smartConflict.value?.path === path ? smartConflict.value.files : selectedStageFiles.value)];
   smartConflict.value = null;
-  smartCommitMessage.value = "";
+  if (!resume) smartCommitMessage.value = "";
   smartCommitSteps.value = [
     { id: "stage", label: "添加选中文件到暂存区", status: "pending", detail: "" },
     { id: "fetch", label: "更新远程状态", status: "pending", detail: "" },
-    { id: "pull", label: "同步远程代码", status: "pending", detail: "" },
-    { id: "restore", label: "恢复本地修改与处理冲突", status: "pending", detail: "" },
     { id: "plan", label: "AI 生成提交信息", status: "pending", detail: "" },
-    { id: "commit", label: "提交代码", status: "pending", detail: "" },
+    { id: "commit", label: "提交本地代码", status: "pending", detail: "" },
+    { id: "pull", label: "拉取远程代码", status: "pending", detail: "" },
+    { id: "merge", label: "AI 智能合并冲突", status: "pending", detail: "" },
+    { id: "mergeCommit", label: "完成合并提交", status: "pending", detail: "" },
     { id: "push", label: "推送远程", status: "pending", detail: "" },
   ];
   smartCommitRunning.value = true; loading.value = true; error.value = ""; message.value = "";
@@ -803,71 +802,81 @@ async function runSmartCommit(strategy: "ai" | "local" | "remote" = "ai") {
   try {
     setSmartCommitStep(0, "running", `${files.length} 个文件`);
     const stageable = gitStatus.value?.changedFiles.filter((file) => files.includes(file.path) && hasUnstagedFile(file) && !hasStagedFile(file)).map((file) => file.path) ?? [];
-    if (stageable.length) {
+    if (!resume && stageable.length) {
       const result = await stageGitRepositoryChanges(path, stageable);
       recordGitOperation("智能提交 · 添加文件", "success", result.message, result.output);
     }
-    setSmartCommitStep(0, "done", stageable.length ? `已暂存 ${stageable.length} 个文件` : "所选文件已在暂存区");
+    setSmartCommitStep(0, "done", resume ? "本地修改已提交，无需再次暂存" : stageable.length ? `已暂存 ${stageable.length} 个文件` : "所选文件已在暂存区");
 
     currentStep = 1; setSmartCommitStep(1, "running");
     const fetchResult = await fetchGitRepository(path);
     recordGitOperation("智能提交 · 更新远程", "success", fetchResult.message, fetchResult.output);
     setSmartCommitStep(1, "done", fetchResult.message);
 
-    currentStep = 2; setSmartCommitStep(2, "running", "正在保护本地修改并同步远程");
-    const syncResult = await smartSyncGitRepository(path, files, strategy, (progress) => {
-      if (progress.phase === "restore") {
-        setSmartCommitStep(2, "done", "远程同步完成");
-        currentStep = 3;
-      }
-      setSmartCommitStep(currentStep, "running", progress.detail);
-    });
-    if (syncResult.conflict) {
-      currentStep = syncResult.conflict.phase === "restore" ? 3 : 2;
-      if (currentStep === 3) setSmartCommitStep(2, "done", "同步后已随恢复操作回到原状态");
-      setSmartCommitStep(currentStep, "waiting", syncResult.message);
-      smartConflict.value = { path, files, conflict: syncResult.conflict };
-      recordGitOperation("智能提交 · 冲突待处理", "error", syncResult.message, syncResult.output);
-      return;
-    }
-    recordGitOperation("智能提交 · 拉取与合并", "success", syncResult.message, syncResult.output);
-    setSmartCommitStep(2, "done", syncResult.message);
-    setSmartCommitStep(3, "done", syncResult.conflictsResolved ? "冲突已自动处理" : "本地修改已恢复");
-
-    currentStep = 4; setSmartCommitStep(4, "running");
-    let pushExpectedState = syncResult.expectedState;
-    if (!syncResult.stagedFiles.length) {
-      setSmartCommitStep(4, "done", "所选修改已与远程一致，无需新增提交");
-      setSmartCommitStep(5, "done", "无需新增提交");
+    let localExpectedState = resume?.expectedState ?? "";
+    if (resume) {
+      setSmartCommitStep(2, "done", "沿用已生成信息");
+      setSmartCommitStep(3, "done", "本地提交已保留，不重复提交");
     } else {
+      currentStep = 2; setSmartCommitStep(2, "running");
       const plan = await generateCommitPlan(path, "single", true);
       if (plan.excludedFiles.length) throw new Error(`以下所选文件因敏感信息、二进制或生成内容未纳入提交：${plan.excludedFiles.join("、")}`);
       const groups = plan.groups.filter((item) => item.status !== "committed");
       if (plan.groupingMode !== "single" || groups.length !== 1) throw new Error("没有生成单次完整提交建议。");
       const group = groups[0];
       const planned = new Set(group.files.map(normalizeGitPath));
-      const staged = syncResult.stagedFiles.map(normalizeGitPath);
-      if (planned.size !== staged.length || staged.some((file) => !planned.has(file)) || staged.some((file) => !files.map(normalizeGitPath).includes(file))) throw new Error("提交建议与所选暂存范围不一致，请重新检查。");
+      const selectedFiles = files.map(normalizeGitPath);
+      if (planned.size !== selectedFiles.length || selectedFiles.some((file) => !planned.has(file))) throw new Error("提交建议与所选暂存范围不一致，请重新检查。");
+      if (!plan.expectedState) throw new Error("无法校验生成时的暂存内容，已停止自动提交。");
       applyGeneratedCommitPlan(plan, "");
       smartCommitMessage.value = manualCommitMessage.value;
       commitGroupingMode.value = "single";
-      setSmartCommitStep(4, "done", "完整提交信息已生成");
+      setSmartCommitStep(2, "done", "完整提交信息已生成");
 
-      currentStep = 5; setSmartCommitStep(5, "running");
-      const result = await commitGitPlanGroup(path, group.id, smartCommitMessage.value, syncResult.expectedState);
+      currentStep = 3; setSmartCommitStep(3, "running");
+      const result = await commitGitPlanGroup(path, group.id, smartCommitMessage.value, plan.expectedState);
       recordGitOperation("智能提交 · 提交代码", "success", result.message, result.output);
-      setSmartCommitStep(5, "done", result.commitHash?.slice(0, 7) || result.message);
+      setSmartCommitStep(3, "done", result.commitHash?.slice(0, 7) || result.message);
       postCommitPrompt.value = { commitHash: result.commitHash, message: smartCommitMessage.value.split("\n")[0] };
       manualCommitMessage.value = "";
-      // 提交只改变 HEAD，暂存树应保持一致。推送前再次校验，避免夹带并发提交或暂存修改。
-      const stagedTree = syncResult.expectedState.split(":")[1];
-      if (!result.commitHash || !stagedTree) throw new Error("提交完成，但无法校验推送范围，已停止自动推送。");
-      pushExpectedState = `${result.commitHash}:${stagedTree}`;
+      // 拉取前再次校验本地提交和暂存树，避免夹带并发修改。
+      const stagedTree = plan.expectedState.split(":")[1];
+      if (!result.commitHash || !stagedTree) throw new Error("提交完成，但无法校验拉取范围，已停止自动拉取。");
+      localExpectedState = `${result.commitHash}:${stagedTree}`;
     }
-    currentStep = 6; setSmartCommitStep(6, "running");
-    const pushed = await pushGitRepository(path, pushExpectedState);
+    currentStep = 4; setSmartCommitStep(4, "running", "本地修改已提交，正在同步远程");
+    const syncResult = await smartSyncGitRepository(path, [], strategy, (progress) => {
+      if (progress.phase === "merge") {
+        setSmartCommitStep(4, "done", "检测到远程冲突");
+        currentStep = 5;
+      } else if (progress.phase === "commit") {
+        setSmartCommitStep(5, "done", "冲突已解决");
+        currentStep = 6;
+      } else if (progress.phase === "restore") {
+        setSmartCommitStep(4, "done", "远程代码已同步");
+        setSmartCommitStep(5, "done", currentStep >= 5 ? "冲突已解决" : "无冲突，无需 AI 合并");
+        currentStep = 6;
+      }
+      setSmartCommitStep(currentStep, "running", progress.detail);
+    }, localExpectedState);
+    if (syncResult.conflict) {
+      currentStep = 5;
+      setSmartCommitStep(4, "done", "检测到远程冲突");
+      setSmartCommitStep(5, "waiting", syncResult.message);
+      setSmartCommitStep(6, "pending", "等待冲突解决");
+      smartConflict.value = { path, files, expectedState: syncResult.expectedState, conflict: syncResult.conflict };
+      recordGitOperation("智能提交 · 冲突待处理", "error", syncResult.message, syncResult.output);
+      return;
+    }
+    recordGitOperation("智能提交 · 拉取与合并", "success", syncResult.message, syncResult.output);
+    setSmartCommitStep(4, "done", syncResult.message);
+    setSmartCommitStep(5, "done", syncResult.conflictsResolved ? "冲突已自动处理" : "无冲突，无需 AI 合并");
+    setSmartCommitStep(6, "done", syncResult.expectedState.split(":")[0] === localExpectedState.split(":")[0] ? "无需新增合并提交" : "远程同步及必要的合并提交已完成");
+    if (!syncResult.expectedState || syncResult.stagedFiles.length) throw new Error("同步后暂存状态异常，已停止自动推送。");
+    currentStep = 7; setSmartCommitStep(7, "running");
+    const pushed = await pushGitRepository(path, syncResult.expectedState);
     recordGitOperation("智能提交 · 推送远程", "success", pushed.message, pushed.output);
-    setSmartCommitStep(6, "done", pushed.message);
+    setSmartCommitStep(7, "done", pushed.message);
     message.value = "智能提交完成，已推送远程。";
     manualCommitMessage.value = "";
     postCommitPrompt.value = null;
@@ -1011,7 +1020,7 @@ onBeforeUnmount(() => {
         </section>
         <section v-if="smartConflict" class="git-safety-panel smart-conflict-choice">
           <h3>{{ smartConflict.conflict.phase === 'restore' ? '恢复本地修改时发生冲突' : '同步远程时发生冲突' }}</h3>
-          <p>自动合并未完成，已恢复到同步前状态，未提交推送。可选择处理方式重试，成功后会自动提交推送。</p>
+          <p>自动合并未完成，本地提交已保留，未推送。重试只处理远程合并，不重复提交本地修改。</p>
           <p v-for="file in smartConflict.conflict.files" :key="file"><code>{{ file }}</code></p>
           <p class="pull-conflict-warning">{{ smartConflict.conflict.reason }}</p>
           <div>
@@ -1034,7 +1043,7 @@ onBeforeUnmount(() => {
             <button class="button smart-commit-button" :disabled="!canSmartCommit" :title="smartCommitBlockedReason || `智能提交 ${selectedStageFiles.length} 个文件`" @click="runSmartCommit()">{{ smartCommitRunning ? "智能提交中…" : "智能提交" }}</button>
           </div>
           <div v-if="discardConfirmationOpen" class="discard-confirmation" role="alert"><div><b>确认放弃 {{ selectedStageFiles.length }} 个文件的修改？</b><span>这会同时清除所选文件的已暂存和未暂存内容，新文件会被删除，操作无法撤销。</span></div><button class="button secondary small" @click="discardConfirmationOpen = false">取消</button><button class="button danger-button small" @click="discardSelectedFiles">确认放弃</button></div>
-          <small class="git-action-help" title="智能提交仅处理选中文件，自动合并、生成提交信息、提交并推送；失败时停止。">智能提交会自动生成、提交并推送，无需再次确认</small>
+          <small class="git-action-help" title="仅提交选中文件：更新远程 → 生成信息 → 本地提交 → 拉取 → AI 合并冲突 → 合并提交 → 推送；失败时停止。">智能提交先提交本地修改，再拉取合并并推送，无需再次确认</small>
           <small v-if="remoteRefreshNote" class="remote-refresh-note" :class="{ updates: gitStatus.behind > 0 }">{{ remoteRefreshNote }}</small>
           <details v-if="gitStatus.changedFiles.length" class="git-changed-files" open>
             <summary>查看 {{ gitStatus.changedFiles.length }} 个变更文件</summary>

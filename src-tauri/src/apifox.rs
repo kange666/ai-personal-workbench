@@ -1514,9 +1514,7 @@ fn generated_value(schema: &Value, name: &str, depth: usize) -> Value {
                 result.extend(object);
             }
         }
-        if !result.is_empty() {
-            return Value::Object(result);
-        }
+        return Value::Object(result);
     }
     let inferred_type = if schema
         .get("properties")
@@ -1539,22 +1537,36 @@ fn generated_value(schema: &Value, name: &str, depth: usize) -> Value {
                 .map(|properties| {
                     properties
                         .iter()
-                        .filter(|(_, value)| {
-                            !value
-                                .get("readOnly")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false)
+                        .filter(|(key, value)| {
+                            schema
+                                .get("required")
+                                .and_then(Value::as_array)
+                                .is_some_and(|required| {
+                                    required
+                                        .iter()
+                                        .any(|name| name.as_str() == Some(key.as_str()))
+                                })
+                                && !value
+                                    .get("readOnly")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false)
                         })
                         .map(|(key, value)| (key.clone(), generated_value(value, key, depth + 1)))
                         .collect()
                 })
                 .unwrap_or_default(),
         ),
-        "array" => Value::Array(vec![generated_value(
-            schema.get("items").unwrap_or(&Value::Null),
-            name,
-            depth + 1,
-        )]),
+        "array" => Value::Array(
+            (0..schema
+                .get("minItems")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(64))
+                .map(|_| {
+                    generated_value(schema.get("items").unwrap_or(&Value::Null), name, depth + 1)
+                })
+                .collect(),
+        ),
         "integer" => json!(1),
         "number" => json!(1.0),
         "boolean" => json!(true),
@@ -1644,6 +1656,10 @@ fn prepare_api_test(
         if name.is_empty() || sensitive_name(name) {
             continue;
         }
+        // Path 必须填充；其余位置只生成文档明确声明的必填参数。
+        if location != "path" && parameter.get("required").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
         let value = generated_value(parameter.get("schema").unwrap_or(&Value::Null), name, 0);
         let text = scalar_text(&value);
         preview.insert(format!("{location}.{name}"), value.clone());
@@ -1670,7 +1686,7 @@ fn prepare_api_test(
         path.trim_start_matches('/')
     ))
     .map_err(|_| "自动生成的接口测试地址无效。".to_string())?;
-    {
+    if !query_values.is_empty() {
         let mut pairs = url.query_pairs_mut();
         for (name, value) in query_values {
             pairs.append_pair(&name, &value);
@@ -1696,6 +1712,13 @@ fn prepare_api_test(
         .document
         .pointer("/requestBody/content")
         .and_then(Value::as_object)
+        .filter(|_| {
+            detail
+                .document
+                .pointer("/requestBody/required")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
     {
         let selected = content
             .get_key_value("application/json")
@@ -2848,10 +2871,14 @@ mod tests {
                 "servers":[{"url":"https://api.example.com/v1"}],
                 "parameters":[
                     {"name":"id","in":"path","schema":{"type":"integer"}},
-                    {"name":"email","in":"query","schema":{"type":"string"}},
+                    {"name":"email","in":"query","required":true,"schema":{"type":"string"}},
+                    {"name":"status","in":"query","schema":{"type":"string"}},
+                    {"name":"X-Optional","in":"header","schema":{"type":"string"}},
+                    {"name":"session","in":"cookie","schema":{"type":"string"}},
                     {"name":"Authorization","in":"header","schema":{"type":"string"}}
                 ],
-                "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{
+                "requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["userName","mobile","enabled","age"],"properties":{
+                    "optionalNote":{"type":"string"},
                     "userName":{"type":"string"},"mobile":{"type":"string"},"enabled":{"type":"boolean"},"age":{"type":"integer"}
                 }}}}}
             }),
@@ -2871,6 +2898,14 @@ mod tests {
         assert_eq!(prepared.body.as_ref().unwrap()["mobile"], "13800000000");
         assert_eq!(prepared.body.as_ref().unwrap()["enabled"], true);
         assert_eq!(prepared.body.as_ref().unwrap()["age"], 1);
+        assert!(prepared
+            .body
+            .as_ref()
+            .unwrap()
+            .get("optionalNote")
+            .is_none());
+        assert!(!prepared.headers.contains_key("X-Optional"));
+        assert!(!prepared.headers.contains_key(COOKIE));
         assert_eq!(
             prepared.headers.get("authorization").unwrap(),
             "Bearer real-secret"
@@ -2917,6 +2952,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(applied.body.unwrap()["userName"], "修改后");
+        let mut optional_detail = detail.clone();
+        optional_detail.document["requestBody"]["required"] = json!(false);
+        optional_detail.document["parameters"] = json!([
+            {"name":"id","in":"path","schema":{"type":"integer"}},
+            {"name":"status","in":"query","schema":{"type":"string"}}
+        ]);
+        let minimal = prepare_api_test(&optional_detail, &config, None).unwrap();
+        assert_eq!(minimal.url.as_str(), "https://api.example.com/v1/users/1");
+        assert_eq!(minimal.request_data, json!({"path.id":1}));
+        assert!(minimal.body.is_none());
+        assert!(minimal.content_type.is_empty());
+    }
+
+    #[test]
+    fn generated_request_body_only_includes_nested_required_fields() {
+        let schema = json!({"type":"object","required":["profile","items","readonly"],"properties":{
+            "profile":{"type":"object","required":["name"],"properties":{"name":{"type":"string"},"status":{"type":"string"}}},
+            "items":{"type":"array","items":{"type":"integer"}},
+            "readonly":{"type":"string","readOnly":true},
+            "extra":{"type":"string"}
+        }});
+        assert_eq!(
+            generated_value(&schema, "body", 0),
+            json!({"profile":{"name":"自动测试名称"},"items":[]})
+        );
+        assert_eq!(
+            generated_value(
+                &json!({"type":"array","minItems":2,"items":{"type":"integer"}}),
+                "items",
+                0
+            ),
+            json!([1, 1])
+        );
+        assert_eq!(
+            generated_value(
+                &json!({"allOf":[{"type":"object","properties":{"optional":{"type":"string"}}}]}),
+                "body",
+                0
+            ),
+            json!({})
+        );
     }
 
     #[test]
