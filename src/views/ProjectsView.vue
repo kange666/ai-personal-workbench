@@ -242,7 +242,8 @@ const selectedRuntime = computed<RunningProjectProcess | null>(() => {
     errorMessage: selected.value.runtimeError,
   } : null;
 });
-const mergeOptions = computed(() => gitStatus.value?.branches.filter((branch) => branch !== gitStatus.value?.currentBranch) ?? []);
+const mergeOptions = computed(() => gitStatus.value?.remoteBranches ?? []);
+const gitBranchBlocked = computed(() => loading.value || autoFetchingRemote.value || !gitStatus.value || gitStatus.value.hasUncommittedChanges || gitStatus.value.mergeInProgress);
 
 function healthClass(value: string) { return value === "健康" ? "healthy" : value === "警告" ? "warning" : value === "失败" ? "failed" : "unknown"; }
 function hasStagedFile(file: GitChangedFile) { return file.indexStatus !== " " && file.indexStatus !== "?"; }
@@ -370,11 +371,11 @@ async function loadGitStatus(path: string) {
   const changedPaths = new Set(gitStatus.value.changedFiles.map((file) => file.path));
   for (const path of Object.keys(fileDiffs)) if (!changedPaths.has(path)) delete fileDiffs[path];
   switchBranch.value = gitStatus.value.currentBranch;
-  mergeBranch.value = gitStatus.value.branches.find((branch) => branch !== gitStatus.value?.currentBranch) ?? "";
+  mergeBranch.value = "";
   credentialUsername.value = gitStatus.value.credential.username || "lzsk";
 }
 async function autoFetchRemoteStatus(path: string) {
-  if (!gitStatus.value?.remoteUrl || autoFetchingRemote.value) return;
+  if (!gitStatus.value || (!gitStatus.value.remoteUrl && !gitStatus.value.remoteBranches?.length) || autoFetchingRemote.value) return;
   autoFetchingRemote.value = true;
   remoteRefreshNote.value = "正在自动更新远程状态…";
   try {
@@ -515,7 +516,16 @@ async function refreshBranchChoices() {
   const requestId = ++branchRequestId;
   branchLoading.value = true; branchStatus.value = null; branchError.value = "";
   try {
-    const status = await getGitRepositoryStatus(path);
+    let status = await getGitRepositoryStatus(path);
+    if (requestId !== branchRequestId) return;
+    if (status.remoteUrl || status.remoteBranches?.length) {
+      try {
+        await fetchGitRepository(path);
+        status = await getGitRepositoryStatus(path);
+      } catch (cause) {
+        if (requestId === branchRequestId) branchError.value = `更新远程失败，以下为本地已知分支：${String(cause)}`;
+      }
+    }
     if (requestId !== branchRequestId) return;
     branchStatus.value = status;
     applyBranchStatus(status);
@@ -549,8 +559,6 @@ async function selectProjectBranch(branch: string) {
     if (branch !== status.currentBranch) {
       const result = await switchGitRepositoryBranch(path, branch);
       message.value = result.message; error.value = "";
-      const item = assets.value.find((asset) => asset.path === path);
-      if (item) item.defaultBranch = branch;
       await load();
     }
     branchSwitching.value = false;
@@ -952,7 +960,7 @@ onBeforeUnmount(() => {
               <td><button class="pin-button" :class="{ active: item.isPinned }" :title="item.isPinned ? '取消置顶' : '置顶项目'" @click.stop="togglePin(item)">{{ item.isPinned ? "★" : "☆" }}</button></td>
               <td><b>{{ item.name }}</b><small>{{ item.path }}</small></td>
               <td><button class="category-button" title="点击修改分类" @click.stop="openCategoryEditor(item)">{{ item.category }}</button><small>{{ projectDescription(item) }}</small></td>
-              <td><button class="branch-picker-trigger" :title="`${item.defaultBranch || '无分支'} · 点击选择本地分支，仅工作区干净时可切换`" :aria-label="`切换 ${item.name} 的分支`" aria-haspopup="dialog" @click.stop="openBranchPicker(item, $event)"><span>{{ item.defaultBranch || "无分支" }}</span><svg class="branch-picker-chevron" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><small v-if="branchSyncSummary(item)" class="branch-sync" :class="{ behind: item.behindCount > 0 }">{{ branchSyncSummary(item) }}</small></td>
+              <td><button class="branch-picker-trigger" :title="`${item.defaultBranch || '无分支'} · 点击选择本地或远端分支，仅工作区干净时可切换`" :aria-label="`切换 ${item.name} 的分支`" aria-haspopup="dialog" @click.stop="openBranchPicker(item, $event)"><span>{{ item.defaultBranch || "无分支" }}</span><svg class="branch-picker-chevron" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><small v-if="branchSyncSummary(item)" class="branch-sync" :class="{ behind: item.behindCount > 0 }">{{ branchSyncSummary(item) }}</small></td>
               <td><div class="work-state"><i v-if="item.healthLevel !== '健康'" class="health-pill" :class="healthClass(item.healthLevel)">健康：{{ item.healthLevel }}</i><i v-if="item.changedFileCount" class="dirty-pill">{{ item.changedFileCount }} 个文件修改</i><small v-if="item.healthLevel === '健康' && !item.changedFileCount" class="clean-state">工作区干净</small></div></td>
               <td><div class="runtime-cell"><i class="runtime-pill" :class="runtimeClass(projectRuntimeStatus(item))">{{ runtimeLabel(projectRuntimeStatus(item)) }}</i><button v-if="projectRuntimeUrl(item)" class="runtime-address-button" :title="`使用默认浏览器打开 ${projectRuntimeUrl(item)}`" @click.stop="openRuntimeUrl(projectRuntimeUrl(item))">{{ projectRuntimeUrl(item) }}</button><small v-else class="runtime-address-empty">{{ isProjectRunning(item.path) ? '正在获取运行地址…' : '—' }}</small></div></td>
               <td><div class="asset-row-actions">
@@ -968,16 +976,21 @@ onBeforeUnmount(() => {
     </section>
     <div v-if="branchProject" class="activity-backdrop branch-picker-backdrop" @click.self="closeBranchPicker" @keydown.esc.stop.prevent="closeBranchPicker">
       <section ref="branchDialog" class="panel branch-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="branch-picker-title" tabindex="-1">
-        <header><div><h2 id="branch-picker-title">切换本地分支</h2><p>{{ branchProject.name }}</p></div><button class="icon-button" aria-label="关闭分支选择" :disabled="branchSwitching" @click="closeBranchPicker">×</button></header>
+        <header><div><h2 id="branch-picker-title">切换分支</h2><p>{{ branchProject.name }}</p></div><button class="icon-button" aria-label="关闭分支选择" :disabled="branchSwitching" @click="closeBranchPicker">×</button></header>
         <div class="branch-picker-body">
-          <p v-if="branchLoading" role="status">正在读取分支并检查工作区…</p>
+          <p v-if="branchLoading" role="status">正在更新远程分支并检查工作区…</p>
           <p v-if="branchError" class="branch-picker-warning" role="alert">{{ branchError }}</p>
           <template v-if="branchStatus && !branchLoading">
             <p v-if="branchStatus.mergeInProgress" class="branch-picker-warning" role="alert">当前有未完成的合并，请先完成或取消合并后再切换。</p>
             <p v-else-if="branchStatus.hasUncommittedChanges" class="branch-picker-warning" role="alert">工作区不干净，有未提交修改或未跟踪文件。请先提交或自行处理后再切换；不会自动暂存或丢弃修改。</p>
 
+            <p>本地分支</p>
             <div class="branch-options"><button v-for="branch in branchStatus.branches" :key="branch" class="branch-option" :class="{ current: branch === branchStatus.currentBranch }" :disabled="branchSwitching || branchSwitchBlocked || branch === branchStatus.currentBranch" @click="selectProjectBranch(branch)"><span>{{ branch }}</span><small>{{ branch === branchStatus.currentBranch ? '当前分支' : '切换' }}</small></button></div>
             <p v-if="!branchStatus.branches.length">暂无可切换的本地分支。</p>
+            <p>远端分支</p>
+            <div class="branch-options"><button v-for="branch in branchStatus.remoteBranches" :key="branch" class="branch-option remote-branch-option" :disabled="branchSwitching || branchSwitchBlocked" @click="selectProjectBranch(`refs/remotes/${branch}`)"><span>{{ branch }}</span><small>跟踪并切换</small></button></div>
+            <p v-if="!branchStatus.remoteBranches?.length">暂无远端分支。</p>
+            <p>远端分支会在本地建立跟踪分支；已有对应分支时只切换，不覆盖本地提交。</p>
           </template>
           <p v-if="branchSwitching" role="status">正在检查并切换分支，请稍候…</p>
         </div>
@@ -1075,7 +1088,12 @@ onBeforeUnmount(() => {
         </section>
         <section v-if="postCommitPrompt" class="post-commit-guide"><div><small>提交已完成</small><b>{{ postCommitPrompt.message }}</b><code>{{ postCommitPrompt.commitHash.slice(0, 7) }}</code><p>提交只保存在本地，确认后可以推送到远程。</p></div><div><button class="button secondary" @click="postCommitPrompt = null">继续修改</button><button class="button primary" :disabled="loading || !canPush" @click="pushAfterCommit">推送到远程</button></div></section>
         <section v-if="gitStatus" class="git-safety-panel"><header><div><h3>安全撤销</h3><p>这些操作不会删除提交历史；临时保存会包含未跟踪文件。</p></div></header><div><button class="button secondary" :disabled="loading || !gitStatus.hasUncommittedChanges || gitStatus.mergeInProgress" @click="saveChangesTemporarily">临时保存修改</button><button class="button secondary" :disabled="loading || gitStatus.hasUncommittedChanges || !gitStatus.hasWorkbenchStash" @click="restoreTemporaryChanges">恢复临时修改</button><button class="button secondary" :disabled="loading || !gitStatus.mergeInProgress" @click="abortCurrentMerge">取消当前合并</button></div><small>已暂存文件可在上方文件列表中逐个“移出暂存区”，本地修改仍会保留。</small></section>
-        <section v-if="gitStatus" class="git-branch-panel"><h3>分支操作</h3><div><label>切换本地分支<select v-model="switchBranch"><option v-for="branch in gitStatus.branches" :key="branch">{{ branch }}</option></select></label><button class="button secondary" :disabled="loading || switchBranch === gitStatus.currentBranch" @click="runGitAction('切换分支', () => switchGitRepositoryBranch(selected!.path, switchBranch))">切换</button></div><div><label>合并来源分支<select v-model="mergeBranch"><option value="" disabled>请选择分支</option><option v-for="branch in mergeOptions" :key="branch">{{ branch }}</option></select></label><button class="button secondary" :disabled="loading || !mergeBranch" @click="runGitAction('合并分支', () => mergeGitRepositoryBranch(selected!.path, mergeBranch))">合并</button></div></section>
+        <section v-if="gitStatus" class="git-branch-panel">
+          <h3>分支操作</h3>
+          <div><label>切换分支<select v-model="switchBranch" :disabled="gitBranchBlocked"><optgroup label="本地分支"><option v-for="branch in gitStatus.branches" :key="branch" :value="branch">{{ branch }}</option></optgroup><optgroup label="远端分支"><option v-for="branch in gitStatus.remoteBranches" :key="branch" :value="`refs/remotes/${branch}`">{{ branch }}</option></optgroup></select></label><button class="button secondary" :disabled="gitBranchBlocked || !switchBranch || switchBranch === gitStatus.currentBranch" @click="runGitAction('切换分支', () => switchGitRepositoryBranch(selected!.path, switchBranch))">切换</button></div>
+          <div><label>合并远端分支<select v-model="mergeBranch" :disabled="gitBranchBlocked"><option value="" disabled>{{ mergeOptions.length ? '请选择远端分支' : '暂无远端分支' }}</option><option v-for="branch in mergeOptions" :key="branch" :value="`refs/remotes/${branch}`">{{ branch }}</option></select></label><button class="button secondary" :disabled="gitBranchBlocked || !mergeBranch" @click="runGitAction('合并远端分支', () => mergeGitRepositoryBranch(selected!.path, mergeBranch))">合并</button></div>
+          <p class="git-empty">仅工作区干净时可操作。远端分支操作前自动更新远程；切换会建立或复用本地跟踪分支，不覆盖已有本地提交。合并使用远端最新代码，不自动推送。</p>
+        </section>
         <section class="git-credential-panel"><header><div><h3>默认 Git 凭据</h3><p>项目自身没有可用登录凭据时使用；只保存在 Windows 凭据库。</p></div><span :class="{ configured: gitStatus?.credential.configured }">{{ gitStatus?.credential.configured ? `已配置 · ${gitStatus.credential.username}` : "未配置" }}</span></header><div><input v-model="credentialUsername" placeholder="用户名（默认 lzsk）"><input v-model="credentialSecret" type="password" autocomplete="new-password" placeholder="密码或访问令牌"><button class="button primary" :disabled="loading || !credentialSecret" @click="saveCredential">保存凭据</button><button v-if="gitStatus?.credential.configured" class="button danger-button" @click="clearCredential">删除</button></div><small>GitHub 已不支持账号密码拉取，请在这里填写个人访问令牌；密码或令牌不会写入项目配置、数据库或日志。</small></section>
         <section class="git-history"><header><div><h3>提交历史与回退</h3><p>点击提交可查看文件和变更内容；回退会创建一条新的 revert 提交，不改写已有历史。</p></div></header><div v-for="item in details.commits" :key="item.hash" class="git-history-entry"><article><button class="git-history-toggle" :aria-expanded="isCommitExpanded(item.hash)" @click="toggleCommitFiles(item.hash)"><code>{{ item.hash.slice(0, 7) }}</code><span><b>{{ item.subject }}</b><small><span>提交人：{{ item.authorName || "未知" }}</span><time>{{ item.committedAt.slice(0, 10) }}</time></small></span><em>{{ isCommitFilesLoading(item.hash) ? "读取中…" : isCommitExpanded(item.hash) ? "收起" : "查看文件" }}</em></button><button class="text-button danger-text" :disabled="loading" @click.stop="runGitAction('回退提交', () => revertGitRepositoryCommit(selected!.path, item.hash))">回退</button></article><section v-if="isCommitExpanded(item.hash)" class="git-commit-files"><p v-if="isCommitFilesLoading(item.hash)" class="git-empty">正在读取本次提交的文件…</p><p v-else-if="!commitFiles[item.hash]?.length" class="git-empty">本次提交没有可显示的文件变更。</p><div v-for="file in commitFiles[item.hash]" :key="`${item.hash}:${file.path}`" class="git-commit-file-entry"><button class="git-commit-file-row" :aria-expanded="Boolean(commitFileDiffs[commitFileDiffKey(item.hash, file.path)])" @click="toggleCommitFileDiff(item.hash, file.path)"><i>{{ file.label }}</i><code>{{ file.path }}</code><span>{{ isCommitFileDiffLoading(item.hash, file.path) ? "读取中…" : commitFileDiffs[commitFileDiffKey(item.hash, file.path)] ? "收起差异" : "查看差异" }}</span></button><section v-if="commitFileDiffs[commitFileDiffKey(item.hash, file.path)]" class="git-diff-preview history-diff"><header><div><h4>提交文件差异</h4><code>{{ file.path }}</code></div><div class="diff-summary"><span class="addition">新增 {{ commitFileDiffs[commitFileDiffKey(item.hash, file.path)].additions }}</span><span class="modification">修改 {{ commitFileDiffs[commitFileDiffKey(item.hash, file.path)].modifications }}</span><span class="deletion">删除 {{ commitFileDiffs[commitFileDiffKey(item.hash, file.path)].deletions }}</span></div></header><p v-if="commitFileDiffs[commitFileDiffKey(item.hash, file.path)].truncated" class="diff-warning">文件差异过长，当前只显示前面部分，统计基于完整差异。</p><div class="diff-section"><div class="diff-code"><span v-for="(line, index) in commitFileDiffs[commitFileDiffKey(item.hash, file.path)].diff.split('\n')" :key="`${item.hash}:${file.path}:${index}`" :class="diffLineClass(line)">{{ line || " " }}</span></div></div></section></div></section></div><p v-if="!details.commits.length" class="git-empty">暂无可读取提交历史。</p></section>
         <section class="git-operation-log"><header><div><h3>操作结果与日志</h3></div><button v-if="gitOperationLogs.length" class="text-button" @click="gitOperationLogs = []">清空显示</button></header><article v-for="entry in gitOperationLogs" :key="entry.id" :class="entry.status"><div><i>{{ entry.status === "success" ? "成功" : "失败" }}</i><b>{{ entry.action }}</b><time>{{ formatTime(entry.occurredAt) }}</time></div><p>{{ entry.message }}</p><details v-if="entry.output"><summary>查看详细日志</summary><pre>{{ entry.output }}</pre></details></article><p v-if="!gitOperationLogs.length" class="git-empty">执行暂存、拉取、提交、推送或撤销操作后，结果会显示在这里。</p></section>

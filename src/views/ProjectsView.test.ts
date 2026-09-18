@@ -5,7 +5,7 @@ import type { GitRepositoryStatus } from "../services/backend";
 
 const backend = vi.hoisted(() => ({
   listRepositoryAssets: vi.fn(), listRunningRepositoryProjects: vi.fn(),
-  getGitRepositoryStatus: vi.fn(), switchGitRepositoryBranch: vi.fn(),
+  getGitRepositoryStatus: vi.fn(), switchGitRepositoryBranch: vi.fn(), mergeGitRepositoryBranch: vi.fn(),
   getRepositoryAssetDetails: vi.fn(), fetchGitRepository: vi.fn(),
   getGitRepositoryFileDiff: vi.fn(), discardGitRepositoryChanges: vi.fn(),
   getGitRepositoryCommitFiles: vi.fn(), getGitRepositoryCommitFileDiff: vi.fn(),
@@ -22,7 +22,7 @@ import ProjectsView from "./ProjectsView.vue";
 const projectPath = "C:/projects/example";
 function gitStatus(overrides: Partial<GitRepositoryStatus> = {}): GitRepositoryStatus {
   return {
-    repositoryPath: projectPath, currentBranch: "main", branches: ["main", "feature"],
+    repositoryPath: projectPath, currentBranch: "main", branches: ["main", "feature"], remoteBranches: [],
     remoteUrl: "", upstream: "", ahead: 0, behind: 0, userName: "", userEmail: "",
     hasUncommittedChanges: false, mergeInProgress: false, hasWorkbenchStash: false,
     changedFiles: [], credential: { configured: false, username: "", source: "" }, ...overrides,
@@ -55,6 +55,7 @@ beforeEach(() => {
   backend.listRunningRepositoryProjects.mockResolvedValue([]);
   backend.getGitRepositoryStatus.mockImplementation(async () => gitStatus());
   backend.switchGitRepositoryBranch.mockResolvedValue({ message: "已切换到 feature 分支。", output: "", commitHash: "" });
+  backend.mergeGitRepositoryBranch.mockResolvedValue({ message: "远端分支已合并。", output: "", commitHash: "abc1234" });
   backend.getRepositoryAssetDetails.mockResolvedValue({ conversations: [], commits: [], associations: [], nextAction: "" });
   backend.fetchGitRepository.mockResolvedValue({ message: "远程状态已更新。", output: "", commitHash: "" });
   backend.discardGitRepositoryChanges.mockResolvedValue({ message: "已放弃 1 个选中文件的本地修改。", output: "", commitHash: "" });
@@ -133,6 +134,57 @@ describe("项目资产列表操作", () => {
     expect(backend.switchGitRepositoryBranch).toHaveBeenCalledWith(projectPath, "feature");
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
     expect(wrapper.get(".branch-picker-trigger").text()).toContain("feature");
+  });
+
+  it("列表分支选择更新远程并允许跟踪远端独有分支", async () => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteBranches: ["origin/remote-only"] }));
+    await renderView();
+    await wrapper.get(".branch-picker-trigger").trigger("click");
+    await flushPromises();
+    expect(backend.fetchGitRepository).toHaveBeenCalledWith(projectPath);
+    expect(wrapper.get(".remote-branch-option").text()).toContain("origin/remote-only");
+    backend.listRepositoryAssets.mockResolvedValue([asset("remote-only")]);
+    await wrapper.get(".remote-branch-option").trigger("click");
+    await flushPromises();
+    expect(backend.switchGitRepositoryBranch).toHaveBeenCalledWith(projectPath, "refs/remotes/origin/remote-only");
+    expect(wrapper.get(".branch-picker-trigger").text()).toBe("remote-only");
+  });
+
+  it("远程更新失败仍保留本地分支选择并明确提示", async () => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteUrl: "https://example.test/repo.git" }));
+    backend.fetchGitRepository.mockRejectedValue(new Error("网络不可用"));
+    await renderView();
+    await wrapper.get(".branch-picker-trigger").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain("以下为本地已知分支");
+    expect(wrapper.get(".branch-option:not(.current)").attributes("disabled")).toBeUndefined();
+  });
+
+  it("抽屉切换区分本地和远端，合并只传递完整远端引用", async () => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteBranches: ["origin/main", "origin/feature", "upstream/feature"] }));
+    await renderView();
+    await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
+    await flushPromises();
+    const panel = wrapper.get(".git-branch-panel");
+    expect(panel.findAll("optgroup").map(group => group.attributes("label"))).toEqual(["本地分支", "远端分支"]);
+    const selects = panel.findAll("select");
+    expect(selects[1].findAll("option").map(option => option.attributes("value"))).toEqual(["", "refs/remotes/origin/main", "refs/remotes/origin/feature", "refs/remotes/upstream/feature"]);
+    await selects[0].setValue("refs/remotes/origin/feature");
+    await panel.findAll("button")[0].trigger("click");
+    await flushPromises();
+    expect(backend.switchGitRepositoryBranch).toHaveBeenCalledWith(projectPath, "refs/remotes/origin/feature");
+    await selects[1].setValue("refs/remotes/upstream/feature");
+    await panel.findAll("button")[1].trigger("click");
+    await flushPromises();
+    expect(backend.mergeGitRepositoryBranch).toHaveBeenCalledWith(projectPath, "refs/remotes/upstream/feature");
+  });
+
+  it.each(["dirty", "merge"])("抽屉 %s 状态禁用切换和远端合并", async (kind) => {
+    backend.getGitRepositoryStatus.mockResolvedValue(gitStatus({ remoteBranches: ["origin/feature"], hasUncommittedChanges: kind === "dirty", mergeInProgress: kind === "merge" }));
+    await renderView();
+    await wrapper.findAll(".asset-row-actions button")[1].trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".git-branch-panel").findAll("button").every(button => button.attributes("disabled") !== undefined)).toBe(true);
   });
 
   it.each(["dirty", "merge"])("以实时状态阻止 %s 工作区切换，不依赖列表缓存", async (kind) => {

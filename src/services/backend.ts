@@ -262,6 +262,7 @@ export interface ApiEndpointSummary {
   tags: string[];
   deprecated: boolean;
   updatedAt: string;
+  documentHash: string;
 }
 
 export interface ApiEndpointDetail extends ApiEndpointSummary {
@@ -315,6 +316,7 @@ export interface ApiTestResult {
 export interface ApiTestPreview {
   endpointId: string;
   url: string;
+  urlTemplate: string;
   method: string;
   contentType: string;
   headers: Record<string,string>;
@@ -329,6 +331,7 @@ export interface ApiTestExecutionRequest {
   url: string;
   body: unknown | null;
   confirmed: boolean;
+  parameters?: { name: string; location: string; value: unknown }[];
 }
 
 export interface ApiTagExport {
@@ -606,6 +609,7 @@ export interface GitRepositoryStatus {
   repositoryPath: string;
   currentBranch: string;
   branches: string[];
+  remoteBranches: string[];
   remoteUrl: string;
   upstream: string;
   ahead: number;
@@ -1457,7 +1461,7 @@ export async function listQuickCaptures(includeArchived = false): Promise<QuickC
   return invoke<QuickCapture[]>("list_quick_captures", { includeArchived });
 }
 
-export async function saveQuickCapture(input: Pick<QuickCapture,"kind"|"content"|"sourceUrl">): Promise<QuickCapture> {
+export async function saveQuickCapture(input: Pick<QuickCapture,"kind"|"content"|"sourceUrl"> & { id?: string }): Promise<QuickCapture> {
   return invoke<QuickCapture>("save_quick_capture", { input });
 }
 

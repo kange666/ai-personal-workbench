@@ -1,8 +1,9 @@
 use crate::{database::DatabaseState, email, project_identity};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -48,13 +49,11 @@ fn roots() -> Vec<PathBuf> {
     vec![codex.join("sessions"), codex.join("archived_sessions")]
 }
 
-fn source_modified_ns(path: &Path) -> i64 {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .map(|value| value.as_nanos().min(i64::MAX as u128) as i64)
-        .unwrap_or_default()
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct NotificationFileCursor {
+    // 只推进到完整 JSONL 行末，下一次继续读取尚未写完的事件。
+    offset: u64,
+    modified_ns: u128,
 }
 
 fn compact_message(value: &str) -> String {
@@ -257,32 +256,78 @@ fn session_context(path: &Path) -> (Option<String>, String, bool) {
     (id, cwd, is_automation)
 }
 
-fn completions_from_tail(path: &Path) -> Vec<CompletionEvent> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-    let length = match file.metadata() {
-        Ok(metadata) => metadata.len(),
-        Err(_) => return Vec::new(),
-    };
-    let start = length.saturating_sub(2 * 1024 * 1024);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
+fn read_completion_events(
+    path: &Path,
+    previous: Option<NotificationFileCursor>,
+) -> std::io::Result<Option<(Vec<CompletionEvent>, NotificationFileCursor)>> {
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    let length = metadata.len();
+    let modified_ns = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    if previous.is_some_and(|cursor| cursor.offset == length && cursor.modified_ns == modified_ns) {
+        return Ok(None);
     }
-    let mut content = String::new();
-    if file.read_to_string(&mut content).is_err() {
-        return Vec::new();
+
+    // Codex 可能保留旧修改时间，必须按每个文件的读取位置检测新增内容。
+    // 首次发现/文件被替换时沿用尾部扫描，后续增量不再受 2 MiB 限制。
+    let incremental = previous.filter(|cursor| cursor.offset < length);
+    let start = incremental
+        .map(|cursor| cursor.offset)
+        .unwrap_or_else(|| length.saturating_sub(2 * 1024 * 1024));
+    let mut skip_partial_line = false;
+    if incremental.is_none() && start > 0 {
+        file.seek(SeekFrom::Start(start - 1))?;
+        let mut preceding = [0];
+        file.read_exact(&mut preceding)?;
+        skip_partial_line = preceding[0] != b'\n';
+    } else {
+        file.seek(SeekFrom::Start(start))?;
     }
-    content
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|value| completion_from_value(&value))
-        .collect()
+    let mut reader = BufReader::new(file.take(length - start));
+    let mut offset = start;
+    let mut events = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let count = reader.read_until(b'\n', &mut line)?;
+        if count == 0 || !line.ends_with(b"\n") {
+            break;
+        }
+        offset += count as u64;
+        if skip_partial_line {
+            skip_partial_line = false;
+            continue;
+        }
+        if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+            if let Some(event) = completion_from_value(&value) {
+                events.push(event);
+            }
+        }
+    }
+    Ok(Some((
+        events,
+        NotificationFileCursor {
+            offset,
+            modified_ns,
+        },
+    )))
 }
 
 pub fn sync_codex_notifications_for_state(
     state: &DatabaseState,
+) -> Result<NotificationSyncSummary, String> {
+    let summary = sync_codex_notifications_from_roots(state, roots())?;
+    email::reconcile_notifications_for_state(state)?;
+    Ok(summary)
+}
+
+fn sync_codex_notifications_from_roots(
+    state: &DatabaseState,
+    source_roots: Vec<PathBuf>,
 ) -> Result<NotificationSyncSummary, String> {
     let connection = state.connect()?;
     let baseline = connection
@@ -292,21 +337,20 @@ pub fn sync_codex_notifications_for_state(
             |row| row.get::<_, String>(0),
         )
         .map_err(|error| error.to_string())?;
-    let previous_cursor = connection
+    let mut cursors: BTreeMap<String, NotificationFileCursor> = connection
         .query_row(
-            "SELECT value FROM app_meta WHERE key='codex_notification_modified_cursor'",
+            "SELECT value FROM app_meta WHERE key='codex_notification_file_cursors'",
             [],
             |row| row.get::<_, String>(0),
         )
         .ok()
-        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or_default();
     drop(connection);
 
     let mut summary = NotificationSyncSummary::default();
-    let mut latest_cursor = previous_cursor;
     let mut completed = Vec::new();
-    for root in roots().into_iter().filter(|root| root.exists()) {
+    for root in source_roots.into_iter().filter(|root| root.exists()) {
         for entry in WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
@@ -315,20 +359,27 @@ pub fn sync_codex_notifications_for_state(
                     && entry.path().extension().and_then(|value| value.to_str()) == Some("jsonl")
             })
         {
-            let modified = source_modified_ns(entry.path());
-            latest_cursor = latest_cursor.max(modified);
-            if modified <= previous_cursor {
-                continue;
-            }
+            let source_file = entry.path().display().to_string();
+            let (events, cursor) =
+                match read_completion_events(entry.path(), cursors.get(&source_file).copied()) {
+                    Ok(Some(result)) => result,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        // 读取失败时保留旧位置，下一轮重试，不能当作成功读完。
+                        eprintln!("读取 Codex 完成事件失败：{source_file}: {error}");
+                        continue;
+                    }
+                };
+            cursors.insert(source_file.clone(), cursor);
             summary.files_scanned += 1;
             let (source_id, source_cwd, is_automation) = session_context(entry.path());
             if is_automation {
                 continue;
             }
-            for event in completions_from_tail(entry.path()) {
+            for event in events {
                 if event.completed_at >= baseline {
                     completed.push((
-                        entry.path().display().to_string(),
+                        source_file.clone(),
                         source_id.clone(),
                         source_cwd.clone(),
                         event,
@@ -396,12 +447,11 @@ pub fn sync_codex_notifications_for_state(
     }
     transaction
         .execute(
-            "INSERT INTO app_meta(key,value) VALUES('codex_notification_modified_cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [latest_cursor.to_string()],
+            "INSERT INTO app_meta(key,value) VALUES('codex_notification_file_cursors',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [serde_json::to_string(&cursors).map_err(|error| error.to_string())?],
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
-    email::reconcile_notifications_for_state(state)?;
     Ok(summary)
 }
 
@@ -516,7 +566,151 @@ pub fn review_notification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{FileTimes, OpenOptions};
     use std::io::Write;
+
+    fn completion_line(turn_id: &str, output: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp":"2026-09-18T13:07:31.779Z",
+                "type":"event_msg",
+                "payload":{
+                    "type":"task_complete", "turn_id":turn_id,
+                    "completed_at":1789736851_i64, "last_agent_message":output
+                }
+            })
+        )
+    }
+
+    #[test]
+    fn sync_detects_growth_with_unchanged_mtime_and_persists_each_file_offset() {
+        let directory =
+            std::env::temp_dir().join(format!("notification-growth-{}", uuid::Uuid::new_v4()));
+        let sessions = directory.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let connection = state.connect().unwrap();
+        connection.execute("UPDATE app_meta SET value='2026-09-18T00:00:00Z' WHERE key='codex_notifications_started_at'", []).unwrap();
+        // 模拟旧版全局时间游标已经越过当前文件时间。
+        connection.execute("INSERT INTO app_meta(key,value) VALUES('codex_notification_modified_cursor','9223372036854775807')", []).unwrap();
+        connection.execute("INSERT INTO repository_assets(path,name,remote_url,default_branch,last_scanned_at,updated_at) VALUES('F:/example/project','project','','main','now','now')", []).unwrap();
+        let path = sessions.join("user.jsonl");
+        std::fs::write(&path, format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"session-growth","cwd":"F:/example/project","thread_source":"user"}}))).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(
+            sync_codex_notifications_from_roots(&state, vec![sessions.clone()])
+                .unwrap()
+                .notifications_created,
+            0
+        );
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(completion_line("growth", "已完成修改").as_bytes())
+            .unwrap();
+        // 完成后大量输出超过旧尾部窗口，增量扫描仍需读到该完成事件。
+        for _ in 0..2200 {
+            writeln!(file, "{}", "x".repeat(1024)).unwrap();
+        }
+        file.set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        drop(file);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        assert_eq!(
+            sync_codex_notifications_from_roots(&state, vec![sessions.clone()])
+                .unwrap()
+                .notifications_created,
+            1
+        );
+        let saved: (String, String) = connection
+            .query_row(
+                "SELECT source_id,output FROM notifications WHERE id='codex-complete-growth'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, ("session-growth".into(), "已完成修改".into()));
+        let repeated = sync_codex_notifications_from_roots(&state, vec![sessions.clone()]).unwrap();
+        assert_eq!(repeated.files_scanned, 0);
+        assert_eq!(repeated.notifications_created, 0);
+
+        for (name, cwd, source, output) in [
+            ("automation", "F:/example/project", "automation", "自动任务完成"),
+            ("silent", "F:/example/project", "user", "<heartbeat><automation_id>test</automation_id><decision>DONT_NOTIFY</decision></heartbeat>"),
+            ("other", "F:/example/unregistered", "user", "普通对话完成"),
+        ] {
+            std::fs::write(sessions.join(format!("{name}.jsonl")), format!("{}\n{}", serde_json::json!({"type":"session_meta","payload":{"id":name,"cwd":cwd,"thread_source":source}}), completion_line(name, output))).unwrap();
+        }
+        assert_eq!(
+            sync_codex_notifications_from_roots(&state, vec![sessions])
+                .unwrap()
+                .notifications_created,
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM notifications", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn incomplete_utf8_event_is_retried_and_truncated_file_is_rescanned() {
+        let path = std::env::temp_dir().join(format!(
+            "notification-partial-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"{}\n").unwrap();
+        let (_, cursor) = read_completion_events(&path, None).unwrap().unwrap();
+        let event = completion_line("partial", &"中文内容".repeat(100));
+        let split = event.find('中').unwrap() + 1;
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&event.as_bytes()[..split]).unwrap();
+        let (events, partial_cursor) = read_completion_events(&path, Some(cursor))
+            .unwrap()
+            .unwrap();
+        assert!(events.is_empty());
+        assert_eq!(partial_cursor.offset, cursor.offset);
+        file.write_all(&event.as_bytes()[split..]).unwrap();
+        drop(file);
+        let (events, cursor) = read_completion_events(&path, Some(partial_cursor))
+            .unwrap()
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].turn_id, "partial");
+        std::fs::write(&path, completion_line("replacement", "替换后完成")).unwrap();
+        let (events, _) = read_completion_events(&path, Some(cursor))
+            .unwrap()
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].turn_id, "replacement");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn initial_tail_starting_inside_utf8_does_not_drop_complete_events() {
+        let path =
+            std::env::temp_dir().join(format!("notification-tail-{}.jsonl", uuid::Uuid::new_v4()));
+        let event = completion_line("tail", "正常完成");
+        let mut bytes = "中".as_bytes().to_vec();
+        bytes.resize(2 * 1024 * 1024 + 1 - event.len(), b'x');
+        bytes.push(b'\n');
+        bytes.extend_from_slice(event.as_bytes());
+        assert!(std::str::from_utf8(&bytes[bytes.len() - 2 * 1024 * 1024..]).is_err());
+        std::fs::write(&path, bytes).unwrap();
+        let (events, _) = read_completion_events(&path, None).unwrap().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].turn_id, "tail");
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn detects_real_codex_task_complete_event() {

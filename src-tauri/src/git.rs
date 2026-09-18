@@ -226,6 +226,7 @@ pub struct GitRepositoryStatus {
     pub repository_path: String,
     pub current_branch: String,
     pub branches: Vec<String>,
+    pub remote_branches: Vec<String>,
     pub remote_url: String,
     pub upstream: String,
     pub ahead: i64,
@@ -655,15 +656,135 @@ fn local_branches(path: &str) -> Result<Vec<String>, String> {
         "-C",
         path,
         "for-each-ref",
-        "--format=%(refname:short)",
+        "--format=%(refname)",
         "refs/heads",
     ])?;
     Ok(output
         .lines()
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
+        .filter_map(|branch| branch.trim().strip_prefix("refs/heads/"))
         .map(ToString::to_string)
         .collect())
+}
+
+fn remote_branches(path: &str) -> Result<Vec<String>, String> {
+    let output = git_output(&[
+        "-C",
+        path,
+        "for-each-ref",
+        "--format=%(refname)%09%(symref)",
+        "refs/remotes",
+    ])?;
+    Ok(output
+        .lines()
+        .filter_map(|line| {
+            let (reference, symbolic) = line.split_once('\t').unwrap_or((line, ""));
+            // origin/HEAD 等符号引用不是可选择的业务分支。
+            if !symbolic.is_empty() {
+                return None;
+            }
+            reference
+                .strip_prefix("refs/remotes/")
+                .map(ToString::to_string)
+        })
+        .collect())
+}
+
+fn ensure_branch_operation_ready(path: &str) -> Result<(), String> {
+    if merge_in_progress(path) {
+        return Err("当前有未完成的合并，请先完成或取消后再操作分支。".to_string());
+    }
+    ensure_clean_worktree(path)
+}
+
+fn fetch_selected_remote_branch(path: &str, branch: &str) -> Result<(String, String), String> {
+    let short = branch
+        .strip_prefix("refs/remotes/")
+        .ok_or_else(|| "请选择远端分支。".to_string())?;
+    if !remote_branches(path)?
+        .iter()
+        .any(|candidate| candidate == short)
+    {
+        return Err("所选远端分支不存在，请先更新远程状态。".to_string());
+    }
+    let remotes = git_output(&["-C", path, "remote"])?;
+    let remote = remotes
+        .lines()
+        .filter(|remote| short.starts_with(&format!("{remote}/")))
+        .max_by_key(|remote| remote.len())
+        .ok_or_else(|| "所选分支对应的远程仓库不存在。".to_string())?;
+    let output = git_operation_output(
+        path,
+        &["fetch".into(), "--prune".into(), "--".into(), remote.into()],
+        true,
+    )?;
+    if !remote_branches(path)?
+        .iter()
+        .any(|candidate| candidate == short)
+    {
+        return Err("该分支已从远端删除，请刷新后重新选择。".to_string());
+    }
+    ensure_branch_operation_ready(path)?;
+    Ok((short[remote.len() + 1..].to_string(), output))
+}
+
+fn switch_repository_branch(path: &str, branch: &str) -> Result<(String, String), String> {
+    ensure_branch_operation_ready(path)?;
+    if !branch.starts_with("refs/remotes/") {
+        let local = validated_branch(path, branch)?;
+        let output = git_operation_output(path, &["switch".into(), local.clone()], false)?;
+        return Ok((local, output));
+    }
+    let (local, fetch_output) = fetch_selected_remote_branch(path, branch)?;
+    let output = if local_branches(path)?.contains(&local) {
+        let upstream = git_output(&[
+            "-C",
+            path,
+            "for-each-ref",
+            "--format=%(upstream)",
+            &format!("refs/heads/{local}"),
+        ])?;
+        if upstream != branch {
+            return Err(format!("本地已有 {local} 分支，但未跟踪所选远端分支。为避免覆盖，已停止；可选择本地分支或先处理同名分支。"));
+        }
+        git_operation_output(path, &["switch".into(), local.clone()], false)?
+    } else {
+        git_operation_output(
+            path,
+            &[
+                "switch".into(),
+                "--track".into(),
+                "-c".into(),
+                local.clone(),
+                branch.into(),
+            ],
+            false,
+        )?
+    };
+    Ok((local, format!("{fetch_output}\n{output}")))
+}
+
+fn merge_remote_repository_branch(path: &str, branch: &str) -> Result<(String, String), String> {
+    ensure_branch_operation_ready(path)?;
+    let current = git_output(&["-C", path, "branch", "--show-current"])?;
+    if current.is_empty() {
+        return Err("当前未处于本地分支，请先切换分支后再合并。".to_string());
+    }
+    let (_, fetch_output) = fetch_selected_remote_branch(path, branch)?;
+    // 使用完整远端引用，不会误合并同名但未更新的本地分支。
+    match git_operation_output(
+        path,
+        &["merge".into(), "--no-edit".into(), branch.into()],
+        false,
+    ) {
+        Ok(output) => Ok((current, format!("{fetch_output}\n{output}"))),
+        Err(error) => {
+            if merge_in_progress(path) {
+                git_operation_output(path, &["merge".into(), "--abort".into()], false)
+                    .map_err(|abort| format!("合并失败：{error}；自动中止失败：{abort}"))?;
+            }
+            Err(format!("合并未完成，未保留本次合并修改：{error}"))
+        }
+    }
 }
 
 fn repository_ahead_behind(path: &str) -> (i64, i64) {
@@ -3648,6 +3769,7 @@ pub fn git_repository_status(
         repository_path: path.clone(),
         current_branch,
         branches: local_branches(&path)?,
+        remote_branches: remote_branches(&path)?,
         remote_url,
         upstream,
         ahead,
@@ -4071,7 +4193,7 @@ pub fn git_fetch_repository(
     ensure_managed_repository(&state, &path)?;
     let output = git_operation_output(
         &path,
-        &["fetch".into(), "--prune".into(), "origin".into()],
+        &["fetch".into(), "--prune".into(), "--all".into()],
         true,
     )?;
     refresh_basic_repository_state(&state, &path)?;
@@ -5195,9 +5317,7 @@ pub fn git_switch_repository_branch(
     branch: String,
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
-    ensure_clean_worktree(&path)?;
-    let branch = validated_branch(&path, &branch)?;
-    let output = git_operation_output(&path, &["switch".into(), branch.clone()], false)?;
+    let (branch, output) = switch_repository_branch(&path, &branch)?;
     refresh_basic_repository_state(&state, &path)?;
     Ok(operation_result(
         &format!("已切换到 {branch} 分支。"),
@@ -5213,28 +5333,14 @@ pub fn git_merge_repository_branch(
     branch: String,
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
-    ensure_clean_worktree(&path)?;
-    let branch = validated_branch(&path, &branch)?;
-    let current = git_output(&["-C", &path, "branch", "--show-current"])?;
-    if current == branch {
-        return Err("不能把当前分支合并到自身。".to_string());
-    }
-    let result = git_operation_output(
-        &path,
-        &["merge".into(), "--no-edit".into(), branch.clone()],
-        false,
-    );
-    let output = match result {
-        Ok(output) => output,
-        Err(error) => {
-            let _ = git_operation_output(&path, &["merge".into(), "--abort".into()], false);
-            return Err(format!("合并未完成，已恢复操作前状态：{error}"));
-        }
-    };
+    let (current, output) = merge_remote_repository_branch(&path, &branch)?;
     let commit_hash = import_head_commit(&state, &path)?;
     refresh_basic_repository_state(&state, &path)?;
     Ok(operation_result(
-        &format!("已将 {branch} 合并到 {current}。"),
+        &format!(
+            "已将远端 {} 合并到 {current}。",
+            branch.trim_start_matches("refs/remotes/")
+        ),
         output,
         commit_hash,
     ))
@@ -5393,11 +5499,186 @@ mod tests {
         RunningProjectProcess, RuntimeTelemetry, UpstreamReconcileOutcome,
         RUNTIME_SNAPSHOT_FALLBACK_INTERVAL,
     };
+    use super::{merge_remote_repository_branch, remote_branches, switch_repository_branch};
     use crate::database::DatabaseState;
     use chrono::Utc;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    fn remote_branch_scenario(scenario: &str) {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-remote-branch-{}", uuid::Uuid::new_v4()));
+        let source = directory.join("source");
+        let local = directory.join("local");
+        std::fs::create_dir_all(&source).unwrap();
+        let source_path = source.to_string_lossy().into_owned();
+        let local_path = local.to_string_lossy().into_owned();
+        let run = |path: &str, args: &[&str]| {
+            git_operation_output(
+                path,
+                &args
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap()
+        };
+        run(&source_path, &["init", "-b", "main"]);
+        run(&source_path, &["config", "core.autocrlf", "false"]);
+        run(&source_path, &["config", "user.name", "Test"]);
+        run(&source_path, &["config", "user.email", "test@example.test"]);
+        std::fs::write(source.join("base.txt"), "base\n").unwrap();
+        run(&source_path, &["add", "base.txt"]);
+        run(&source_path, &["commit", "-m", "initial"]);
+        run(&source_path, &["branch", "feature/topic"]);
+        // 必须在首次检出前设置，避免 CRLF 文件在关闭自动转换后被误判为本地修改。
+        run(
+            &source_path,
+            &[
+                "clone",
+                "-c",
+                "core.autocrlf=false",
+                &source_path,
+                &local_path,
+            ],
+        );
+        run(&local_path, &["config", "user.name", "Test"]);
+        run(&local_path, &["config", "user.email", "test@example.test"]);
+        let reference = "refs/remotes/origin/feature/topic";
+        assert_eq!(
+            remote_branches(&local_path).unwrap(),
+            vec!["origin/feature/topic", "origin/main"]
+        );
+        assert!(merge_remote_repository_branch(&local_path, "feature/topic").is_err());
+        assert!(switch_repository_branch(&local_path, "refs/remotes/origin/HEAD").is_err());
+        let original_head = run(&local_path, &["rev-parse", "HEAD"]);
+        match scenario {
+            "switch" => {
+                let (branch, _) = switch_repository_branch(&local_path, reference).unwrap();
+                assert_eq!(branch, "feature/topic");
+                assert_eq!(run(&local_path, &["branch", "--show-current"]), branch);
+                assert_eq!(
+                    run(
+                        &local_path,
+                        &["rev-parse", "--symbolic-full-name", "@{upstream}"]
+                    ),
+                    reference
+                );
+                std::fs::write(local.join("local.txt"), "local commit\n").unwrap();
+                run(&local_path, &["add", "local.txt"]);
+                run(&local_path, &["commit", "-m", "local change"]);
+                let local_head = run(&local_path, &["rev-parse", "HEAD"]);
+                switch_repository_branch(&local_path, "main").unwrap();
+                switch_repository_branch(&local_path, reference).unwrap();
+                assert_eq!(run(&local_path, &["rev-parse", "HEAD"]), local_head);
+                // 多远程同名分支不能悄悄改写原有跟踪关系。
+                run(&local_path, &["remote", "add", "upstream", &source_path]);
+                run(&local_path, &["fetch", "upstream"]);
+                assert!(switch_repository_branch(
+                    &local_path,
+                    "refs/remotes/upstream/feature/topic"
+                )
+                .unwrap_err()
+                .contains("未跟踪"));
+            }
+            "collision" => {
+                run(&local_path, &["branch", "feature/topic"]);
+                assert!(switch_repository_branch(&local_path, reference)
+                    .unwrap_err()
+                    .contains("未跟踪"));
+                assert_eq!(run(&local_path, &["branch", "--show-current"]), "main");
+            }
+            "dirty" => {
+                std::fs::write(local.join("untracked.txt"), "keep me").unwrap();
+                assert!(switch_repository_branch(&local_path, reference).is_err());
+                assert!(merge_remote_repository_branch(&local_path, reference).is_err());
+                assert_eq!(
+                    std::fs::read_to_string(local.join("untracked.txt")).unwrap(),
+                    "keep me"
+                );
+                assert_eq!(run(&local_path, &["rev-parse", "HEAD"]), original_head);
+            }
+            "deleted" => {
+                run(&source_path, &["branch", "-d", "feature/topic"]);
+                assert!(switch_repository_branch(&local_path, reference)
+                    .unwrap_err()
+                    .contains("已从远端删除"));
+                assert_eq!(run(&local_path, &["branch", "--show-current"]), "main");
+            }
+            "merge" | "conflict" => {
+                // 两个本地分支都停在旧提交，确保合并不依赖短名或本地同名分支。
+                run(&local_path, &["branch", "feature/topic"]);
+                run(&local_path, &["branch", "origin/feature/topic"]);
+                run(&source_path, &["switch", "feature/topic"]);
+                std::fs::write(source.join("base.txt"), "remote change\n").unwrap();
+                run(&source_path, &["add", "base.txt"]);
+                run(&source_path, &["commit", "-m", "remote change"]);
+                if scenario == "conflict" {
+                    std::fs::write(local.join("base.txt"), "local change\n").unwrap();
+                    run(&local_path, &["add", "base.txt"]);
+                    run(&local_path, &["commit", "-m", "local change"]);
+                    let local_head = run(&local_path, &["rev-parse", "HEAD"]);
+                    assert!(merge_remote_repository_branch(&local_path, reference).is_err());
+                    assert_eq!(run(&local_path, &["rev-parse", "HEAD"]), local_head);
+                    assert_eq!(
+                        std::fs::read_to_string(local.join("base.txt")).unwrap(),
+                        "local change\n"
+                    );
+                    assert!(!super::merge_in_progress(&local_path));
+                } else {
+                    let (current, _) =
+                        merge_remote_repository_branch(&local_path, reference).unwrap();
+                    assert_eq!(current, "main");
+                    assert_eq!(
+                        std::fs::read_to_string(local.join("base.txt")).unwrap(),
+                        "remote change\n"
+                    );
+                    assert_eq!(
+                        run(&local_path, &["rev-parse", "refs/heads/feature/topic"]),
+                        original_head
+                    );
+                    assert_eq!(
+                        run(
+                            &local_path,
+                            &["rev-parse", "refs/heads/origin/feature/topic"]
+                        ),
+                        original_head
+                    );
+                }
+                assert!(ensure_clean_worktree(&local_path).is_ok());
+            }
+            _ => panic!("unknown scenario"),
+        }
+        assert!(directory.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn remote_branch_switch_tracks_and_preserves_existing_commits() {
+        remote_branch_scenario("switch");
+    }
+    #[test]
+    fn remote_branch_switch_rejects_local_name_collision() {
+        remote_branch_scenario("collision");
+    }
+    #[test]
+    fn remote_branch_operations_preserve_dirty_worktree() {
+        remote_branch_scenario("dirty");
+    }
+    #[test]
+    fn remote_branch_switch_detects_deleted_remote() {
+        remote_branch_scenario("deleted");
+    }
+    #[test]
+    fn remote_branch_merge_fetches_latest_not_stale_local() {
+        remote_branch_scenario("merge");
+    }
+    #[test]
+    fn remote_branch_merge_aborts_conflicts_without_losing_commits() {
+        remote_branch_scenario("conflict");
+    }
 
     #[test]
     fn commit_parser_keeps_author_identity_for_personal_reports() {

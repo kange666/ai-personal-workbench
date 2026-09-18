@@ -82,6 +82,7 @@ pub struct ApiEndpointSummary {
     pub deprecated: bool,
     pub favorite: bool,
     pub updated_at: String,
+    pub document_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +151,7 @@ pub struct ApiTestResult {
 pub struct ApiTestPreview {
     pub endpoint_id: String,
     pub url: String,
+    pub url_template: String,
     pub method: String,
     pub content_type: String,
     pub headers: HashMap<String, String>,
@@ -167,6 +169,15 @@ pub struct ApiTestExecutionRequest {
     pub body: Option<Value>,
     #[serde(default)]
     pub confirmed: bool,
+    #[serde(default)]
+    pub parameters: Option<Vec<ApiTestParameterValue>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiTestParameterValue {
+    pub name: String,
+    pub location: String,
+    pub value: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -890,7 +901,7 @@ pub fn list_api_endpoints(
     let tag = filter.tag.trim().to_lowercase();
     let connection = state.connect()?;
     let mut statement = connection.prepare(
-        "SELECT id,source_id,operation_id,method,path,title,description,tags_json,deprecated,is_favorite,updated_at,search_text FROM api_endpoints WHERE source_id=?1 ORDER BY path,method",
+        "SELECT id,source_id,operation_id,method,path,title,description,tags_json,deprecated,is_favorite,updated_at,search_text,document_hash FROM api_endpoints WHERE source_id=?1 ORDER BY path,method",
     ).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([source_id], |row| {
@@ -908,6 +919,7 @@ pub fn list_api_endpoints(
                     deprecated: row.get(8)?,
                     favorite: row.get(9)?,
                     updated_at: row.get(10)?,
+                    document_hash: row.get(12)?,
                 },
                 row.get::<_, String>(11)?,
             ))
@@ -938,13 +950,13 @@ pub fn list_api_endpoints(
 
 fn endpoint_detail(state: &DatabaseState, endpoint_id: &str) -> Result<ApiEndpointDetail, String> {
     state.connect()?.query_row(
-        "SELECT e.id,e.source_id,e.operation_id,e.method,e.path,e.title,e.description,e.tags_json,e.deprecated,e.is_favorite,e.updated_at,s.external_project_id,COALESCE(NULLIF(s.apifox_project_name,''),NULLIF(s.document_title,''),'Apifox ' || s.external_project_id),s.document_title,s.openapi_version,s.last_synced_at,e.document_json
+        "SELECT e.id,e.source_id,e.operation_id,e.method,e.path,e.title,e.description,e.tags_json,e.deprecated,e.is_favorite,e.updated_at,s.external_project_id,COALESCE(NULLIF(s.apifox_project_name,''),NULLIF(s.document_title,''),'Apifox ' || s.external_project_id),s.document_title,s.openapi_version,s.last_synced_at,e.document_json,e.document_hash
          FROM api_endpoints e JOIN api_sources s ON s.id=e.source_id WHERE e.id=?1",
         [endpoint_id],
         |row| {
             let raw: String = row.get(16)?;
             Ok(ApiEndpointDetail {
-                summary: ApiEndpointSummary { id:row.get(0)?,source_id:row.get(1)?,operation_id:row.get(2)?,method:row.get(3)?,path:row.get(4)?,title:row.get(5)?,description:row.get(6)?,tags:tags_from_json(row.get(7)?),deprecated:row.get(8)?,favorite:row.get(9)?,updated_at:row.get(10)? },
+                summary: ApiEndpointSummary { id:row.get(0)?,source_id:row.get(1)?,operation_id:row.get(2)?,method:row.get(3)?,path:row.get(4)?,title:row.get(5)?,description:row.get(6)?,tags:tags_from_json(row.get(7)?),deprecated:row.get(8)?,favorite:row.get(9)?,updated_at:row.get(10)?,document_hash:row.get(17)? },
                 external_project_id:row.get(11)?,apifox_project_name:row.get(12)?,document_title:row.get(13)?,openapi_version:row.get(14)?,last_synced_at:row.get(15)?,document:serde_json::from_str(&raw).unwrap_or_else(|_| json!({})),
             })
         },
@@ -1164,6 +1176,131 @@ fn build_tag_openapi(
     build_tag_openapi_document(root, tag_path, requested_version)
 }
 
+fn collect_export_dependencies(value: &Value, pending: &mut Vec<(String, String)>) {
+    fn add_reference(reference: &str, pending: &mut Vec<(String, String)>) {
+        if let Some(path) = reference.strip_prefix("#/components/") {
+            let mut parts = path.split('/');
+            if let (Some(kind), Some(name)) = (parts.next(), parts.next()) {
+                pending.push((
+                    kind.replace("~1", "/").replace("~0", "~"),
+                    name.replace("~1", "/").replace("~0", "~"),
+                ));
+            }
+        }
+    }
+    match value {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                add_reference(reference, pending);
+            }
+            // 鉴权方案和多态模型映射不一定通过 $ref 引用，也必须保留。
+            if let Some(security) = object.get("security").and_then(Value::as_array) {
+                for requirement in security.iter().filter_map(Value::as_object) {
+                    pending.extend(
+                        requirement
+                            .keys()
+                            .map(|name| ("securitySchemes".into(), name.clone())),
+                    );
+                }
+            }
+            if let Some(mapping) = object
+                .get("discriminator")
+                .and_then(|value| value.get("mapping"))
+                .and_then(Value::as_object)
+            {
+                for reference in mapping.values().filter_map(Value::as_str) {
+                    if reference.starts_with('#') {
+                        add_reference(reference, pending);
+                    } else if !reference.contains(['/', ':']) {
+                        pending.push(("schemas".into(), reference.into()));
+                    }
+                }
+            }
+            for child in object.values() {
+                collect_export_dependencies(child, pending);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_export_dependencies(item, pending);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn prune_tag_export(root: &mut Value) {
+    let Some(object) = root.as_object_mut() else {
+        return;
+    };
+    let components = object.remove("components").unwrap_or(Value::Null);
+    // Webhooks 是项目级独立入口，不属于所选目录的接口。
+    object.remove("webhooks");
+    let operations: Vec<&Value> = object
+        .get("paths")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|paths| paths.values())
+        .flat_map(|path| {
+            operation_methods()
+                .iter()
+                .filter_map(move |method| path.get(*method))
+        })
+        .collect();
+    let tags: HashSet<String> = operations
+        .iter()
+        .flat_map(|operation| {
+            operation
+                .get("tags")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let inherits_security = operations
+        .iter()
+        .any(|operation| operation.get("security").is_none());
+    if !inherits_security {
+        object.remove("security");
+    }
+    if let Some(definitions) = object.get_mut("tags").and_then(Value::as_array_mut) {
+        definitions.retain(|tag| {
+            tag.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| tags.contains(name))
+        });
+        if definitions.is_empty() {
+            object.remove("tags");
+        }
+    }
+    let mut pending = Vec::new();
+    collect_export_dependencies(root, &mut pending);
+    let mut visited = HashSet::new();
+    let mut retained = Map::new();
+    // 只跟随本地组件引用，迭代求依赖闭包；循环引用不会重复展开或联网。
+    while let Some((kind, name)) = pending.pop() {
+        if !visited.insert((kind.clone(), name.clone())) {
+            continue;
+        }
+        if let Some(component) = components.get(&kind).and_then(|group| group.get(&name)) {
+            collect_export_dependencies(component, &mut pending);
+            retained
+                .entry(kind)
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .unwrap()
+                .insert(name, component.clone());
+        }
+    }
+    if !retained.is_empty() {
+        root.as_object_mut()
+            .unwrap()
+            .insert("components".into(), Value::Object(retained));
+    }
+}
+
 fn build_tag_openapi_document(
     mut root: Value,
     tag_path: &str,
@@ -1217,6 +1354,7 @@ fn build_tag_openapi_document(
         }
     }
     let mut root = sanitize_openapi_export(&root, "", false);
+    prune_tag_export(&mut root);
     if requested_version == "3.0" {
         if let Some(object) = root.as_object_mut() {
             object.insert("openapi".into(), Value::String("3.0.3".into()));
@@ -1840,6 +1978,7 @@ fn api_test_preview(endpoint_id: &str, prepared: &PreparedApiTest) -> ApiTestPre
     ApiTestPreview {
         endpoint_id: endpoint_id.to_string(),
         url: prepared.url.to_string(),
+        url_template: prepared.url.to_string(),
         method: prepared.method.to_string(),
         content_type: prepared.content_type.clone(),
         headers,
@@ -1865,8 +2004,110 @@ pub fn preview_api_endpoint_test(
     let detail = endpoint_detail(&state, endpoint_id.trim())?;
     let config = api_test_config_for_state(&state, &detail.summary.source_id)?;
     let token = api_test_token(&detail.summary.source_id);
-    let prepared = prepare_api_test(&detail, &config, token.as_deref())?;
-    Ok(api_test_preview(&detail.summary.id, &prepared))
+    let mut preview_detail = detail.clone();
+    preview_detail
+        .document
+        .as_object_mut()
+        .ok_or("接口文档格式异常。")?
+        .remove("requestBody");
+    if let Some(parameters) = preview_detail
+        .document
+        .get_mut("parameters")
+        .and_then(Value::as_array_mut)
+    {
+        parameters.retain(|item| item.get("in").and_then(Value::as_str) == Some("path"));
+    }
+    let prepared = prepare_api_test(&preview_detail, &config, token.as_deref())?;
+    let mut preview = api_test_preview(&detail.summary.id, &prepared);
+    let base = if config.base_url.trim().is_empty() {
+        openapi_server_url(&detail.document)
+    } else {
+        config.base_url.clone()
+    };
+    preview.url_template = format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        detail.summary.path.trim_start_matches('/')
+    );
+    preview.warning =
+        "只发送勾选的参数及项目已配置的凭据；请核对地址和参数。写操作可能修改真实业务数据。".into();
+    Ok(preview)
+}
+
+fn prepare_selected_api_test(
+    detail: &ApiEndpointDetail,
+    config: &ApiTestConfig,
+    token: Option<&str>,
+    values: &[ApiTestParameterValue],
+) -> Result<PreparedApiTest, String> {
+    // 显式选择模式不沿用自动生成参数，未勾选项不会进入请求。
+    let mut selected = detail.clone();
+    let definitions = detail
+        .document
+        .get("parameters")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut parameters = Vec::new();
+    let mut body = Map::new();
+    let content = detail
+        .document
+        .pointer("/requestBody/content")
+        .and_then(Value::as_object);
+    let body_definition = content.and_then(|items| {
+        items
+            .get_key_value("application/json")
+            .or_else(|| items.get_key_value("application/x-www-form-urlencoded"))
+            .or_else(|| items.iter().next())
+    });
+    let mut whole_body = None;
+    for value in values {
+        if value.location == "body" {
+            let (_, definition) = body_definition.ok_or("该接口没有请求体定义。")?;
+            let properties = definition
+                .pointer("/schema/properties")
+                .and_then(Value::as_object);
+            if let Some(properties) = properties {
+                let field = properties
+                    .get(&value.name)
+                    .ok_or("请求体包含未定义字段。")?;
+                if field.get("readOnly").and_then(Value::as_bool) == Some(true) {
+                    return Err("只读字段不能作为请求参数。".into());
+                }
+                body.insert(value.name.clone(), value.value.clone());
+            } else if value.name == "$body" {
+                whole_body = Some(value.value.clone());
+            } else {
+                return Err("请求体参数无效。".into());
+            }
+        } else {
+            let mut parameter = definitions
+                .iter()
+                .find(|item| {
+                    item.get("name").and_then(Value::as_str) == Some(value.name.as_str())
+                        && item.get("in").and_then(Value::as_str) == Some(value.location.as_str())
+                })
+                .cloned()
+                .ok_or("包含未定义的接口参数。")?;
+            if sensitive_name(&value.name) {
+                return Err("敏感参数请通过项目凭据配置，不在普通参数列表中输入。".into());
+            }
+            parameter["required"] = json!(true);
+            parameter["schema"] = json!({"enum":[value.value.clone()]});
+            parameters.push(parameter);
+        }
+    }
+    selected.document["parameters"] = Value::Array(parameters);
+    selected
+        .document
+        .as_object_mut()
+        .ok_or("接口文档格式异常。")?
+        .remove("requestBody");
+    if !body.is_empty() || whole_body.is_some() {
+        let (kind, _) = body_definition.unwrap();
+        selected.document["requestBody"] = json!({"required":true,"content":{kind:{"schema":{"enum":[whole_body.unwrap_or(Value::Object(body))]}}}});
+    }
+    prepare_api_test(&selected, config, token)
 }
 
 fn apply_api_test_execution(
@@ -1912,8 +2153,20 @@ pub fn execute_api_endpoint_test(
     let detail = endpoint_detail(&state, request.endpoint_id.trim())?;
     let config = api_test_config_for_state(&state, &detail.summary.source_id)?;
     let token = api_test_token(&detail.summary.source_id);
-    let prepared = prepare_api_test(&detail, &config, token.as_deref())?;
-    let prepared = apply_api_test_execution(prepared, &request)?;
+    let prepared = if let Some(values) = &request.parameters {
+        let prepared = prepare_selected_api_test(&detail, &config, token.as_deref(), values)?;
+        let selected_request = ApiTestExecutionRequest {
+            url: prepared.url.to_string(),
+            body: prepared.body.clone(),
+            ..request.clone()
+        };
+        apply_api_test_execution(prepared, &selected_request)?
+    } else {
+        apply_api_test_execution(
+            prepare_api_test(&detail, &config, token.as_deref())?,
+            &request,
+        )?
+    };
     send_api_test(prepared, token.as_deref())
 }
 
@@ -2663,6 +2916,7 @@ mod tests {
                 tags: item.tags.clone(),
                 deprecated: false,
                 favorite: false,
+                document_hash: String::new(),
                 updated_at: "2026-08-31".into(),
             },
             external_project_id: "1001".into(),
@@ -2692,6 +2946,7 @@ mod tests {
                 tags: vec!["文化活动".into()],
                 deprecated: false,
                 favorite: false,
+                document_hash: String::new(),
                 updated_at: String::new(),
             },
             external_project_id: "1001".into(),
@@ -2714,7 +2969,7 @@ mod tests {
             "info":{"title":"示例"},
             "servers":[{"url":"https://user:password@example.com/v1?apiKey=real-secret&locale=zh-CN"}],
             "paths":{
-                "/detail":{"put":{"tags":["文化服务/文化活动"],"responses":{"200":{"description":"ok"}},"x-apifox-folder":"private"}},
+                "/detail":{"put":{"tags":["文化服务/文化活动"],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Account"}}}}},"x-apifox-folder":"private"}},
                 "/other":{"get":{"tags":["其他"],"responses":{"200":{"description":"ok"}}}}
             },
             "components":{"schemas":{"Account":{"type":"object","properties":{"password":{"type":["string","null"],"example":"real-secret"}}}}}
@@ -2752,6 +3007,99 @@ mod tests {
         assert!(
             tag_export_url("http://127.0.0.1:17890", "source-1", "文化服务")
                 .starts_with("http://127.0.0.1:17890/openapi/source-1/")
+        );
+    }
+
+    #[test]
+    fn tag_export_prunes_unrelated_definitions_for_both_versions() {
+        let root = json!({
+            "openapi":"3.1.0","info":{"title":"项目"},
+            "tags":[{"name":"目录/类别"},{"name":"其他"}],
+            "security":[{"Bearer":[]}],
+            "webhooks":{"event":{"post":{"requestBody":{"$ref":"#/components/requestBodies/Unused"},"responses":{"200":{"description":"ok"}}}}},
+            "paths":{
+                "/items":{"post":{"tags":["目录/类别"],"responses":{"200":{"description":"ok"}}},"put":{"tags":["目录/类别"],"responses":{"200":{"description":"ok"}}}},
+                "/items/tree":{"get":{"tags":["目录/类别"],"responses":{"200":{"description":"ok"}}}},
+                "/items/{id}":{"get":{"tags":["目录/类别"],"responses":{"200":{"description":"ok"}}},"delete":{"tags":["目录/类别"],"responses":{"200":{"description":"ok"}}}},
+                "/unrelated":{"get":{"tags":["其他"],"responses":{"200":{"description":"ok"}}}}
+            },
+            "components":{"schemas":{"Unrelated":{"type":"object"}},"securitySchemes":{"Bearer":{"type":"http","scheme":"bearer"},"UnusedAuth":{"type":"apiKey","in":"header","name":"X-Key"}},"requestBodies":{"Unused":{"content":{"application/json":{"schema":{"type":"string"}}}}}}
+        });
+        for version in ["3.0", "3.1"] {
+            let export = build_tag_openapi_document(root.clone(), "目录/类别", version).unwrap();
+            let count: usize = export["paths"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|path| {
+                    operation_methods()
+                        .iter()
+                        .filter(|method| path.get(**method).is_some())
+                        .count()
+                })
+                .sum();
+            assert_eq!(count, 5);
+            assert!(export.pointer("/paths/~1unrelated").is_none());
+            assert_eq!(export["tags"], json!([{"name":"目录/类别"}]));
+            assert!(export.get("webhooks").is_none());
+            assert_eq!(
+                export["components"],
+                json!({"securitySchemes":{"Bearer":{"type":"http","scheme":"bearer"}}})
+            );
+        }
+    }
+
+    #[test]
+    fn tag_export_keeps_transitive_cyclic_and_discriminator_dependencies() {
+        let root = json!({"openapi":"3.1.0","info":{"title":"示例"},"security":[{"UnusedAuth":[]}],
+        "paths":{"/items":{"parameters":[{"$ref":"#/components/parameters/Filter"}],"post":{"tags":["目录/子目录"],"security":[{"Auth":[]}],"requestBody":{"$ref":"#/components/requestBodies/Body"},"callbacks":{"event":{"$ref":"#/components/callbacks/Event"}},"responses":{"200":{"$ref":"#/components/responses/Result"}}}}},
+        "components":{
+            "parameters":{"Filter":{"name":"filter","in":"query","schema":{"$ref":"#/components/schemas/A~1B~0C"}}},
+            "requestBodies":{"Body":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Base"}}}}},
+            "responses":{"Result":{"description":"ok","headers":{"X-Count":{"$ref":"#/components/headers/Count"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Node"}}}}},
+            "headers":{"Count":{"schema":{"type":"integer"}}},
+            "callbacks":{"Event":{"{$request.body#/url}":{"post":{"security":[],"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventData"}}}},"responses":{"200":{"description":"ok"}}}}}},
+            "schemas":{
+                "A/B~C":{"type":"string"},"Base":{"discriminator":{"propertyName":"kind","mapping":{"node":"#/components/schemas/Node","event":"EventData"}}},
+                "Node":{"properties":{"next":{"$ref":"#/components/schemas/Node"},"external":{"$ref":"https://example.invalid/schema.json"}}},"EventData":{"type":"object"},"Unused":{"type":"object"}
+            },"securitySchemes":{"Auth":{"type":"http","scheme":"bearer"},"UnusedAuth":{"type":"http","scheme":"basic"}}
+        }});
+        let export = build_tag_openapi_document(root, "目录", "3.1").unwrap();
+        assert!(export.get("security").is_none());
+        for pointer in [
+            "/components/parameters/Filter",
+            "/components/requestBodies/Body",
+            "/components/responses/Result",
+            "/components/headers/Count",
+            "/components/callbacks/Event",
+            "/components/schemas/A~1B~0C",
+            "/components/schemas/Base",
+            "/components/schemas/Node",
+            "/components/schemas/EventData",
+            "/components/securitySchemes/Auth",
+        ] {
+            assert!(export.pointer(pointer).is_some(), "缺少依赖：{pointer}");
+        }
+        assert!(export.pointer("/components/schemas/Unused").is_none());
+        assert!(export
+            .pointer("/components/securitySchemes/UnusedAuth")
+            .is_none());
+        assert_eq!(
+            export
+                .pointer("/components/schemas/Node/properties/external/$ref")
+                .and_then(Value::as_str),
+            Some("https://example.invalid/schema.json")
+        );
+    }
+
+    #[test]
+    fn tag_export_removes_unused_global_auth_when_operation_is_public() {
+        let export=build_tag_openapi_document(json!({"openapi":"3.1.0","security":[{"Auth":[]}],"paths":{"/public":{"get":{"tags":["公开"],"security":[],"responses":{"200":{"description":"ok"}}}}},"components":{"securitySchemes":{"Auth":{"type":"http","scheme":"basic"}}}}),"公开","3.1").unwrap();
+        assert!(export.get("security").is_none());
+        assert!(export.get("components").is_none());
+        assert_eq!(
+            export.pointer("/paths/~1public/get/security"),
+            Some(&json!([]))
         );
     }
 
@@ -2820,6 +3168,7 @@ mod tests {
                 tags: item.tags.clone(),
                 deprecated: false,
                 favorite: false,
+                document_hash: String::new(),
                 updated_at: String::new(),
             },
             external_project_id: "1001".into(),
@@ -2860,6 +3209,7 @@ mod tests {
                 tags: vec!["用户".into()],
                 deprecated: false,
                 favorite: false,
+                document_hash: String::new(),
                 updated_at: String::new(),
             },
             external_project_id: "1001".into(),
@@ -2926,6 +3276,7 @@ mod tests {
                 url: "https://api.example.com/v1/users/1?email=changed%40example.com".into(),
                 body: Some(json!({"userName":"修改后"})),
                 confirmed: false,
+                parameters: None,
             }
         )
         .is_err());
@@ -2937,6 +3288,7 @@ mod tests {
                 url: "https://other.example.com/users/1".into(),
                 body: Some(json!({"userName":"修改后"})),
                 confirmed: true,
+                parameters: None,
             }
         )
         .is_err());
@@ -2948,6 +3300,7 @@ mod tests {
                 url: "https://api.example.com/v1/users/2".into(),
                 body: Some(json!({"userName":"修改后"})),
                 confirmed: true,
+                parameters: None,
             },
         )
         .unwrap();
@@ -2963,6 +3316,58 @@ mod tests {
         assert_eq!(minimal.request_data, json!({"path.id":1}));
         assert!(minimal.body.is_none());
         assert!(minimal.content_type.is_empty());
+        assert!(prepare_selected_api_test(&detail, &config, None, &[]).is_err());
+        let chosen = vec![
+            ApiTestParameterValue {
+                name: "id".into(),
+                location: "path".into(),
+                value: json!(42),
+            },
+            ApiTestParameterValue {
+                name: "status".into(),
+                location: "query".into(),
+                value: json!("ready"),
+            },
+            ApiTestParameterValue {
+                name: "X-Optional".into(),
+                location: "header".into(),
+                value: json!("chosen"),
+            },
+            ApiTestParameterValue {
+                name: "optionalNote".into(),
+                location: "body".into(),
+                value: json!("仅此字段"),
+            },
+        ];
+        let chosen_request =
+            prepare_selected_api_test(&detail, &config, Some("Bearer real-secret"), &chosen)
+                .unwrap();
+        assert_eq!(
+            chosen_request.url.as_str(),
+            "https://api.example.com/v1/users/42?status=ready"
+        );
+        assert_eq!(chosen_request.headers.get("X-Optional").unwrap(), "chosen");
+        assert_eq!(
+            chosen_request.body,
+            Some(json!({"optionalNote":"仅此字段"}))
+        );
+        assert!(chosen_request.request_data.get("query.email").is_none());
+        assert_eq!(
+            chosen_request.headers.get("authorization").unwrap(),
+            "Bearer real-secret"
+        );
+        let path_only = prepare_selected_api_test(&detail, &config, None, &chosen[..1]).unwrap();
+        assert!(path_only.body.is_none());
+        assert!(path_only.headers.is_empty());
+        assert_eq!(
+            path_only.url.as_str(),
+            "https://api.example.com/v1/users/42"
+        );
+        let mut no_path = detail.clone();
+        no_path.summary.path = "/users".into();
+        let empty = prepare_selected_api_test(&no_path, &config, None, &[]).unwrap();
+        assert_eq!(empty.request_data, json!({}));
+        assert_eq!(empty.url.as_str(), "https://api.example.com/v1/users");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::database::DatabaseState;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -19,6 +19,7 @@ pub struct QuickCapture {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickCaptureInput {
+    id: Option<String>,
     kind: String,
     content: String,
     source_url: String,
@@ -93,8 +94,33 @@ fn save_quick_capture_for_state(
     {
         return Err("网址记录需要填写以 http:// 或 https:// 开头的链接。".into());
     }
-    let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    if let Some(id) = input.id {
+        // 只更新待整理记录的内容；保留类型、创建时间以及已有归档/任务流转状态。
+        let created_at = state
+            .connect()?
+            .query_row(
+                "UPDATE quick_captures SET content=?1,source_url=?2,updated_at=?3
+                 WHERE id=?4 AND kind=?5 AND status='inbox' RETURNING created_at",
+                params![content, input.source_url.trim(), now, id, input.kind],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "记录不存在、已移出待整理列表或类型已变化，请刷新后重试。".to_string()
+            })?;
+        return Ok(QuickCapture {
+            id,
+            kind: input.kind,
+            content: content.into(),
+            source_url: input.source_url.trim().into(),
+            status: "inbox".into(),
+            created_at,
+            updated_at: now,
+        });
+    }
+    let id = Uuid::new_v4().to_string();
     let routed_to_inbox = input.kind == "task";
     let status = if routed_to_inbox { "routed" } else { "inbox" };
     let mut connection = state.connect()?;
@@ -167,6 +193,130 @@ mod tests {
     use crate::database::DatabaseState;
 
     #[test]
+    fn edit_capture_updates_in_place_and_preserves_creation_time() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let saved = save_quick_capture_for_state(
+            &state,
+            QuickCaptureInput {
+                id: None,
+                kind: "url".into(),
+                content: "参考链接".into(),
+                source_url: "https://example.com/old".into(),
+            },
+        )
+        .unwrap();
+        let connection = state.connect().unwrap();
+        connection
+            .execute(
+                "UPDATE quick_captures SET created_at='2026-01-01T00:00:00Z',updated_at='2026-01-01T00:00:00Z' WHERE id=?1",
+                [&saved.id],
+            )
+            .unwrap();
+        let updated = save_quick_capture_for_state(
+            &state,
+            QuickCaptureInput {
+                id: Some(saved.id.clone()),
+                kind: "url".into(),
+                content: "  修改后的链接  ".into(),
+                source_url: "https://example.com/new".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.id, saved.id);
+        assert_eq!(updated.created_at, "2026-01-01T00:00:00Z");
+        assert_ne!(updated.updated_at, updated.created_at);
+        let row = connection
+            .query_row(
+                "SELECT content,source_url,status,created_at,updated_at FROM quick_captures WHERE id=?1",
+                [&saved.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "修改后的链接".into(),
+                "https://example.com/new".into(),
+                "inbox".into(),
+                updated.created_at,
+                updated.updated_at
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM quick_captures", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        // 更新失败时不能插入新记录、转换为任务，或恢复已归档的记录。
+        for (id, kind, content, url) in [
+            ("missing", "url", "不存在的记录", "https://example.com"),
+            (saved.id.as_str(), "url", " ", "https://example.com"),
+            (saved.id.as_str(), "url", "无效链接", "file:///example"),
+            (saved.id.as_str(), "task", "禁止编辑时转换类型", ""),
+        ] {
+            assert!(save_quick_capture_for_state(
+                &state,
+                QuickCaptureInput {
+                    id: Some(id.into()),
+                    kind: kind.into(),
+                    content: content.into(),
+                    source_url: url.into(),
+                }
+            )
+            .is_err());
+        }
+        connection
+            .execute(
+                "UPDATE quick_captures SET status='archived' WHERE id=?1",
+                [&saved.id],
+            )
+            .unwrap();
+        assert!(save_quick_capture_for_state(
+            &state,
+            QuickCaptureInput {
+                id: Some(saved.id.clone()),
+                kind: "url".into(),
+                content: "归档后不应修改".into(),
+                source_url: "https://example.com".into(),
+            }
+        )
+        .is_err());
+        let preserved = connection
+            .query_row(
+                "SELECT content,status FROM quick_captures WHERE id=?1",
+                [&saved.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("修改后的链接".into(), "archived".into()));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM quick_captures", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM work_inbox_items WHERE source_type='quick_capture'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn task_capture_is_routed_to_work_inbox_without_staying_in_capture_inbox() {
         let directory =
             std::env::temp_dir().join(format!("workbench-capture-{}", uuid::Uuid::new_v4()));
@@ -176,6 +326,7 @@ mod tests {
         let saved = save_quick_capture_for_state(
             &state,
             QuickCaptureInput {
+                id: None,
                 kind: "task".into(),
                 content: "整理本周开发总结\n补充发布风险".into(),
                 source_url: String::new(),

@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { confirmAction } from "../utils/confirm";
+import { apiTestDefault, paginationDefault } from "../utils/apiTestDefaults";
+import { observeApiUpdates, readApiUpdates, saveApiUpdates, type ApiUpdateState } from "../utils/apiDocUpdates";
 import {
   clearApiTestToken,
   executeApiEndpointTest,
@@ -44,6 +46,19 @@ const credential = ref<ApifoxCredentialStatus>({ configured:false, source:"未�
 const sources = ref<ApiSource[]>([]);
 const selectedSourceId = ref("");
 const endpoints = ref<ApiEndpointSummary[]>([]);
+const apiUpdates=ref<Record<string,ApiUpdateState>>({});
+function trackApiUpdates(sourceId:string,items:ApiEndpointSummary[]) {
+  const state=observeApiUpdates(apiUpdates.value[sourceId] ?? readApiUpdates(sourceId),items);
+  apiUpdates.value[sourceId]=state;saveApiUpdates(sourceId,state);
+}
+function markApiUpdatesRead(items:ApiEndpointSummary[]) {
+  const state=apiUpdates.value[selectedSourceId.value];
+  if(!state) return;
+  items.forEach(item=>delete state.unread[item.id]);
+  saveApiUpdates(selectedSourceId.value,state);
+}
+function endpointUpdate(item?:ApiEndpointSummary) { return item && apiUpdates.value[item.sourceId]?.unread[item.id]; }
+function groupUpdateCount(path?:string) { return endpoints.value.filter(item=>endpointUpdate(item) && endpointFolderKeys(item).includes(path || "")).length; }
 const selected = ref<ApiEndpointDetail | null>(null);
 const loading = ref(false);
 const detailLoading = ref(false);
@@ -78,7 +93,52 @@ const testPreviewOpen = ref(false);
 const testPreviewLoading = ref(false);
 const testPreview = ref<ApiTestPreview|null>(null);
 const testPreviewUrl = ref("");
-const testPreviewBody = ref("");
+interface TestParameterRow { name:string; location:string; type:string; description:string; required:boolean; checked:boolean; value:string; disabled:boolean }
+const testParameters = ref<TestParameterRow[]>([]);
+const selectableParameters = computed(() => testParameters.value.filter(row=>!row.disabled));
+const allTestParametersSelected = computed(() => selectableParameters.value.length>0 && selectableParameters.value.every(row=>row.checked));
+function selectAllTestParameters(event:Event) { const checked=(event.target as HTMLInputElement).checked; selectableParameters.value.forEach(row=>row.checked=row.required || checked); }
+function createTestParameters(document:JsonObject):TestParameterRow[] {
+  const rows:TestParameterRow[]=[];
+  function add(name:string, location:string, schema:JsonObject, required:boolean, description:string) {
+    const type=asText(schema.type) || (schema.properties ? "object" : schema.items ? "array" : "string");
+    const sensitive=location!=="body" && /authorization|token|apikey|password|secret|cookie|session/i.test(name.replace(/[-_]/g,""));
+    required=required || location==="path";
+    const disabled=sensitive || schema.readOnly===true;
+    const checked=!disabled && (required || paginationDefault(name)!==undefined);
+    const initial=checked ? apiTestDefault(schema,name) : "";
+    rows.push({name,location,type,required,description,checked,value:typeof initial==="string" ? initial : JSON.stringify(initial) ?? "",disabled});
+  }
+  for(const item of asArray(document.parameters)) { const param=asObject(item); add(asText(param.name),asText(param.in),asObject(param.schema),param.required===true,asText(param.description)); }
+  const requestBody=asObject(document.requestBody), content=asObject(requestBody.content);
+  const definition=asObject(content["application/json"] ?? content["application/x-www-form-urlencoded"] ?? Object.values(content)[0]);
+  const schema=asObject(definition.schema), properties=asObject(schema.properties);
+  if(Object.keys(properties).length) for(const [name,value] of Object.entries(properties)) add(name,"body",asObject(value),asArray(schema.required).includes(name),asText(asObject(value).description));
+  else if(Object.keys(content).length) add("$body","body",schema,requestBody.required===true,"完整请求体；对象或数组请填写 JSON");
+  return rows;
+}
+function selectedTestValues() {
+  return testParameters.value.filter(row=>row.checked && !row.disabled).map(row=>{
+    if(row.required && !row.value.trim()) throw new Error(`请填写必填参数 ${row.name}。`);
+    let value:unknown=row.value;
+    if(row.value.trim() && ["integer","number","boolean","object","array"].includes(row.type)) {
+      try { value=JSON.parse(row.value); } catch { if(row.required) throw new Error(`参数 ${row.name} 不是有效的 ${row.type} 值。`); }
+      const valid=row.type==="integer" ? Number.isSafeInteger(value) : row.type==="number" ? typeof value==="number" && Number.isFinite(value) : row.type==="boolean" ? typeof value==="boolean" : row.type==="array" ? Array.isArray(value) : value!==null && typeof value==="object" && !Array.isArray(value);
+      if(!valid && row.required) throw new Error(`参数 ${row.name} 应为 ${row.type} 类型。`);
+      if(!valid) value=row.value;
+    }
+    return {name:row.name,location:row.location,value};
+  });
+}
+const testRequestUrl = computed(() => {
+  let template=testPreviewUrl.value;
+  const query=new URLSearchParams();
+  for(const row of testParameters.value.filter(row=>row.checked && !row.disabled)) {
+    if(row.location==="path") template=template.replaceAll(`{${row.name}}`,encodeURIComponent(row.value));
+    if(row.location==="query") query.append(row.name,row.value);
+  }
+  return template+(query.size ? `${template.includes("?") ? "&" : "?"}${query}` : "");
+});
 const testPreviewConfirmed = ref(false);
 const testPreviewError = ref("");
 const tagExportOpen = ref(false);
@@ -164,10 +224,17 @@ function expandEndpointPath(item?:ApiEndpointSummary|null) {
 function toggleTreeGroup(row:ApiTreeRow) {
   const key=row.key.replace(/^group:/,"");
   const next=new Set(expandedTreeKeys.value);
-  if(next.has(key)) next.delete(key); else next.add(key);
+  if(next.has(key) && !forceExpandTree.value) next.delete(key); else {
+    next.add(key);
+    markApiUpdatesRead(endpoints.value.filter(item=>endpointFolderKeys(item).includes(key)));
+  }
   expandedTreeKeys.value=next;
 }
-function selectTreeEndpoint(item?:ApiEndpointSummary) { if(item) void selectEndpoint(item); }
+async function selectTreeEndpoint(item?:ApiEndpointSummary) {
+  if(!item) return;
+  await selectEndpoint(item);
+  if(selected.value?.id===item.id && !error.value) markApiUpdatesRead([item]);
+}
 const parameters = computed(() => asArray(asObject(selected.value?.document).parameters).map(value=>asObject(value)));
 const requestBody = computed(() => asObject(asObject(selected.value?.document).requestBody));
 const requestContent = computed(() => Object.entries(asObject(requestBody.value.content)).map(([contentType,value])=>({contentType,body:asObject(value)})));
@@ -205,10 +272,12 @@ function statusText(value:ApiSource["syncStatus"]) { return ({never:"从未同�
 
 async function loadEndpoints(sourceId:string, preferredEndpointId="") {
   endpoints.value = sourceId && isTauriRuntime() ? await listApiEndpoints(sourceId) : [];
+  if(sourceId) trackApiUpdates(sourceId,endpoints.value);
   const target=preferredEndpointId || (selected.value?.sourceId===sourceId ? selected.value.id : "") || endpoints.value[0]?.id || "";
   selected.value = target && endpoints.value.some(item=>item.id===target) ? await getApiEndpoint(target) : null;
   expandedTreeKeys.value=new Set();
-  expandEndpointPath(endpoints.value.find(item=>item.id===selected.value?.id) || endpoints.value[0]);
+  const activeEndpoint=endpoints.value.find(item=>item.id===selected.value?.id) || endpoints.value[0];
+  if(activeEndpoint && !endpointFolderKeys(activeEndpoint).some(key=>groupUpdateCount(key)>0)) expandEndpointPath(activeEndpoint);
   if(selected.value) await router.replace({query:{source:sourceId,endpoint:selected.value.id}});
 }
 
@@ -296,7 +365,12 @@ async function syncOne(item:ApiSource) {
 }
 async function syncAll() {
   syncingAll.value=true;error.value="";message.value="";
-  try { const results=await syncAllApiSources();const failed=results.filter(item=>item.status!=="ready");message.value=`已同步 ${results.length-failed.length}/${results.length} 个项目${failed.length ? `，${failed.length} 个项目保留旧缓存或同步失败` : ""}。`;await load(); }
+  try {
+    for(const source of sources.value) trackApiUpdates(source.id,await listApiEndpoints(source.id));
+    const results=await syncAllApiSources();
+    for(const source of sources.value) trackApiUpdates(source.id,await listApiEndpoints(source.id));
+    const failed=results.filter(item=>item.status!=="ready");message.value=`已同步 ${results.length-failed.length}/${results.length} 个项目${failed.length ? `，${failed.length} 个项目保留旧缓存或同步失败` : ""}。`;await load();
+  }
   catch(cause){error.value=String(cause);}finally{syncingAll.value=false;}
 }
 async function copyMarkdown() {
@@ -322,24 +396,29 @@ async function clearTestToken() {
 }
 async function runEndpointTest() {
   if(!selected.value) return;
+  const endpoint=selected.value;
   testPreviewLoading.value=true;testResult.value=null;error.value="";message.value="";testPreviewConfirmed.value=false;testPreviewError.value="";
   try {
-    const value=await previewApiEndpointTest(selected.value.id);
-    testPreview.value=value;testPreviewUrl.value=value.url;testPreviewBody.value=value.body===null ? "" : JSON.stringify(value.body,null,2);testPreviewOpen.value=true;
+    const value=await previewApiEndpointTest(endpoint.id);
+    if(selected.value?.id!==endpoint.id) return;
+    testPreview.value=value;testPreviewUrl.value=value.urlTemplate;testParameters.value=createTestParameters(asObject(endpoint.document));
+    const configuredHeaders=Object.keys(value.headers).map(name=>name.toLowerCase());
+    testParameters.value.forEach(row=>{ if(row.location==="header" && configuredHeaders.includes(row.name.toLowerCase())) {row.disabled=true;row.checked=false;row.value="";} });
+    testPreviewOpen.value=true;
   }
   catch(cause){error.value=String(cause);if(error.value.includes("请求基地址")) await openProjectSettings(activeSource.value);}
   finally{testPreviewLoading.value=false;}
 }
 async function sendEndpointTest() {
   if(!testPreview.value) return;
-  let body:unknown=null;
-  if(testPreview.value.body!==null) {
-    try { body=testPreviewBody.value.trim() ? JSON.parse(testPreviewBody.value) : null; }
-    catch { testPreviewError.value="请求体不是有效的 JSON，请修改后再发送。";return; }
-  }
+  let parameters;
+  try {
+    parameters=selectedTestValues();
+    if(/\{[^}]+\}/.test(testRequestUrl.value)) throw new Error("请勾选并填写路径参数后再发送。");
+  } catch(cause) { testPreviewError.value=String(cause);return; }
   testingEndpointId.value=testPreview.value.endpointId;error.value="";message.value="";testPreviewError.value="";
   try {
-    testResult.value=await executeApiEndpointTest({endpointId:testPreview.value.endpointId,url:testPreviewUrl.value.trim(),body,confirmed:testPreviewConfirmed.value});
+    testResult.value=await executeApiEndpointTest({endpointId:testPreview.value.endpointId,url:testRequestUrl.value,body:null,parameters,confirmed:testPreviewConfirmed.value});
     testPreviewOpen.value=false;
     const summary=`收到响应：HTTP ${testResult.value.status}，耗时 ${testResult.value.elapsedMs} ms。`;
     if(testResponseWarning.value) error.value=`${summary}${testResponseWarning.value}`;
@@ -380,8 +459,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown",closeProjectSwi
         <div class="api-filters"><label>⌕<input v-model="query" placeholder="搜索名称、路径、描述或 Operation ID"></label></div>
         <div class="api-endpoint-list" aria-label="接口目录树">
           <template v-for="row in treeRows" :key="row.key">
-            <div v-if="row.kind==='group'" class="api-tree-group" :style="{paddingLeft:`${12+row.depth*16}px`}"><button class="api-tree-toggle" :aria-expanded="row.expanded" @click="toggleTreeGroup(row)"><span class="disclosure-icon tree" aria-hidden="true"></span><b>{{ row.name }}</b><em>{{ row.count }}</em></button><button class="api-tag-export-trigger" title="导出整个标签的 OpenAPI URL" :disabled="tagExportLoading" @click="openTagExport(row)">URL</button></div>
-            <button v-else class="api-tree-endpoint" :class="{active:row.item?.id===selected?.id}" :style="{paddingLeft:`${15+row.depth*16}px`}" @click="selectTreeEndpoint(row.item)"><span class="api-method" :class="row.item?.method.toLowerCase()">{{ row.item?.method }}</span><span class="api-tree-copy"><b>{{ row.item?.title }}</b><code>{{ row.item?.path }}</code></span><em v-if="row.item?.deprecated">弃用</em></button>
+            <div v-if="row.kind==='group'" class="api-tree-group" :style="{paddingLeft:`${12+row.depth*16}px`}"><button class="api-tree-toggle" :aria-expanded="row.expanded" @click="toggleTreeGroup(row)"><span class="disclosure-icon tree" aria-hidden="true"></span><b>{{ row.name }}</b><span v-if="groupUpdateCount(row.tagPath)" class="api-update-badge" :title="`${groupUpdateCount(row.tagPath)} 个接口有更新，展开后清除提示`">有更新</span><em>{{ row.count }}</em></button><button class="api-tag-export-trigger" title="导出整个标签的 OpenAPI URL" :disabled="tagExportLoading" @click="openTagExport(row)">URL</button></div>
+            <button v-else class="api-tree-endpoint" :class="{active:row.item?.id===selected?.id}" :style="{paddingLeft:`${15+row.depth*16}px`}" @click="selectTreeEndpoint(row.item)"><span class="api-method" :class="row.item?.method.toLowerCase()">{{ row.item?.method }}</span><span class="api-tree-copy"><b>{{ row.item?.title }}</b><code>{{ row.item?.path }}</code></span><span v-if="endpointUpdate(row.item)" class="api-update-badge">{{ endpointUpdate(row.item)==='added' ? '新增' : '更新' }}</span><em v-if="row.item?.deprecated">弃用</em></button>
           </template>
           <p v-if="activeSource && !filtered.length">{{ endpoints.length ? "没有符合筛选条件的接口。" : "尚无缓存，请点击同步。" }}</p>
         </div>
@@ -406,12 +485,22 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown",closeProjectSwi
     </section>
 
     <div v-if="configOpen" class="editor-backdrop" @click.self="configOpen=false"><aside class="task-editor api-project-settings-editor"><header><div><h2>{{ config.id ? '项目设置' : '新增 Apifox 项目' }}</h2></div><button class="icon-button" @click="configOpen=false">×</button></header><div class="api-project-settings-scroll"><section><h3>Apifox 项目</h3><div class="api-credential-status"><span>API 令牌：{{ credential.configured ? credential.source : '未配置' }}</span><RouterLink class="text-button" to="/settings">前往全局设置</RouterLink></div><label>Apifox 项目名称<input v-model="config.apifoxProjectName" autocomplete="off" placeholder="例如 client 接口项目"></label><label>Apifox 项目 ID<input v-model="config.externalProjectId" autocomplete="off" placeholder="在 Apifox 项目设置 → 基本设置中复制"></label></section><section><h3>接口测试</h3><label>请求基地址<input v-model="testConfig.baseUrl" autocomplete="off" placeholder="例如 https://api.example.com；留空使用 OpenAPI servers[0]"></label><label>Token 请求头名称<input v-model="testConfig.tokenHeader" autocomplete="off" placeholder="例如 Authorization 或 hlzt-token"></label><label>Token 值<input v-model="testConfig.token" type="password" autocomplete="new-password" :placeholder="testTokenConfigured ? '已保存；留空不会覆盖' : '例如 Bearer xxx 或原始 Token'"></label><p>Token {{ testTokenConfigured ? '已保存到 Windows 凭据库' : '尚未配置' }}，不会写入数据库、日志或请求预览。</p><button v-if="testTokenConfigured" class="text-button danger-text api-clear-token" :disabled="settingsLoading" @click="clearTestToken">清除当前项目 Token</button></section><section title="GET、DELETE 使用 params；POST、PUT、PATCH 使用 data；路径参数自动加入函数参数。"><h3>复制代码模板</h3><label>请求客户端<select v-model="codeTemplate.client"><option value="request">request 封装</option><option value="axios">axios</option><option value="uni-request">uni.request</option></select></label><label>函数名前缀<input v-model="codeTemplate.functionPrefix" autocomplete="off" placeholder="例如 _ 或 api"></label><label class="api-template-check"><input v-model="codeTemplate.typescript" type="checkbox"><span>生成 TypeScript 参数类型</span></label><label v-if="codeTemplate.client!=='uni-request'" class="api-template-check"><input v-model="codeTemplate.includeImport" type="checkbox"><span>在代码顶部包含 import</span></label><label v-if="codeTemplate.includeImport && codeTemplate.client!=='uni-request'">导入路径<input v-model="codeTemplate.importPath" autocomplete="off" :placeholder="codeTemplate.client==='axios' ? 'axios' : '@/utils/request'"></label></section></div><footer><button v-if="activeSource && config.id===activeSource.id" class="text-button danger-text" :disabled="settingsLoading" @click="removeSource(activeSource)">删除当前项目</button><span v-else></span><button class="button secondary" @click="configOpen=false">取消</button><button class="button primary" :disabled="settingsLoading || !config.externalProjectId.trim() || !config.apifoxProjectName.trim() || !testConfig.tokenHeader.trim()" @click="persistProjectSettings">{{ settingsLoading ? '保存中…' : config.id ? '保存项目设置' : '新增项目' }}</button></footer></aside></div>
-    <div v-if="testPreviewOpen && testPreview" class="editor-backdrop" @click.self="testPreviewOpen=false"><aside class="task-editor api-test-preview-editor"><header><div><h2>确认接口测试请求</h2></div><button class="icon-button" @click="testPreviewOpen=false">×</button></header><div class="api-test-preview-scroll"><div class="api-preview-warning" :class="{danger:testPreview.requiresConfirmation}"><b>{{ testPreview.requiresConfirmation ? '可能修改真实数据' : '发送前确认' }}</b><span>{{ testPreview.warning }}</span></div><div v-if="testPreviewError" class="api-preview-error">{{ testPreviewError }}</div><label>最终请求地址<input v-model="testPreviewUrl" autocomplete="off"></label><section><b>请求头</b><div class="api-preview-headers"><span v-for="(value,name) in testPreview.headers" :key="name"><code>{{ name }}</code><em>{{ value }}</em></span><small v-if="!Object.keys(testPreview.headers).length">没有额外请求头</small></div></section><label v-if="testPreview.body!==null">请求体 JSON<textarea v-model="testPreviewBody" rows="10" spellcheck="false"></textarea></label><details><summary>查看自动生成的请求数据</summary><pre>{{ pretty(testPreview.requestData) }}</pre></details><label v-if="testPreview.requiresConfirmation" class="api-danger-confirm"><input v-model="testPreviewConfirmed" type="checkbox"><span>我已核对地址和请求体，并确认该请求可能修改真实业务数据</span></label></div><footer><span></span><button class="button secondary" @click="testPreviewOpen=false">取消</button><button class="button primary" :disabled="testingEndpointId===testPreview.endpointId || !testPreviewUrl.trim() || (testPreview.requiresConfirmation && !testPreviewConfirmed)" @click="sendEndpointTest">{{ testingEndpointId===testPreview.endpointId ? '发送中…' : `发送 ${testPreview.method} 请求` }}</button></footer></aside></div>
+    <div v-if="testPreviewOpen && testPreview" class="editor-backdrop" @click.self="testPreviewOpen=false"><aside class="task-editor api-test-preview-editor"><header><div><h2>确认接口测试请求</h2></div><button class="icon-button" @click="testPreviewOpen=false">×</button></header><div class="api-test-preview-scroll"><div class="api-preview-warning" :class="{danger:testPreview.requiresConfirmation}"><b>{{ testPreview.requiresConfirmation ? '可能修改真实数据' : '发送前确认' }}</b><span>{{ testPreview.warning }}</span></div><div v-if="testPreviewError" class="api-preview-error">{{ testPreviewError }}</div><label>最终请求地址<input :value="testRequestUrl" readonly title="根据勾选参数自动生成；基地址在项目设置中修改"></label><section><b>请求头</b><div class="api-preview-headers"><span v-for="(value,name) in testPreview.headers" :key="name"><code>{{ name }}</code><em>{{ value }}</em></span><small v-if="!Object.keys(testPreview.headers).length">没有额外请求头</small></div></section><details class="api-test-parameters" open><summary>请求参数（已选 {{ testParameters.filter(row=>row.checked).length }} / {{ selectableParameters.length }}）</summary><p>必填参数默认勾选且不可取消，已生成初始值；分页参数默认填入。可选参数勾选后允许为空，仅校验必填参数。对象和数组可填写 JSON。</p><label class="api-parameter-select-all"><input type="checkbox" :checked="allTestParametersSelected" :indeterminate="!allTestParametersSelected && testParameters.some(row=>row.checked)" :disabled="!selectableParameters.length" @change="selectAllTestParameters">全选</label><div class="api-parameter-list"><div v-for="row in testParameters" :key="row.location+':'+row.name" class="api-parameter-row"><input v-model="row.checked" type="checkbox" :disabled="row.disabled || row.required" :aria-label="'选择 '+row.location+'.'+row.name"><div><b>{{ row.name }}</b><small>{{ row.location }} · {{ row.type }}{{ row.required ? ' · 必填' : '' }}</small><small v-if="row.description">{{ row.description }}</small><small v-if="row.disabled">凭据或只读字段，不在此处传入</small><textarea v-if="row.type==='object' || row.type==='array'" v-model="row.value" :disabled="!row.checked" :aria-label="'参数值 '+row.location+'.'+row.name" placeholder="填写 JSON" rows="3" spellcheck="false"></textarea><input v-else v-model="row.value" :disabled="!row.checked" :aria-label="'参数值 '+row.location+'.'+row.name" :placeholder="row.type==='boolean' ? 'true / false' : '勾选后填写参数值'" autocomplete="off"></div></div><p v-if="!testParameters.length">文档未声明可选参数。</p></div></details><label v-if="testPreview.requiresConfirmation" class="api-danger-confirm"><input v-model="testPreviewConfirmed" type="checkbox"><span>我已核对地址和请求体，并确认该请求可能修改真实业务数据</span></label></div><footer><span></span><button class="button secondary" @click="testPreviewOpen=false">取消</button><button class="button primary" :disabled="testingEndpointId===testPreview.endpointId || !testPreviewUrl.trim() || (testPreview.requiresConfirmation && !testPreviewConfirmed)" @click="sendEndpointTest">{{ testingEndpointId===testPreview.endpointId ? '发送中…' : `发送 ${testPreview.method} 请求` }}</button></footer></aside></div>
     <div v-if="tagExportOpen" class="editor-backdrop" @click.self="tagExportOpen=false"><aside class="task-editor api-tag-export-editor"><header><div><h2>标签 OpenAPI 导出</h2><p>“{{ tagExport.tagPath }}”及其子标签，共 {{ tagExport.endpointCount }} 个接口</p></div><button class="icon-button" @click="tagExportOpen=false">×</button></header><label>OpenAPI 版本<select v-model="tagExportVersion"><option value="3.0">OpenAPI 3.0</option><option value="3.1">OpenAPI 3.1</option></select></label><label>工作台本地 URL<input :value="tagExportUrl" readonly></label><p>本地只读 URL，退出工作台后不可访问；敏感示例已脱敏</p><footer><span></span><button class="button secondary" @click="openTagExportUrl">打开 URL</button><button class="button primary" @click="copyTagExportUrl">复制 URL</button></footer></aside></div>
   </div>
 </template>
 
 <style scoped>
+.api-update-badge{flex:0 0 auto;white-space:nowrap;padding:2px 5px;border-radius:4px;font-size:11px;line-height:1.5;color:var(--primary);background:color-mix(in srgb,var(--primary) 14%,var(--surface))}
+.api-test-parameters{min-width:0}
+.api-test-parameters p{color:var(--muted);font-size:13px}
+.api-parameter-select-all{display:flex!important;align-items:center;gap:8px;margin:12px 0}
+.api-parameter-list{max-height:420px;overflow:auto;display:grid;gap:10px}
+.api-parameter-row{display:grid;grid-template-columns:20px minmax(0,1fr);gap:10px;padding:12px;border:1px solid var(--line);border-radius:8px}
+.api-parameter-row>div{display:grid;gap:6px;min-width:0}
+.api-parameter-row small{color:var(--muted);overflow-wrap:anywhere}
+.api-parameter-row input[type=checkbox],.api-parameter-select-all input[type=checkbox]{width:16px!important;height:16px;min-height:0;margin:3px 0;accent-color:var(--primary)}
+.api-parameter-row input:disabled,.api-parameter-row textarea:disabled{opacity:.5}
 .api-docs-view{height:calc(100vh - 118px);min-height:600px;display:flex;flex-direction:column;overflow:hidden}.api-docs-view>.page-header{flex:0 0 72px}
 .api-onboarding{margin-bottom:12px;padding:18px;display:flex;align-items:center;gap:14px}.api-onboarding p{flex:1;margin:0;color:var(--muted)}
 .api-docs-layout{flex:1;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr);overflow:hidden}.api-endpoint-panel,.api-detail-panel{min-width:0;min-height:0;display:flex;flex-direction:column}.api-endpoint-panel{border-right:1px solid var(--line)}.api-endpoint-panel>header{min-height:67px;padding:11px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px;overflow:visible}.api-endpoint-heading{min-width:0;display:flex!important;align-items:center;gap:9px!important}.api-project-switch{position:relative;min-width:0;display:grid;gap:5px}.api-project-switch-trigger{min-width:0;max-width:220px;display:flex;align-items:center;gap:8px;border:0;border-radius:6px;background:transparent;color:var(--text);padding:3px 5px;text-align:left}.api-project-switch-trigger:hover,.api-project-switch-trigger:focus-visible,.api-project-switch-trigger[aria-expanded="true"]{background:var(--primary-soft);color:var(--primary);outline:0}.api-project-switch-trigger strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:18px;line-height:1.2}.api-project-switch-chevron{width:7px;height:7px;flex:0 0 auto;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg) translateY(-2px);transition:transform .15s ease}.api-project-switch-trigger[aria-expanded="true"] .api-project-switch-chevron{transform:rotate(225deg) translate(-1px,-1px)}.api-project-switch>small{color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.api-project-switch-menu{position:absolute;z-index:80;top:calc(100% + 7px);left:0;width:min(280px,calc(100vw - 48px));max-height:310px;padding:6px;overflow-y:auto;box-shadow:0 16px 40px rgba(0,0,0,.36)}.api-project-switch-menu>button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;border:0;border-radius:7px;background:transparent;color:var(--text);padding:10px;text-align:left}.api-project-switch-menu>button:hover,.api-project-switch-menu>button:focus-visible,.api-project-switch-menu>button.active{background:var(--primary-soft);color:var(--primary);outline:0}.api-project-switch-menu>button>span{min-width:0;display:grid;gap:4px}.api-project-switch-menu b,.api-project-switch-menu small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.api-project-switch-menu small{color:var(--muted);font-size:9px}.api-project-switch-menu em{flex:0 0 auto;color:var(--muted);font-size:9px;font-style:normal}.api-project-switch-menu>p{margin:0;padding:16px 10px;color:var(--muted)}.api-endpoint-list{min-height:0;overflow-y:auto;overflow-x:hidden;flex:1;scrollbar-gutter:stable}.api-endpoint-list>p{padding:24px 14px;color:var(--muted);line-height:1.7}
