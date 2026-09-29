@@ -20,6 +20,7 @@ export const workbenchNavigationItems: WorkbenchNavigationItem[] = [
   { path:"/content", icon:"content", label:"内容工坊", vip:true },
   { path:"/videos", icon:"videos", label:"视频中心", vip:true },
   { path:"/knowledge", icon:"knowledge", label:"知识库" },
+  { path:"/rest", icon:"rest", label:"休息站" },
 ];
 
 export const navigationOrderChangedEvent = "workbench-navigation-order-changed";

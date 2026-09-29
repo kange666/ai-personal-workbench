@@ -4,6 +4,7 @@ defineProps<{ name: string }>();
 
 <template>
   <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <template v-if="name === 'rest'"><path d="M7 8h10c3 0 4 3 4 8 0 3-3 3-5-1H8c-2 4-5 4-5 1 0-5 1-8 4-8Z"/><path d="M8 10v5M5.5 12.5h5M15.5 11.5h.01M18 14h.01M10 8V5h4"/></template>
     <template v-if="name === 'home'"><path d="M3.5 10.5 12 3.8l8.5 6.7"/><path d="M5.8 9.3v10.2h12.4V9.3"/><path d="M9.5 19.5v-6h5v6"/></template>
     <template v-else-if="name === 'records'"><rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></template>
     <template v-else-if="name === 'projects'"><path d="M4 7.5h6l1.7 2H20v8.8a2.2 2.2 0 0 1-2.2 2.2H6.2A2.2 2.2 0 0 1 4 18.3z"/><path d="M4 7.5V6.2A2.2 2.2 0 0 1 6.2 4h3.2l1.7 2H18"/></template>

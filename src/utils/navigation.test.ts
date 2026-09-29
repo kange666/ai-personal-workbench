@@ -15,6 +15,12 @@ describe("navigation settings", () => {
     expect(loadNavigationOrder()).toHaveLength(workbenchNavigationItems.length);
   });
 
+  it("旧导航排序自动补充休息站，入口无需VIP", () => {
+    localStorage.setItem("workbench-navigation-order-v1", JSON.stringify(["/", "/calendar"]));
+    expect(loadNavigationOrder()).toContain("/rest");
+    expect(workbenchNavigationItems.find(item => item.path === "/rest")).toEqual({ path:"/rest", icon:"rest", label:"休息站" });
+  });
+
   it("只保存有效且不重复的隐藏菜单路径，并通知应用外壳刷新", () => {
     const listener = vi.fn();
     window.addEventListener(navigationOrderChangedEvent, listener);

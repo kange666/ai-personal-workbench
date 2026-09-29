@@ -23,6 +23,7 @@ const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: "/", name: "dashboard", component: DashboardView, meta: { title: "工作台" } },
+    { path: "/rest", name: "rest", component: () => import("../views/RestView.vue"), meta: { title: "休息站" } },
     { path: "/work-records", name: "work-records", component: WorkRecordsView, meta: { title: "工作记录" } },
     { path: "/projects", name: "projects", component: ProjectsView, meta: { title: "项目资产" } },
     { path: "/deployments", name: "deployments", component: DeploymentsView, meta: { title: "发布中心" } },
