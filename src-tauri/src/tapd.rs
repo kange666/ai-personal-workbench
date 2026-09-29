@@ -21,9 +21,9 @@ const CREDENTIAL_SERVICE: &str = "AI Personal Workbench";
 const CREDENTIAL_USER: &str = "tapd-openapi";
 const TAPD_API_ROOT: &str = "https://api.tapd.cn";
 #[cfg(test)]
-const WORKSPACE_ID: &str = "37583308";
+const WORKSPACE_ID: &str = "99000001";
 #[cfg(test)]
-const WORKSPACE_NAME: &str = "安全生产管理";
+const WORKSPACE_NAME: &str = "匿名测试项目";
 const DEFAULT_OWNER: &str = "刘子世康";
 const PAGE_LIMIT: usize = 200;
 
@@ -2523,6 +2523,16 @@ pub async fn review_tapd_codex_job(
 mod tests {
     use super::*;
 
+    fn test_database(path: std::path::PathBuf) -> DatabaseState {
+        let state = DatabaseState::new(path).unwrap();
+        // 项目配置属于测试夹具，不能依赖产品给所有新数据库预置真实项目。
+        state.connect().unwrap().execute(
+            "INSERT INTO tapd_projects(workspace_id,workspace_name,owner,created_at,updated_at) VALUES(?1,?2,?3,'now','now')",
+            params![WORKSPACE_ID, WORKSPACE_NAME, DEFAULT_OWNER],
+        ).unwrap();
+        state
+    }
+
     fn test_item(workspace_id: &str, item_id: &str, status: &str) -> TapdWorkItem {
         TapdWorkItem {
             item_key: tapd_item_key(workspace_id, item_id),
@@ -2578,7 +2588,7 @@ mod tests {
     fn project_registry_keeps_multiple_projects_separate() {
         let directory = std::env::temp_dir().join(format!("tapd-projects-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
         let now = Utc::now().to_rfc3339();
         state
             .connect()
@@ -2612,7 +2622,7 @@ mod tests {
     fn same_raw_bug_id_is_kept_separate_between_projects() {
         let directory = std::env::temp_dir().join(format!("tapd-composite-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
         let now = Utc::now().to_rfc3339();
         state
             .connect()
@@ -2656,7 +2666,7 @@ mod tests {
     fn reopened_bug_creates_one_candidate_for_its_new_tapd_version() {
         let directory = std::env::temp_dir().join(format!("tapd-reopened-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
         let project = project_by_id(&state, WORKSPACE_ID).unwrap();
         let mut item = test_item(WORKSPACE_ID, "reopen-1", "resolved");
         item.status_label = "已解决".into();
@@ -2686,7 +2696,7 @@ mod tests {
     fn rule_preview_reports_existing_items_that_will_enter_the_next_queue() {
         let directory = std::env::temp_dir().join(format!("tapd-preview-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
         let project = project_by_id(&state, WORKSPACE_ID).unwrap();
         let item = test_item(WORKSPACE_ID, "preview-1", "new");
         save_items(&state, &project, &[item.clone()], false).unwrap();
@@ -2788,7 +2798,7 @@ mod tests {
     fn tapd_sync_baseline_does_not_create_history_noise_and_changes_are_deduplicated() {
         let directory = std::env::temp_dir().join(format!("tapd-notifications-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
         let mut item = TapdWorkItem {
             item_key: tapd_item_key(WORKSPACE_ID, "bug-1"),
             id: "bug-1".into(),
@@ -2849,7 +2859,7 @@ mod tests {
     fn changed_bug_versions_become_candidates_once_the_version_is_consumed() {
         let directory = std::env::temp_dir().join(format!("tapd-auto-fix-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
         let baseline = TapdWorkItem {
             item_key: tapd_item_key(WORKSPACE_ID, "bug-baseline"),
             id: "bug-baseline".into(),
@@ -2900,7 +2910,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("tapd-report-{}", Uuid::new_v4()));
         let repository = directory.join("client");
         std::fs::create_dir_all(&repository).unwrap();
-        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
         register_repository(&state, &repository, "npm test");
         let item = TapdWorkItem {
             item_key: tapd_item_key(WORKSPACE_ID, "bug-report"),
@@ -3023,7 +3033,7 @@ mod tests {
             &RepositoryCommands::default(),
         );
         assert!(prompt.contains("不要提交、推送、重置、清理或删除"));
-        assert!(prompt.contains("安全生产管理"));
+        assert!(prompt.contains(WORKSPACE_NAME));
         assert!(prompt.contains("用户补充说明（来自工作台）"));
         assert!(prompt.contains("附件弹窗需要支持图片预览"));
         assert!(prompt.contains("修改前验证"));

@@ -24,7 +24,14 @@ function readTasks(): WorkTask[] {
 }
 
 export const useWorkbenchStore = defineStore("workbench", () => {
-  const tasks = ref<WorkTask[]>(readTasks());
+  // 桌面端以数据库为唯一来源，不把浏览器演示数据写进正式库。
+  const tasks = ref<WorkTask[]>(isTauriRuntime() ? [] : readTasks());
+  const loadError = ref("");
+  const hydrating = ref(false);
+  const pendingTaskIds = ref<string[]>([]);
+  let mutationRevision = 0;
+  const changedTaskRevisions = new Map<string, number>();
+  let hydratePending: Promise<void> | undefined;
   const theme = ref<ThemeMode>((localStorage.getItem(THEME_KEY) as ThemeMode | null) ?? "command");
 
   const todayText = () => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; };
@@ -43,41 +50,61 @@ export const useWorkbenchStore = defineStore("workbench", () => {
     return `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")}`;
   }
 
-  function refreshTaskStatuses() {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    for (const task of tasks.value) {
-      if (["done", "cancelled", "draft", "blocked"].includes(task.status)) continue;
-      const due = deadline(task);
-      if (due && due < today && task.status !== "overdue") {
-        task.status = "overdue";
-        task.updatedAt = new Date().toISOString();
-        if (isTauriRuntime()) void saveTask(task);
-      } else if ((!due || due >= today) && task.status === "overdue") {
-        task.status = "todo";
-        task.updatedAt = new Date().toISOString();
-        if (isTauriRuntime()) void saveTask(task);
-      }
-    }
+  function normalizedTask(task: WorkTask): WorkTask {
+    if (["done", "cancelled", "draft", "blocked"].includes(task.status)) return task;
+    const due = deadline(task);
+    const overdue = Boolean(due && due < todayText());
+    return { ...task, status: overdue ? "overdue" : task.status === "overdue" ? "todo" : task.status };
   }
 
-  async function hydrate() {
-    if (!isTauriRuntime()) return;
+  async function persistTask(task: WorkTask) {
+    const next = normalizedTask(task);
+    if (pendingTaskIds.value.includes(next.id)) throw new Error("该任务正在保存，请稍后重试。");
+    pendingTaskIds.value.push(next.id);
     try {
+      if (isTauriRuntime()) await saveTask(next);
+      mutationRevision += 1;
+      changedTaskRevisions.set(next.id, mutationRevision);
+      const index = tasks.value.findIndex(item => item.id === next.id);
+      if (index < 0) tasks.value.unshift(next);
+      else tasks.value[index] = next;
+    } finally { pendingTaskIds.value = pendingTaskIds.value.filter(id => id !== next.id); }
+  }
+
+  async function refreshTaskStatuses() {
+    const updates = tasks.value.filter(task => normalizedTask(task).status !== task.status && !pendingTaskIds.value.includes(task.id));
+    const results = await Promise.allSettled(updates.map(task => persistTask({ ...task, updatedAt: new Date().toISOString() })));
+    if (results.some(result => result.status === "rejected")) loadError.value = "部分任务状态未保存，已保留原状态，请重试读取。";
+  }
+
+  function hydrate(): Promise<void> {
+    if (!isTauriRuntime()) return Promise.resolve();
+    if (hydratePending) return hydratePending;
+    hydrating.value = true;
+    hydratePending = (async () => { try {
+      const revision = mutationRevision;
       const persisted = await listTasks();
-      if (persisted.length) tasks.value = persisted;
-      else await Promise.all(tasks.value.map((task) => saveTask(task)));
-      refreshTaskStatuses();
+      // 较旧的查询仍提供其他任务，但不能覆盖期间已保存/删除的任务。
+      const merged = new Map(persisted.map(task => [task.id, task]));
+      for (const [id, changedAt] of changedTaskRevisions) if (changedAt > revision) {
+        const task = tasks.value.find(item => item.id === id);
+        if (task) merged.set(id, task); else merged.delete(id);
+      }
+      tasks.value = [...merged.values()];
+      loadError.value = "";
+      await refreshTaskStatuses();
     } catch (error) {
-      console.error("读取本地数据库失败，暂时使用浏览器存储。", error);
-    }
+      loadError.value = `任务读取失败，已保留上次成功数据：${String(error)}`;
+      throw error;
+    } })().finally(() => { hydrating.value = false; hydratePending = undefined; });
+    return hydratePending;
   }
 
   function setTheme(value: ThemeMode) {
     theme.value = value;
   }
 
-  function addTask(draft: TaskDraft) {
+  async function addTask(draft: TaskDraft) {
     const now = new Date().toISOString();
     const task: WorkTask = {
       id: crypto.randomUUID(),
@@ -96,64 +123,58 @@ export const useWorkbenchStore = defineStore("workbench", () => {
       createdAt: now,
       updatedAt: now,
     };
-    tasks.value.unshift(task);
-    refreshTaskStatuses();
-    if (isTauriRuntime()) void saveTask(task);
+    await persistTask(task);
   }
 
-  function updateTask(id: string, patch: Partial<WorkTask>) {
+  async function updateTask(id: string, patch: Partial<WorkTask>) {
     const task = tasks.value.find((item) => item.id === id);
-    if (!task) return;
-    Object.assign(task, patch, { updatedAt: new Date().toISOString() });
-    refreshTaskStatuses();
-    if (isTauriRuntime()) void saveTask(task);
+    if (!task) throw new Error("任务已不存在，请重新读取。");
+    await persistTask({ ...task, ...patch, id, updatedAt: new Date().toISOString() });
   }
 
-  function toggleTask(id: string) {
+  async function toggleTask(id: string) {
     const task = tasks.value.find((item) => item.id === id);
     if (!task) return;
     const done = task.status === "done";
-    task.status = done ? "todo" : "done";
-    task.progress = done ? Math.min(task.progress, 95) : 100;
-    task.completedAt = done ? undefined : new Date().toISOString();
-    task.updatedAt = new Date().toISOString();
-    refreshTaskStatuses();
-    if (isTauriRuntime()) void saveTask(task);
+    await updateTask(id, { status: done ? "todo" : "done", progress: done ? Math.min(task.progress, 95) : 100, completedAt: done ? undefined : new Date().toISOString() });
   }
 
-  function confirmTask(id: string) {
+  async function confirmTask(id: string) {
     const task = tasks.value.find((item) => item.id === id);
     if (!task || task.status !== "draft") return;
-    task.status = "todo";
-    task.updatedAt = new Date().toISOString();
-    if (task.source === "ai") task.source = "conversation";
-    if (isTauriRuntime()) void saveTask(task);
+    await updateTask(id, { status: "todo", source: task.source === "ai" ? "conversation" : task.source });
   }
 
-  function postponeTask(id: string) {
+  async function postponeTask(id: string) {
     const task = tasks.value.find((item) => item.id === id);
     if (!task) return;
     const shift = (value: string | undefined, days: number) => { if (!value) return value; const date=new Date(`${value}T00:00:00`); date.setDate(date.getDate()+days); return date.toLocaleDateString("sv-SE"); };
-    if (task.scope === "day") task.plannedDate = shift(todayText(), 1);
-    else if (task.scope === "week") task.weekStart = shift(task.weekStart || currentWeekStart(), 7);
-    else { task.startDate=shift(task.startDate,7); task.endDate=shift(task.endDate,7); }
-    task.status="todo"; task.updatedAt=new Date().toISOString();
-    if (isTauriRuntime()) void saveTask(task);
+    const patch: Partial<WorkTask> = { status: "todo" };
+    if (task.scope === "day") patch.plannedDate = shift(todayText(), 1);
+    else if (task.scope === "week") patch.weekStart = shift(task.weekStart || currentWeekStart(), 7);
+    else { patch.startDate=shift(task.startDate,7); patch.endDate=shift(task.endDate,7); }
+    await updateTask(id, patch);
   }
 
-  function removeTask(id: string) {
-    tasks.value = tasks.value.filter((item) => item.id !== id);
-    if (isTauriRuntime()) void deleteTaskFromBackend(id);
+  async function removeTask(id: string) {
+    if (pendingTaskIds.value.includes(id)) throw new Error("该任务正在保存，请稍后重试。");
+    pendingTaskIds.value.push(id);
+    try {
+      if (isTauriRuntime()) await deleteTaskFromBackend(id);
+      mutationRevision += 1;
+      changedTaskRevisions.set(id, mutationRevision);
+      tasks.value = tasks.value.filter((item) => item.id !== id);
+    } finally { pendingTaskIds.value = pendingTaskIds.value.filter(item => item !== id); }
   }
 
   function tasksByScope(scope: TaskScope) {
     return tasks.value.filter((task) => task.scope === scope);
   }
 
-  watch(tasks, (value) => localStorage.setItem(TASKS_KEY, JSON.stringify(value)), { deep: true });
+  watch(tasks, (value) => { if (!isTauriRuntime()) localStorage.setItem(TASKS_KEY, JSON.stringify(value)); }, { deep: true });
   watch(theme, (value) => localStorage.setItem(THEME_KEY, value));
 
-  refreshTaskStatuses();
+  if (!isTauriRuntime()) void refreshTaskStatuses();
 
-  return { tasks, theme, todayTasks, weekTasks, projectTasks, pendingCount, completedCount, hydrate, setTheme, addTask, updateTask, toggleTask, confirmTask, postponeTask, removeTask, tasksByScope, refreshTaskStatuses };
+  return { tasks, loadError, hydrating, pendingTaskIds, theme, todayTasks, weekTasks, projectTasks, pendingCount, completedCount, hydrate, setTheme, addTask, updateTask, toggleTask, confirmTask, postponeTask, removeTask, tasksByScope, refreshTaskStatuses };
 });

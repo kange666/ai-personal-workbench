@@ -5,6 +5,7 @@ import { cancelTestRun, getTestCaseGeneration, getTestRun, isTauriRuntime, listF
 import { useWorkbenchStore } from "../stores/workbench";
 import { readTestingMenuCache, writeTestingMenuCache } from "../utils/testingCenterCache";
 import TestReportDialog from "../components/TestReportDialog.vue";
+import { getTestProject } from "../services/backend";
 
 const demoMenus: TestMenu[] = [
   { id: "project:safe-responsibility", project: "生产安全pc", projectPath: "F:/TB-project/scaq-client", projectKind: "vue", name: "安全责任", route: "/safetyManagement/safeResponsibility", sourcePath: "src/views/safe/safetyManagement/safeResponsibility/index.vue", caseId: "safe-responsibility", hasCaseFile: true, canCreateCaseFile: false, capabilities: { mock: true, realApi: true, sourceStyle: true, browserStyle: true }, tested: true, latestStatus: "failed", latestTime: "2026-08-24T14:21:18+08:00" },
@@ -333,13 +334,15 @@ async function refreshSelectedProject() {
   recommendations.value = [];
   recommendationsLoading.value = false;
   try {
-    const [nextMenus, nextRuns] = await Promise.all([
+    const [nextMenus, nextRuns, projectDetail] = await Promise.all([
       listTestMenus(projectPath),
       listTestRuns(undefined, projectPath),
+      getTestProject(projectPath),
     ]);
     if (sequence !== projectLoadSequence || selectedProjectPath.value !== projectPath) return;
     menus.value = nextMenus;
     runs.value = nextRuns;
+    projects.value = projects.value.map(item => normalizedProjectPath(item.path) === normalizedProjectPath(projectPath) ? { ...projectDetail, path: item.path } : item);
     cacheProjectMenus(projectPath, nextMenus);
     selectedRecommendations.value = [];
     void refreshRecommendations(projectPath, sequence);

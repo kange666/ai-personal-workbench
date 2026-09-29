@@ -14,6 +14,10 @@ vi.mock("../services/backend", () => ({
   deleteTask: vi.fn(),
   getTestCaseGeneration: backend.getTestCaseGeneration,
   getTestRun: vi.fn(),
+  getTestProject: vi.fn(async (path:string) => ({
+    path, name:"client", projectKind:"vue", caseCount:1, pageCount:1, inspected:true,
+    capabilities:{mock:true,realApi:true,sourceStyle:true,browserStyle:true}, warnings:[],
+  })),
   isTauriRuntime: () => true,
   listFeatureParity: vi.fn(async () => []),
   listTasks: vi.fn(async () => []),

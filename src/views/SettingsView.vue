@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { relaunch } from "@tauri-apps/plugin-process";
 import { computed, onMounted, ref, shallowRef } from "vue";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -11,6 +12,8 @@ import { fontSizeOptions, loadFontSize, saveFontSize, type FontSize } from "../u
 import { cockpitIdleMinuteOptions, loadCockpitIdleMinutes, saveCockpitIdleMinutes, type CockpitIdleMinutes } from "../utils/cockpit";
 import { loadWorkbenchNotificationsEnabled, saveWorkbenchNotificationsEnabled } from "../utils/notificationPreference";
 import { refreshUpdateStatus as checkForUpdates } from "../services/updateStatus";
+import { backgroundRequest } from "../services/backendRequest";
+import { listBackgroundTaskStatus, type BackgroundTaskStatus } from "../services/backend";
 import {
   clearDeepSeekKey,
   clearApifoxToken,
@@ -93,6 +96,16 @@ const qqAuthCode = ref("");
 const vipStatus = ref<VipStatus>({ active:false });
 const vipCode = ref("");
 const backupStatus = ref<BackupStatus>({ databasePath:"", backupDirectory:"", backups:[] });
+const diagnostics = ref<BackgroundTaskStatus[]>([]);
+const diagnosticsLoading = ref(false);
+const diagnosticsError = ref("");
+async function refreshDiagnostics() {
+  if (!isTauriRuntime() || diagnosticsLoading.value) return;
+  diagnosticsLoading.value=true; diagnosticsError.value="";
+  try { diagnostics.value=await backgroundRequest(listBackgroundTaskStatus); }
+  catch { diagnosticsError.value="运行诊断读取失败，请重试。"; }
+  finally { diagnosticsLoading.value=false; }
+}
 const updateStatus = ref<UpdateStatus>({ currentVersion:"", latestVersion:"", updateAvailable:false, publishedAt:"", releaseUrl:"", installerUrl:"", portableUrl:"", checkedAt:"", message:"尚未检查" });
 const pendingUpdate = shallowRef<Update | null>(null);
 const updatePhase = ref<"idle" | "checking" | "ready" | "backing-up" | "downloading" | "installing" | "error">("idle");
@@ -137,27 +150,45 @@ function emailStateText() {
 
 async function refresh() {
   if (!isTauriRuntime()) return;
-  [status.value, apifoxStatus.value, tapdStatus.value, emailStatus.value, vipStatus.value, backupStatus.value, updateStatus.value, trayIconStyle.value] = await Promise.all([
-    getAiStatus(),
-    getApifoxCredentialStatus(),
-    getTapdStatus(),
-    getEmailNotificationStatus(),
-    getVipStatus(),
-    getBackupStatus(),
-    checkForUpdates(),
-    getTrayIconStyle(),
+  // 各设置独立赋值，外部服务不可用不影响备份、字号和本地偏好显示。
+  async function read<T>(name:string, request:()=>Promise<T>, assign:(value:T)=>void) {
+    try { assign(await request()); }
+    catch { error.value = `${error.value ? `${error.value}；` : ""}${name}读取失败，可重新进入或在卡片中重试`; }
+  }
+  void backgroundRequest(checkForUpdates).then(value=>{ updateStatus.value=value; }).catch(()=>{ updateHint.value="版本检查失败，可点击重新检查。"; });
+  await Promise.all([
+    read("AI设置",getAiStatus,value=>{status.value=value;}),
+    read("接口文档设置",getApifoxCredentialStatus,value=>{apifoxStatus.value=value;}),
+    read("TAPD设置",getTapdStatus,value=>{tapdStatus.value=value;tapdAuthMode.value=value.authMode;tapdOwner.value=value.owner;}),
+    read("邮件设置",getEmailNotificationStatus,value=>{emailStatus.value=value;}),
+    read("功能权限",getVipStatus,value=>{vipStatus.value=value;}),
+    read("本地备份",getBackupStatus,value=>{backupStatus.value=value;}),
+    read("托盘样式",getTrayIconStyle,value=>{trayIconStyle.value=value;}),
+    read("开机启动",isEnabled,value=>{autostartEnabled.value=value;}),
+    read("工时设置",getWorkTimeSettings,value=>{workGapMinutes.value=value.gapMinutes;}),
   ]);
-  tapdAuthMode.value = tapdStatus.value.authMode;
-  tapdOwner.value = tapdStatus.value.owner;
-  autostartEnabled.value = await isEnabled();
-  workGapMinutes.value = (await getWorkTimeSettings()).gapMinutes;
 }
 function backupTime(value:string) { return value ? new Intl.DateTimeFormat("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }).format(new Date(value)) : "未知时间"; }
 function backupKind(value:string) { return ({ daily:"每日自动", manual:"手工", export:"导出", "pre-restore":"恢复前保护", migration:"升级前保护" } as Record<string,string>)[value] || value; }
 function backupSize(value:number) { return value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1,Math.round(value / 1024))} KB`; }
 async function createBackup() { loading.value=true; error.value=""; message.value=""; try { const backup=await createDatabaseBackup(); backupStatus.value=await getBackupStatus(); message.value=`备份已创建：${backup.fileName}`; } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
 async function exportBackup() { loading.value=true; error.value=""; message.value=""; try { const backup=await exportDatabaseBackup(); message.value=`备份已导出到：${backup.path}`; await revealLocalFile(backup.path); } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
-async function restoreBackup(path:string) { if (!await confirmAction({ title:"恢复本地数据", message:"恢复会用所选备份替换当前本地数据。系统会先自动创建一份“恢复前保护”备份，是否继续？", confirmText:"恢复备份", tone:"danger" })) return; loading.value=true; error.value=""; message.value=""; try { backupStatus.value=await restoreDatabaseBackup(path); message.value="恢复完成，页面即将重新载入。"; window.setTimeout(()=>window.location.reload(),800); } catch(cause) { error.value=String(cause); } finally { loading.value=false; } }
+async function restoreBackup(path:string) {
+  if (loading.value) return;
+  // 确认期间也锁定入口，避免连点创建两个恢复流程。
+  loading.value=true;
+  if (!await confirmAction({ title:"恢复本地数据", message:"系统会先验证并升级所选备份，正式恢复前创建当前数据的保护备份。恢复完成后工作台将重新启动，是否继续？", confirmText:"恢复并重启", tone:"danger" })) { loading.value=false; return; }
+  loading.value=true; error.value=""; message.value="";
+  let restored=false;
+  try {
+    backupStatus.value=await restoreDatabaseBackup(path);
+    restored=true;
+    message.value="数据恢复和结构升级已完成，正在重新启动工作台。";
+    await relaunch();
+  } catch(cause) {
+    error.value=restored ? "数据已安全恢复，但自动重启失败。请从托盘退出后重新打开工作台；重启前已暂停数据读写。" : String(cause);
+  } finally { if (!restored) loading.value=false; }
+}
 async function locateBackup(path:string) { try { await revealLocalFile(path); } catch(cause) { error.value=String(cause); } }
 async function prepareSignedUpdate() {
   updateHint.value = "";
@@ -418,7 +449,16 @@ onMounted(() => {
         <section v-show="activeSettingsSection==='access'" class="settings-pane settings-access-grid">
           <article class="panel settings-card vip-settings"><div><h2>VIP 功能</h2><p>启用内容工坊和视频中心</p></div><span class="settings-status" :class="{ ready:vipStatus.active }">{{ vipStatus.active ? '已启用' : '未启用' }}</span><label v-if="!vipStatus.active">VIP 码<input v-model="vipCode" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="请输入 4 位 VIP 码" @keyup.enter="enableVip"></label><div class="settings-actions"><button v-if="!vipStatus.active" class="button primary" :disabled="loading || vipCode.length !== 4" @click="enableVip">启用 VIP</button><button v-else class="button secondary" :disabled="loading" @click="disableVip">关闭 VIP</button></div></article>
           <article class="panel settings-card update-settings"><div><h2>版本更新</h2><p>验证签名后安装；安装前自动备份</p></div><span class="settings-status" :class="{ ready:!updateStatus.updateAvailable, warning:updateStatus.updateAvailable }">当前 V{{ updateStatus.currentVersion || '—' }}</span><div class="update-summary"><b>{{ updateStatus.message }}</b><small v-if="updateStatus.latestVersion">线上版本 {{ updateStatus.latestVersion }}</small></div><div v-if="updateBusy || updatePhase==='ready'" class="update-progress"><span><b>{{ updatePhase==='checking' ? '正在验证更新包' : updatePhase==='backing-up' ? '正在备份本地数据' : updatePhase==='downloading' ? '正在下载更新' : updatePhase==='installing' ? '正在安装更新' : '更新包已验证' }}</b><em v-if="updatePhase==='downloading' && updateTotal">{{ updateProgress }}%</em></span><div v-if="updatePhase==='downloading'"><i :style="{width:`${updateProgress}%`}"></i></div><small v-if="updatePhase==='downloading'">{{ formatUpdateBytes(updateDownloaded) }}<template v-if="updateTotal"> / {{ formatUpdateBytes(updateTotal) }}</template></small><small v-else-if="updatePhase==='ready'">签名校验将在安装时再次执行。</small><small v-if="updateHint">{{ updateHint }}</small></div><div class="settings-actions"><button class="button secondary" :disabled="loading || updateBusy" @click="refreshUpdateStatus">重新检查</button><button v-if="updateStatus.updateAvailable" class="button primary" :disabled="updateBusy" @click="installAvailableUpdate">{{ updatePhase==='checking' ? '验证中…' : updatePhase==='backing-up' ? '备份中…' : updatePhase==='downloading' ? (updateTotal ? `下载 ${updateProgress}%` : '正在下载…') : updatePhase==='installing' ? '正在启动安装器…' : '一键更新并重启' }}</button><button v-if="updateStatus.updateAvailable && updateStatus.installerUrl && (updatePhase==='downloading' || updatePhase==='error')" class="button secondary" @click="openUpdateUrl(updateStatus.installerUrl)">手工下载</button></div></article>
-          <details class="panel settings-card-wide data-safety-collapsible" open><summary><div><h2>本地数据保护</h2><p>每日首次启动备份，保留最近 10 份</p></div><span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span><span class="settings-collapse-label"></span></summary><div class="data-safety-body"><div class="settings-actions"><button class="button primary" :disabled="loading" @click="createBackup">立即备份</button><button class="button secondary" :disabled="loading" @click="exportBackup">导出到文档</button></div><div v-if="backupStatus.backups.length" class="backup-list"><article v-for="item in backupStatus.backups" :key="item.path"><span><b>{{ backupKind(item.kind) }}</b><small>{{ backupTime(item.createdAt) }} · {{ backupSize(item.sizeBytes) }}</small></span><button class="text-button" @click="locateBackup(item.path)">定位</button><button class="text-button danger-text" @click="restoreBackup(item.path)">恢复</button></article></div><small v-else>尚无备份；点击“立即备份”即可创建第一份。</small></div></details>
+          <details class="panel settings-card-wide data-safety-collapsible" open><summary><div><h2>本地数据保护</h2><p>每日首次启动备份，保留最近 10 份</p></div><span class="settings-status ready">{{ backupStatus.backups.length }} 份可用</span><span class="settings-collapse-label"></span></summary><div class="data-safety-body"><div class="settings-actions"><button class="button primary" :disabled="loading" @click="createBackup">立即备份</button><button class="button secondary" :disabled="loading" @click="exportBackup">导出到文档</button></div><div v-if="backupStatus.backups.length" class="backup-list"><article v-for="item in backupStatus.backups" :key="item.path"><span><b>{{ backupKind(item.kind) }}</b><small>{{ backupTime(item.createdAt) }} · {{ backupSize(item.sizeBytes) }}</small></span><button class="text-button" @click="locateBackup(item.path)">定位</button><button class="text-button danger-text" :disabled="loading" @click="restoreBackup(item.path)">恢复</button></article></div><small v-else>尚无备份；点击“立即备份”即可创建第一份。</small></div></details>
+          <details class="panel settings-card-wide data-safety-collapsible diagnostic-settings" @toggle="($event.target as HTMLDetailsElement).open && refreshDiagnostics()">
+            <summary><div><h2>运行诊断</h2><p>本机后台任务的最近状态；日志不含对话正文、账号和令牌</p></div><span class="settings-collapse-label"></span></summary>
+            <div class="data-safety-body">
+              <div class="settings-actions"><button class="button secondary" :disabled="diagnosticsLoading" @click="refreshDiagnostics">{{ diagnosticsLoading ? '读取中…' : '刷新诊断' }}</button></div>
+              <p v-if="diagnosticsError" role="alert">{{ diagnosticsError }}</p>
+              <div v-if="diagnostics.length" class="backup-list"><article v-for="task in diagnostics" :key="task.id"><span><b>{{ task.name }} · {{ task.running ? '运行中' : task.errorMessage ? '异常' : '正常' }}</b><small>最近成功：{{ task.lastSuccessAt ? backupTime(task.lastSuccessAt) : '尚无' }} · 耗时 {{ task.durationMs }} ms</small><small v-if="task.errorMessage">{{ task.errorMessage }}</small></span></article></div>
+              <small v-else-if="!diagnosticsLoading && !diagnosticsError">本次启动尚无后台任务记录。隔离审查模式不会自动执行后台任务。</small>
+            </div>
+          </details>
         </section>
       </main>
     </div>

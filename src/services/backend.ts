@@ -1,30 +1,26 @@
 import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { WorkTask } from "../types/workbench";
-
-let activeBackendRequests = 0;
-
-function emitBackendLoading(command: string) {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("workbench-backend-loading", {
-    detail: { active: activeBackendRequests, command },
-  }));
-}
-
-/** 统一记录本地命令的请求状态，供页面壳层展示加载反馈。 */
-async function invoke<T = void>(command: string, args?: Record<string, unknown>): Promise<T> {
-  activeBackendRequests += 1;
-  emitBackendLoading(command);
-  try {
-    return await tauriInvoke<T>(command, args);
-  } finally {
-    activeBackendRequests = Math.max(0, activeBackendRequests - 1);
-    emitBackendLoading(command);
-  }
-}
+import { invoke } from "./backendRequest";
+export { backgroundRequest } from "./backendRequest";
 
 export interface DatabaseHealth {
   path: string;
   schemaVersion: number;
+}
+
+export interface BackgroundTaskStatus {
+  id: string;
+  name: string;
+  running: boolean;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  lastSuccessAt?: string | null;
+  durationMs: number;
+  errorMessage: string;
+}
+
+export async function listBackgroundTaskStatus(): Promise<BackgroundTaskStatus[]> {
+  return invoke<BackgroundTaskStatus[]>("list_background_task_status");
 }
 
 export interface GpuPerformance {
@@ -145,7 +141,8 @@ export interface CodexQuotaSnapshot {
   available: boolean;
   capturedAt?: string;
   planType?: string;
-  resetCreditsAvailable?: number;
+  resetCreditsAvailable?: number | null;
+  resetCreditsStatus?: "available" | "unavailable" | "error";
   primary?: CodexQuotaWindow;
   secondary?: CodexQuotaWindow;
   sourceFile?: string;
@@ -181,6 +178,8 @@ export interface WorkbenchNotification {
 export type InboxWorkflowStatus = "needs_decision" | "in_progress" | "done" | "archived";
 
 export interface InboxItem {
+  linkedTaskId?: string | null;
+  linkedTaskStatus?: string | null;
   id: string;
   sourceType: "codex" | "tapd" | "tapd_job" | "task_suggestion" | "quick_capture" | "test" | "repository" | "video";
   sourceId: string;
@@ -214,6 +213,22 @@ export interface ProjectProfileUpdate {
   tapdWorkspaceId: string;
   aliases: string[];
   category: string;
+}
+
+export interface ProjectMappingCounts {
+  conversations: number;
+  testRuns: number;
+  workSessions: number;
+}
+
+export interface ProjectMappingPreview {
+  before: ProjectMappingCounts;
+  after: ProjectMappingCounts;
+  added: ProjectMappingCounts;
+  removed: ProjectMappingCounts;
+  unmatched: ProjectMappingCounts;
+  conflicts: string[];
+  blockingConflicts: string[];
 }
 
 export interface ApifoxCredentialStatus {
@@ -519,6 +534,7 @@ export interface JenkinsChange {
 }
 
 export interface JenkinsPublishRecord {
+  canonicalProject?: string | null;
   id: string;
   jobName: string;
   jobFullName: string;
@@ -876,6 +892,8 @@ export interface SuggestionSyncSummary {
 }
 
 export interface DailyActivity {
+  publishCount: number;
+  publishesSucceeded: number;
   date: string;
   conversationCount: number;
   archivedConversationCount: number;
@@ -943,7 +961,7 @@ export interface ReportRecord {
 }
 
 export interface ReportSource {
-  kind: "Codex 对话" | "Git 提交" | "任务" | "测试" | "TAPD 缺陷";
+  kind: "Codex 对话" | "Git 提交" | "任务" | "测试" | "TAPD 缺陷" | "Jenkins 发布";
   id: string;
   title: string;
   project: string;
@@ -1009,6 +1027,7 @@ export type TestMode = "mock" | "real" | "source-style" | "browser-style";
 export type TestRunStatus = "queued" | "running" | "passed" | "failed" | "blocked" | "error" | "cancelled";
 
 export interface TestProject {
+  inspected?: boolean;
   path: string;
   name: string;
   projectKind: "vue" | "uni-app" | "web" | "unknown";
@@ -1551,6 +1570,10 @@ export async function saveProjectProfile(profile: ProjectProfileUpdate): Promise
   return invoke<ProjectProfile>("save_project_profile", { profile });
 }
 
+export async function previewProjectProfile(profile: ProjectProfileUpdate): Promise<ProjectMappingPreview> {
+  return invoke<ProjectMappingPreview>("preview_project_profile", { profile });
+}
+
 export async function getApifoxCredentialStatus(): Promise<ApifoxCredentialStatus> {
   return invoke<ApifoxCredentialStatus>("apifox_credential_status");
 }
@@ -2085,6 +2108,10 @@ export async function listTestProjects(): Promise<TestProject[]> {
   return invoke<TestProject[]>("list_test_projects");
 }
 
+export async function getTestProject(projectPath: string): Promise<TestProject> {
+  return invoke<TestProject>("get_test_project", { projectPath });
+}
+
 export async function listTestMenus(projectPath?: string): Promise<TestMenu[]> {
   return invoke<TestMenu[]>("list_test_menus", { projectPath: projectPath || null });
 }
@@ -2093,8 +2120,8 @@ export async function recommendTestsFromGit(projectPath?: string): Promise<TestR
   return invoke<TestRecommendation[]>("recommend_tests_from_git", { projectPath: projectPath || null });
 }
 
-export async function listTestRuns(menuId?: string, projectPath?: string): Promise<TestRun[]> {
-  return invoke<TestRun[]>("list_test_runs", { menuId, projectPath: projectPath || null });
+export async function listTestRuns(menuId?: string, projectPath?: string, summary = false): Promise<TestRun[]> {
+  return invoke<TestRun[]>("list_test_runs", { menuId, projectPath: projectPath || null, ...(summary ? { summary:true } : {}) });
 }
 
 export async function readTestReport(path: string): Promise<string> {

@@ -53,6 +53,17 @@ describe("DeploymentsView",()=>{
     window.localStorage.clear();
   });
 
+  it("发布记录展示规范项目，未匹配时提供映射入口",async()=>{
+    mocks.records=[publishRecord("mapped","success",{canonicalProject:"生产安全PC"}),publishRecord("unknown","failed")];
+    const wrapper=await mountView();
+    expect(wrapper.text()).toContain("关联项目：生产安全PC");
+    expect(wrapper.text()).toContain("未匹配规范项目");
+    expect(wrapper.find('a[href="/project-mapping"]').exists()).toBe(true);
+    await wrapper.get('[aria-label="搜索发布项目"]').setValue("生产安全PC");
+    expect(wrapper.findAll(".deployment-history>article")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
   it("收藏项目固定显示在项目列表顶部并可取消收藏",async()=>{
     const wrapper=await mountView();
     await wrapper.get(".project-select-trigger").trigger("click");

@@ -1,13 +1,20 @@
-use rusqlite::{params, Connection, MAIN_DB};
+use rusqlite::{params, Connection, OptionalExtension, MAIN_DB};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-pub const SCHEMA_VERSION: i64 = 48;
+#[path = "database_access.rs"]
+mod access;
+pub use access::DatabaseConnection;
+use access::{DatabaseAccess, DatabaseRestoreGuard};
+
+pub const SCHEMA_VERSION: i64 = 49;
 
 #[derive(Clone)]
 pub struct DatabaseState {
     pub path: PathBuf,
+    access: Arc<DatabaseAccess>,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,6 +122,47 @@ pub struct WorkTask {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+pub(crate) fn schema_version(connection: &Connection) -> Result<Option<i64>, String> {
+    let stored = connection
+        .query_row(
+            "SELECT value FROM app_meta WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    stored
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|version| *version >= 0)
+                .ok_or_else(|| "数据库结构版本无效，无法安全升级。".to_string())
+        })
+        .transpose()
+}
+
+fn add_column_if_missing(connection: &Connection, migration: &str) -> Result<(), String> {
+    // 这里只接收下方静态迁移清单；参数化查询表信息，避免把真正的 ALTER 错误当成重复列。
+    let parts = migration.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 7 || parts[..2] != ["ALTER", "TABLE"] || parts[3..5] != ["ADD", "COLUMN"] {
+        return Err(format!("不支持的字段迁移：{migration}"));
+    }
+    let exists = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+            params![parts[2], parts[5]],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("检查迁移字段失败：{error}"))?;
+    if !exists {
+        connection
+            .execute(migration, [])
+            .map_err(|error| format!("数据库字段迁移失败（{}.{}）：{error}", parts[2], parts[5]))?;
+    }
+    Ok(())
 }
 
 // TAPD 多项目下缺陷编号不能单独作为主键；升级时保留原编号并增加项目级复合键。
@@ -443,9 +491,35 @@ fn migrate_api_sources_to_apifox_projects(connection: &Connection) -> Result<(),
 
 impl DatabaseState {
     pub fn new(path: PathBuf) -> Result<Self, String> {
-        let state = Self { path };
-        state.backup_before_migration()?;
-        state.initialize()?;
+        let state = Self {
+            path,
+            access: Arc::default(),
+        };
+        if state
+            .stored_schema_version()?
+            .is_some_and(|version| version > SCHEMA_VERSION)
+        {
+            return Err("数据库来自更新版本，请使用相同或更新版本的工作台打开。".into());
+        }
+        let protection = state.backup_before_migration()?;
+        if let Err(error) = state.initialize() {
+            // 启动升级也保持失败可回退：部分 DDL 成功后不能留下半升级的旧版本数据库。
+            if let Some(backup) = protection {
+                let rollback = state.connect().and_then(|mut connection| {
+                    connection
+                        .restore(MAIN_DB, &backup, None::<fn(rusqlite::backup::Progress)>)
+                        .map_err(|cause| cause.to_string())
+                });
+                if let Err(cause) = rollback {
+                    return Err(format!(
+                        "数据库升级失败：{error}；自动回退失败：{cause}。保护备份：{}",
+                        backup.display()
+                    ));
+                }
+                return Err(format!("数据库升级失败，已回退到升级前数据：{error}"));
+            }
+            return Err(error);
+        }
         Ok(state)
     }
 
@@ -468,16 +542,7 @@ impl DatabaseState {
         if !has_meta {
             return Ok(Some(0));
         }
-        let stored = connection
-            .query_row(
-                "SELECT value FROM app_meta WHERE key='schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(0);
-        Ok(Some(stored))
+        Ok(Some(schema_version(&connection)?.unwrap_or(0)))
     }
 
     fn backup_before_migration(&self) -> Result<Option<PathBuf>, String> {
@@ -516,16 +581,33 @@ impl DatabaseState {
         Ok(Some(backup_path))
     }
 
-    pub fn connect(&self) -> Result<Connection, String> {
+    pub fn connect(&self) -> Result<DatabaseConnection, String> {
+        let lease = self.access.lease()?;
         let connection = Connection::open(&self.path).map_err(|error| error.to_string())?;
         connection
             .busy_timeout(std::time::Duration::from_secs(15))
             .map_err(|error| error.to_string())?;
-        Ok(connection)
+        Ok(DatabaseConnection {
+            connection,
+            _lease: lease,
+        })
+    }
+
+    pub(crate) fn begin_restore(&self) -> Result<DatabaseRestoreGuard, String> {
+        self.access
+            .begin_restore(std::time::Duration::from_secs(15))
     }
 
     fn initialize(&self) -> Result<(), String> {
         let connection = self.connect()?;
+        // 多项目配置已经建立后，不能重新添加用户删除的项目或覆盖现有配置。
+        let had_tapd_projects: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tapd_projects')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -1075,6 +1157,14 @@ impl DatabaseState {
                  );
                  CREATE INDEX IF NOT EXISTS idx_work_inbox_status ON work_inbox_items(workflow_status,priority,updated_at);
                  CREATE INDEX IF NOT EXISTS idx_work_inbox_source ON work_inbox_items(source_type,source_id);
+                 CREATE TABLE IF NOT EXISTS inbox_task_links (
+                   inbox_id TEXT PRIMARY KEY,
+                   task_id TEXT NOT NULL,
+                   source_revision TEXT NOT NULL DEFAULT '',
+                   task_status TEXT NOT NULL,
+                   FOREIGN KEY(inbox_id) REFERENCES work_inbox_items(id) ON DELETE CASCADE,
+                   FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                 );
                  CREATE TABLE IF NOT EXISTS quick_captures (
                    id TEXT PRIMARY KEY,
                    kind TEXT NOT NULL DEFAULT 'note',
@@ -1286,7 +1376,7 @@ impl DatabaseState {
             "ALTER TABLE jenkins_publish_records ADD COLUMN changes_json TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE reports ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''",
         ] {
-            let _ = connection.execute(migration, []);
+            add_column_if_missing(&connection, migration)?;
         }
         migrate_api_sources_to_apifox_projects(&connection)?;
         crate::project_identity::migrate_renamed_project_profiles(&connection)?;
@@ -1331,21 +1421,26 @@ impl DatabaseState {
                 )
                 .map_err(|error| error.to_string())?;
         }
-        let now = chrono::Utc::now().to_rfc3339();
-        connection
-            .execute(
+        if !had_tapd_projects {
+            // 仅迁移确有使用证据的旧版单项目配置；空库不能凭本机凭据自动接入真实项目。
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
                 "INSERT INTO tapd_projects(workspace_id,workspace_name,owner,enabled,sort_order,repository_path,auto_enabled,auto_execute,trigger_statuses,completion_status,last_synced_at,last_error,created_at,updated_at)
-                 VALUES('37583308','安全生产管理',
+                 SELECT '37583308','安全生产管理',
                    COALESCE(NULLIF((SELECT value FROM app_meta WHERE key='tapd_owner'),''),'刘子世康'),
                    1,0,
                    COALESCE((SELECT value FROM app_meta WHERE key='tapd_auto_fix_repository_path'),''),
                    CASE WHEN LOWER(COALESCE((SELECT value FROM app_meta WHERE key='tapd_auto_fix_enabled'),'')) IN ('true','1','yes','on') THEN 1 ELSE 0 END,
                    1,'new,reopened','已解决',
-                   (SELECT value FROM app_meta WHERE key='tapd_last_synced_at'),'',?1,?1)
+                   (SELECT value FROM app_meta WHERE key='tapd_last_synced_at'),'',?1,?1
+                 WHERE EXISTS(SELECT 1 FROM app_meta WHERE key IN ('tapd_owner','tapd_auto_fix_repository_path','tapd_last_synced_at') AND TRIM(value)<>'')
+                    OR EXISTS(SELECT 1 FROM app_meta WHERE key='tapd_auto_fix_enabled' AND LOWER(TRIM(value)) IN ('true','1','yes','on'))
+                    OR EXISTS(SELECT 1 FROM tapd_work_items WHERE workspace_id='37583308')
                  ON CONFLICT(workspace_id) DO NOTHING",
                 [&now],
             )
             .map_err(|error| error.to_string())?;
+        }
         connection
             .execute(
                 "INSERT INTO app_meta(key,value) VALUES('schema_version',?1)
@@ -1702,6 +1797,237 @@ mod migration_tests {
             .map(|entry| entry.path())
             .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("sqlite3"))
             .collect()
+    }
+
+    #[test]
+    fn fresh_databases_have_no_tapd_projects_or_cached_items() {
+        let directory = test_directory("empty-tapd");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("workbench.sqlite3");
+        for _ in 0..2 {
+            let state = DatabaseState::new(path.clone()).unwrap();
+            let connection = state.connect().unwrap();
+            for table in ["tapd_projects", "tapd_work_items", "tapd_codex_jobs"] {
+                assert_eq!(
+                    connection
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_tapd_configuration_is_migrated_once_and_existing_settings_are_preserved() {
+        let directory = test_directory("legacy-tapd-config");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("workbench.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE app_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO app_meta VALUES('schema_version','15'),('tapd_owner','匿名负责人'),('tapd_auto_fix_repository_path','X:/anonymous-project'),('tapd_auto_fix_enabled','1'),('tapd_last_synced_at','2026-09-01T00:00:00Z');").unwrap();
+        drop(connection);
+        let state = DatabaseState::new(path.clone()).unwrap();
+        let connection = state.connect().unwrap();
+        let migrated: (String, String, i64, String) = connection
+            .query_row(
+                "SELECT owner,repository_path,auto_enabled,last_synced_at FROM tapd_projects",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            migrated,
+            (
+                "匿名负责人".into(),
+                "X:/anonymous-project".into(),
+                1,
+                "2026-09-01T00:00:00Z".into()
+            )
+        );
+        connection.execute("UPDATE tapd_projects SET workspace_name='用户修改',owner='新负责人',enabled=0,auto_enabled=0,auto_execute=0", []).unwrap();
+        drop(connection);
+        drop(state);
+        let state = DatabaseState::new(path).unwrap();
+        let connection = state.connect().unwrap();
+        let preserved: (String, String, i64, i64, i64) = connection
+            .query_row(
+                "SELECT workspace_name,owner,enabled,auto_enabled,auto_execute FROM tapd_projects",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(preserved, ("用户修改".into(), "新负责人".into(), 0, 0, 0));
+        drop(connection);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_existing_empty_tapd_registry_is_not_repopulated_from_legacy_metadata() {
+        let directory = test_directory("removed-tapd-projects");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("workbench.sqlite3");
+        let state = DatabaseState::new(path.clone()).unwrap();
+        state
+            .connect()
+            .unwrap()
+            .execute(
+                "INSERT INTO app_meta VALUES('tapd_owner','匿名历史负责人')",
+                [],
+            )
+            .unwrap();
+        drop(state);
+        let reopened = DatabaseState::new(path).unwrap();
+        assert_eq!(
+            reopened
+                .connect()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM tapd_projects", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_tapd_data_without_settings_is_still_migrated() {
+        let directory = test_directory("legacy-tapd-data");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("workbench.sqlite3");
+        let state = DatabaseState::new(path.clone()).unwrap();
+        state.connect().unwrap().execute_batch("DROP TABLE tapd_projects;
+            UPDATE app_meta SET value='32' WHERE key='schema_version';
+            INSERT INTO tapd_work_items(item_key,id,workspace_id,item_type,title,synced_at) VALUES('37583308:anonymous','anonymous','37583308','bug','匿名历史条目','2026-09-01T00:00:00Z');").unwrap();
+        drop(state);
+        let reopened = DatabaseState::new(path).unwrap();
+        let connection = reopened.connect().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM tapd_projects", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM tapd_work_items", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn additive_migrations_skip_existing_columns_but_report_real_errors() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE example(id TEXT);")
+            .unwrap();
+        add_column_if_missing(&connection, "ALTER TABLE example ADD COLUMN note TEXT").unwrap();
+        add_column_if_missing(&connection, "ALTER TABLE example ADD COLUMN note TEXT").unwrap();
+        assert!(
+            add_column_if_missing(&connection, "ALTER TABLE missing ADD COLUMN note TEXT").is_err()
+        );
+        assert!(add_column_if_missing(
+            &connection,
+            "ALTER TABLE example ADD COLUMN invalid TEXT UNIQUE"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn failed_initialization_does_not_advance_schema_version() {
+        let directory = test_directory("failed-migration");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("workbench.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE app_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO app_meta(key,value) VALUES('schema_version','15');
+            CREATE TABLE tasks(id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(DatabaseState::new(path.clone()).is_err());
+        let connection = Connection::open(path).unwrap();
+        assert_eq!(schema_version(&connection).unwrap(), Some(15));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(backup_files(&directory).len(), 1);
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_future_schema_without_downgrading_metadata() {
+        let directory = test_directory("future-schema");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("workbench.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE app_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO app_meta(key,value) VALUES('schema_version',?1)",
+                [(SCHEMA_VERSION + 1).to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(DatabaseState::new(path.clone()).is_err());
+        let connection = Connection::open(path).unwrap();
+        assert_eq!(
+            schema_version(&connection).unwrap(),
+            Some(SCHEMA_VERSION + 1)
+        );
+        assert!(backup_files(&directory).is_empty());
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_gate_timeout_releases_normal_connections() {
+        let directory = test_directory("restore-timeout");
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let held = state.connect().unwrap();
+        assert!(state
+            .access
+            .begin_restore(std::time::Duration::ZERO)
+            .is_err());
+        assert!(state.connect().is_ok());
+        drop(held);
+        let gate = state.begin_restore().unwrap();
+        assert!(state.connect().is_err());
+        drop(gate);
+        assert!(state.connect().is_ok());
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

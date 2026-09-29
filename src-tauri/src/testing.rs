@@ -26,6 +26,9 @@ const DEDICATED_REAL_SUITE_ID: &str = "dedicated-real";
 const COMMON_REAL_SPEC_FILE: &str = "workbench-real-common.spec.js";
 const COMMON_REAL_SPEC: &str = include_str!("../assets/testing/workbench-real-common.template.js");
 
+#[path = "testing/queries.rs"]
+mod queries;
+
 #[derive(Default, Clone)]
 pub struct TestProcessState {
     processes: Arc<Mutex<HashMap<String, TestProcessControl>>>,
@@ -276,6 +279,7 @@ pub struct TestProject {
     pub page_count: usize,
     pub capabilities: TestCapabilities,
     pub warnings: Vec<String>,
+    pub inspected: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -468,17 +472,7 @@ fn latest_db_run_for_project(
     menu_id: &str,
     project_path: &Path,
 ) -> Result<Option<TestRun>, String> {
-    let canonical_path = project_path.display().to_string();
-    let friendly_path = display_path(project_path);
-    state
-        .connect()?
-        .query_row(
-            &format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 AND (project_path=?2 OR project_path=?3 OR project_path='') ORDER BY CASE WHEN project_path=?2 OR project_path=?3 THEN 0 ELSE 1 END,started_at DESC LIMIT 1"),
-            params![menu_id, friendly_path, canonical_path],
-            row_to_run,
-        )
-        .optional()
-        .map_err(|error| error.to_string())
+    queries::latest_run_for_project(state, menu_id, project_path)
 }
 
 fn json_vec<T: for<'de> Deserialize<'de>>(value: String) -> Vec<T> {
@@ -1741,9 +1735,16 @@ fn project_menus(
 }
 
 #[tauri::command]
-pub fn list_test_projects(
+pub async fn list_test_projects(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<Vec<TestProject>, String> {
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || list_test_projects_for_state(&database))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn list_test_projects_for_state(state: &DatabaseState) -> Result<Vec<TestProject>, String> {
     let rows = {
         let connection = state.connect()?;
         let mut statement = connection
@@ -1765,34 +1766,73 @@ pub fn list_test_projects(
             if !root.is_dir() {
                 return None;
             }
-            let case_count = case_values(&root).len();
-            let capabilities = project_capabilities(&root);
-            let mut warnings = Vec::new();
-            if !capabilities.mock {
-                warnings.push("未发现模拟接口菜单运行器".into());
-            }
-            if !capabilities.real_api {
-                warnings.push("未发现真实接口菜单运行器".into());
-            }
-            if !capabilities.browser_style {
-                warnings.push("未发现浏览器样式运行器".into());
-            }
             Some(TestProject {
                 path,
                 name,
-                project_kind: project_kind(&root),
-                case_count,
-                page_count: estimated_page_count(&root, case_count),
-                capabilities,
-                warnings,
+                project_kind: "待检查".into(),
+                case_count: 0,
+                page_count: 0,
+                capabilities: TestCapabilities {
+                    mock: false,
+                    real_api: false,
+                    source_style: false,
+                    browser_style: false,
+                },
+                warnings: Vec::new(),
+                inspected: false,
             })
         })
         .collect())
 }
 
 #[tauri::command]
-pub fn list_test_menus(
+pub async fn get_test_project(
     state: tauri::State<'_, DatabaseState>,
+    project_path: String,
+) -> Result<TestProject, String> {
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (root, name) = canonical_project_asset(&database, &project_path)?;
+        let case_count = case_values(&root).len();
+        let capabilities = project_capabilities(&root);
+        let mut warnings = Vec::new();
+        if !capabilities.mock {
+            warnings.push("未发现模拟接口菜单运行器".into());
+        }
+        if !capabilities.real_api {
+            warnings.push("未发现真实接口菜单运行器".into());
+        }
+        if !capabilities.browser_style {
+            warnings.push("未发现浏览器样式运行器".into());
+        }
+        Ok(TestProject {
+            path: display_path(&root),
+            name,
+            project_kind: project_kind(&root),
+            case_count,
+            page_count: estimated_page_count(&root, case_count),
+            capabilities,
+            warnings,
+            inspected: true,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn list_test_menus(
+    state: tauri::State<'_, DatabaseState>,
+    project_path: Option<String>,
+) -> Result<Vec<TestMenu>, String> {
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || list_test_menus_for_state(&database, project_path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn list_test_menus_for_state(
+    state: &DatabaseState,
     project_path: Option<String>,
 ) -> Result<Vec<TestMenu>, String> {
     if let Some(path) = project_path.filter(|value| !value.trim().is_empty()) {
@@ -1866,8 +1906,18 @@ fn menu_changed_files(menu: &TestMenu, root: &Path, changes: &BTreeSet<String>) 
 }
 
 #[tauri::command]
-pub fn recommend_tests_from_git(
+pub async fn recommend_tests_from_git(
     state: tauri::State<'_, DatabaseState>,
+    project_path: Option<String>,
+) -> Result<Vec<TestRecommendation>, String> {
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || recommend_tests_for_state(&database, project_path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn recommend_tests_for_state(
+    state: &DatabaseState,
     project_path: Option<String>,
 ) -> Result<Vec<TestRecommendation>, String> {
     let (projects, menus): (Vec<PathBuf>, Vec<TestMenu>) =
@@ -1928,50 +1978,23 @@ pub fn recommend_tests_from_git(
 }
 
 #[tauri::command]
-pub fn list_test_runs(
+pub async fn list_test_runs(
     state: tauri::State<'_, DatabaseState>,
     menu_id: Option<String>,
     project_path: Option<String>,
+    summary: Option<bool>,
 ) -> Result<Vec<TestRun>, String> {
-    let project = project_path
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|path| canonical_project_asset(&state, path))
-        .transpose()?;
-    let connection = state.connect()?;
-    let sql = match menu_id.is_some() {
-        true => format!(
-            "SELECT {TEST_RUN_COLUMNS} FROM test_runs WHERE menu_id=?1 ORDER BY started_at DESC"
-        ),
-        false => format!("SELECT {TEST_RUN_COLUMNS} FROM test_runs ORDER BY started_at DESC"),
-    };
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| error.to_string())?;
-    let rows = match menu_id {
-        Some(id) => statement
-            .query_map([id], row_to_run)
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>(),
-        None => statement
-            .query_map([], row_to_run)
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>(),
-    };
-    let mut rows = rows.map_err(|error| error.to_string())?;
-    if let Some((root, name)) = project {
-        let canonical = project_identity::canonical_project_name(
-            &connection,
-            &name,
-            &root.display().to_string(),
-        );
-        rows.retain(|run| {
-            project_identity::canonical_project_name(&connection, &run.project, &run.project_path)
-                == canonical
-        });
-    }
-    rows.truncate(300);
-    Ok(rows)
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        queries::list_runs_for_state(
+            &database,
+            menu_id.as_deref(),
+            project_path.as_deref(),
+            summary.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3205,11 +3228,16 @@ fn preflight_for(
 }
 
 #[tauri::command]
-pub fn preflight_test(
+pub async fn preflight_test(
     state: tauri::State<'_, DatabaseState>,
     options: StartTestOptions,
 ) -> Result<TestPreflight, String> {
-    preflight_for(&state, &options).map(|(_, _, _, preflight)| preflight)
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        preflight_for(&database, &options).map(|(_, _, _, preflight)| preflight)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
@@ -4380,11 +4408,14 @@ fn run_by_id(state: &DatabaseState, id: &str) -> Result<TestRun, String> {
 }
 
 #[tauri::command]
-pub fn get_test_run(
+pub async fn get_test_run(
     state: tauri::State<'_, DatabaseState>,
     run_id: String,
 ) -> Result<TestRun, String> {
-    run_by_id(&state, &run_id)
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || run_by_id(&database, &run_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

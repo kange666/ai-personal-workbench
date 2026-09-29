@@ -10,13 +10,15 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
     time::{Duration, Instant},
 };
 use walkdir::WalkDir;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+// 只读状态探测有独立截止时间，不影响视频或 AI 任务自身的执行时长。
+const CODEX_CLI_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +59,7 @@ pub(crate) fn hidden_command(path: &Path) -> Command {
     command
 }
 
-fn cli_candidates() -> Vec<PathBuf> {
+pub(crate) fn cli_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = env::var_os("CODEX_CLI_PATH") {
         candidates.push(PathBuf::from(path));
@@ -105,33 +107,57 @@ fn cli_candidates() -> Vec<PathBuf> {
     unique
 }
 
-pub(crate) fn resolve_codex_cli() -> Result<(PathBuf, String), String> {
-    for candidate in cli_candidates().into_iter().filter(|path| path.is_file()) {
-        let output = hidden_command(&candidate).arg("--version").output();
-        if let Ok(output) = output {
-            if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                return Ok((candidate, version));
-            }
-        }
-    }
-    Err("未找到可调用的独立 Codex CLI。请重新安装 @openai/codex。".into())
+fn cli_status_output(path: &Path, arguments: &[&str], timeout: Duration) -> Result<Output, String> {
+    let mut command = hidden_command(path);
+    command.args(arguments);
+    crate::git::bounded_command_output(command, timeout)
+        .map_err(|_| "Codex CLI 状态检查失败或超时，请检查本机 CLI 后重试。".to_string())
 }
 
-#[tauri::command]
-pub fn codex_cli_status() -> CodexCliStatus {
-    let Ok((path, version)) = resolve_codex_cli() else {
-        return CodexCliStatus {
+fn resolve_cli_candidates(
+    candidates: Vec<PathBuf>,
+    mut probe: impl FnMut(&Path, &[&str], Duration) -> Result<Output, String>,
+) -> Result<Option<(PathBuf, String)>, String> {
+    let deadline = Instant::now() + CODEX_CLI_CHECK_TIMEOUT;
+    let mut last_error = None;
+    for candidate in candidates.into_iter().filter(|path| path.is_file()) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Codex CLI 版本检查超时，请稍后重试。".into());
+        }
+        match probe(&candidate, &["--version"], remaining) {
+            Ok(output) if output.status.success() => {
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                return Ok(Some((candidate, version)));
+            }
+            Ok(_) => last_error = Some("Codex CLI 无法返回版本信息，请检查本机安装。".into()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match last_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn resolve_codex_cli() -> Result<(PathBuf, String), String> {
+    resolve_cli_candidates(cli_candidates(), cli_status_output)?
+        .ok_or_else(|| "未找到可调用的独立 Codex CLI。请重新安装 @openai/codex。".into())
+}
+
+fn read_codex_cli_status() -> Result<CodexCliStatus, String> {
+    let Some((path, version)) = resolve_cli_candidates(cli_candidates(), cli_status_output)? else {
+        return Ok(CodexCliStatus {
             installed: false,
             authenticated: false,
             version: String::new(),
             executable_path: String::new(),
             message: "未找到独立 Codex CLI。".into(),
-        };
+        });
     };
-    let login = hidden_command(&path).args(["login", "status"]).output();
-    let authenticated = login.as_ref().is_ok_and(|output| output.status.success());
-    CodexCliStatus {
+    let login = cli_status_output(&path, &["login", "status"], CODEX_CLI_CHECK_TIMEOUT)?;
+    let authenticated = login.status.success();
+    Ok(CodexCliStatus {
         installed: true,
         authenticated,
         version,
@@ -141,7 +167,15 @@ pub fn codex_cli_status() -> CodexCliStatus {
         } else {
             "Codex CLI 已安装，但尚未登录。请先在终端运行 codex login。".into()
         },
-    }
+    })
+}
+
+#[tauri::command]
+pub async fn codex_cli_status() -> Result<CodexCliStatus, String> {
+    // PATH/文件探测、版本和登录状态查询都离开窗口线程；超时不误报为未安装/未登录。
+    tauri::async_runtime::spawn_blocking(read_codex_cli_status)
+        .await
+        .map_err(|_| "Codex CLI 状态检查任务异常，请重试。".to_string())?
 }
 
 fn safe_folder_name(title: &str, idea_id: &str) -> String {
@@ -753,6 +787,30 @@ pub fn start_content_video_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_version_checks_have_a_shared_deadline_and_propagate_probe_failure() {
+        let executable = std::env::current_exe().unwrap();
+        let mut calls = 0;
+        let result =
+            resolve_cli_candidates(vec![executable.clone(), executable], |_, args, timeout| {
+                calls += 1;
+                assert_eq!(args, ["--version"]);
+                assert!(timeout > Duration::ZERO && timeout <= CODEX_CLI_CHECK_TIMEOUT);
+                Err("匿名探测超时".into())
+            });
+        assert_eq!(calls, 2);
+        // 已找到程序但探测异常不能伪装为未安装。
+        assert_eq!(result.unwrap_err(), "匿名探测超时");
+    }
+
+    #[test]
+    fn missing_cli_does_not_execute_any_command() {
+        let result = resolve_cli_candidates(Vec::new(), |_, _, _| {
+            panic!("没有候选程序时不应启动外部命令")
+        });
+        assert!(result.unwrap().is_none());
+    }
 
     #[test]
     fn folder_name_removes_windows_invalid_characters() {

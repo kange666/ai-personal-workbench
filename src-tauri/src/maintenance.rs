@@ -1,4 +1,4 @@
-use crate::database::DatabaseState;
+use crate::database::{schema_version, DatabaseState, SCHEMA_VERSION};
 use chrono::{DateTime, Local, Utc};
 use rusqlite::{Connection, MAIN_DB};
 use serde::Serialize;
@@ -192,7 +192,8 @@ fn list_backup_entries(state: &DatabaseState) -> Result<Vec<BackupEntry>, String
 }
 
 fn verify_database(path: &Path) -> Result<(), String> {
-    let connection = Connection::open(path).map_err(|error| error.to_string())?;
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
     let integrity = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
         .map_err(|error| error.to_string())?;
@@ -285,10 +286,26 @@ pub fn export_database_backup(
 }
 
 #[tauri::command]
-pub fn restore_database_backup(
+pub async fn restore_database_backup(
     state: tauri::State<'_, DatabaseState>,
     path: String,
 ) -> Result<BackupStatus, String> {
+    let database = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || restore_backup_for_state(&database, &path))
+        .await
+        .map_err(|error| format!("恢复任务异常结束：{error}"))?
+}
+
+// 临时库与正式库同目录，仅清理本次恢复创建的唯一目录。
+struct RestoreWorkspace(PathBuf);
+
+impl Drop for RestoreWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn restore_backup_for_state(state: &DatabaseState, path: &str) -> Result<BackupStatus, String> {
     let requested = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
     let allowed =
         std::fs::canonicalize(backup_directory(&state)?).map_err(|error| error.to_string())?;
@@ -296,13 +313,73 @@ pub fn restore_database_backup(
         return Err("仅允许恢复工作台自己创建并校验过的内部备份".into());
     }
     verify_database(&requested)?;
-    create_backup_for_state(&state, "pre-restore")?;
-    let mut destination = state.connect()?;
+    let source =
+        Connection::open_with_flags(&requested, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
+    let version = schema_version(&source)?.ok_or("备份缺少工作台结构版本，无法安全恢复。")?;
+    if version > SCHEMA_VERSION {
+        return Err("备份来自更新版本，请先升级工作台后再恢复。".into());
+    }
+    let directory = state
+        .path
+        .parent()
+        .ok_or("数据库目录无效")?
+        .join(format!(".restore-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).map_err(|error| error.to_string())?;
+    let workspace = RestoreWorkspace(directory);
+    let prepared_path = workspace.0.join("prepared.sqlite3");
+    source
+        .backup(MAIN_DB, &prepared_path, None)
+        .map_err(|error| format!("准备恢复副本失败：{error}"))?;
+    drop(source);
+    // 迁移只发生在恢复副本；失败时正式库和原备份完全不变。
+    let prepared = DatabaseState::new(prepared_path.clone())
+        .map_err(|error| format!("备份升级失败，当前数据未替换：{error}"))?;
+    verify_database(&prepared.path)?;
+    let prepared_connection = prepared.connect()?;
+    let foreign_key_errors: i64 = prepared_connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if foreign_key_errors != 0 {
+        return Err(format!(
+            "备份存在 {foreign_key_errors} 条关联异常，当前数据未替换。"
+        ));
+    }
+    drop(prepared_connection);
+    drop(prepared);
+
+    // 先阻止新连接，再等待既有连接释放；备份及替换仅使用本次独占的原始连接。
+    let exclusive = state.begin_restore()?;
+    let mut destination = Connection::open(&state.path).map_err(|error| error.to_string())?;
     destination
-        .restore(MAIN_DB, &requested, None::<fn(rusqlite::backup::Progress)>)
+        .busy_timeout(Duration::from_secs(1))
+        .map_err(|error| error.to_string())?;
+    let protection_path = backup_directory(state)?.join(format!(
+        "workbench-pre-restore-{}-{}.sqlite3",
+        Local::now().format("%Y%m%d-%H%M%S-%3f"),
+        uuid::Uuid::new_v4(),
+    ));
+    destination
+        .backup(MAIN_DB, &protection_path, None)
+        .map_err(|error| format!("创建恢复前保护备份失败：{error}"))?;
+    verify_database(&protection_path)?;
+    // 成功替换之后不再执行可能失败的清理/列表查询，保证调用结果准确代表恢复结果。
+    let status = BackupStatus {
+        database_path: state.path.to_string_lossy().to_string(),
+        backup_directory: allowed.to_string_lossy().to_string(),
+        backups: list_backup_entries(state)?,
+    };
+    destination
+        .restore(
+            MAIN_DB,
+            &prepared_path,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
         .map_err(|error| format!("恢复数据库失败：{error}"))?;
-    verify_database(&state.path)?;
-    backup_status(state)
+    exclusive.require_restart();
+    Ok(status)
 }
 
 fn version_parts(value: &str) -> Vec<u64> {
@@ -383,6 +460,226 @@ fn read_update_status() -> UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn restore_test_database() -> (RestoreWorkspace, DatabaseState) {
+        let path = std::env::temp_dir().join(format!("workbench-restore-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        let state = DatabaseState::new(path.join("workbench.sqlite3")).unwrap();
+        state
+            .connect()
+            .unwrap()
+            .execute(
+                "INSERT INTO app_meta(key,value) VALUES('restore_test_marker','current')",
+                [],
+            )
+            .unwrap();
+        (RestoreWorkspace(path), state)
+    }
+
+    fn old_backup(state: &DatabaseState, version: i64) -> PathBuf {
+        let path = backup_directory(state)
+            .unwrap()
+            .join("workbench-old.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE app_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE preserved_data(value TEXT NOT NULL);
+            INSERT INTO preserved_data(value) VALUES('old-backup');",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO app_meta(key,value) VALUES('schema_version',?1)",
+                [version.to_string()],
+            )
+            .unwrap();
+        path
+    }
+
+    fn assert_current_database_unchanged(state: &DatabaseState) {
+        let connection = state.connect().unwrap();
+        let marker: String = connection
+            .query_row(
+                "SELECT value FROM app_meta WHERE key='restore_test_marker'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, "current");
+        assert_eq!(schema_version(&connection).unwrap(), Some(SCHEMA_VERSION));
+        assert!(!std::fs::read_dir(state.path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".restore-")));
+    }
+
+    #[test]
+    fn restores_old_backup_after_migration_and_requires_process_restart() {
+        let (_directory, state) = restore_test_database();
+        let path = old_backup(&state, 15);
+        let status = restore_backup_for_state(&state, path.to_str().unwrap()).unwrap();
+        assert!(state.connect().err().unwrap().contains("重启"));
+        let restored = DatabaseState::new(state.path.clone()).unwrap();
+        let connection = restored.connect().unwrap();
+        assert_eq!(schema_version(&connection).unwrap(), Some(SCHEMA_VERSION));
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM preserved_data", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "old-backup"
+        );
+        assert!(connection
+            .prepare("SELECT source_id,start_date,end_date,progress FROM tasks")
+            .is_ok());
+        let protection = status
+            .backups
+            .iter()
+            .find(|entry| entry.kind == "pre-restore")
+            .unwrap();
+        let protected = Connection::open(&protection.path).unwrap();
+        assert_eq!(
+            protected
+                .query_row(
+                    "SELECT value FROM app_meta WHERE key='restore_test_marker'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "current"
+        );
+        assert_eq!(
+            schema_version(&Connection::open(path).unwrap()).unwrap(),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn rejects_corrupt_and_future_backups_without_replacing_current_database() {
+        let (_directory, state) = restore_test_database();
+        let corrupt = backup_directory(&state)
+            .unwrap()
+            .join("workbench-corrupt.sqlite3");
+        std::fs::write(&corrupt, b"not a sqlite database").unwrap();
+        assert!(restore_backup_for_state(&state, corrupt.to_str().unwrap()).is_err());
+        assert_current_database_unchanged(&state);
+        let future = old_backup(&state, SCHEMA_VERSION + 1);
+        assert!(restore_backup_for_state(&state, future.to_str().unwrap())
+            .err()
+            .unwrap()
+            .contains("更新版本"));
+        assert_current_database_unchanged(&state);
+        assert!(!list_backup_entries(&state)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.kind == "pre-restore"));
+    }
+
+    #[test]
+    fn failed_backup_migration_leaves_source_and_current_database_unchanged() {
+        let (_directory, state) = restore_test_database();
+        let source = old_backup(&state, 15);
+        Connection::open(&source)
+            .unwrap()
+            .execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY);")
+            .unwrap();
+        let error = restore_backup_for_state(&state, source.to_str().unwrap())
+            .err()
+            .unwrap();
+        assert!(error.contains("备份升级失败"));
+        assert_current_database_unchanged(&state);
+        assert_eq!(
+            schema_version(&Connection::open(source).unwrap()).unwrap(),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn rejects_backup_with_broken_relationships_before_replacing_current_database() {
+        let (_directory, state) = restore_test_database();
+        let backup = create_backup_for_state(&state, "manual").unwrap();
+        let source = Connection::open(&backup.path).unwrap();
+        source
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+            INSERT INTO token_events(conversation_id) VALUES('missing-conversation');",
+            )
+            .unwrap();
+        drop(source);
+        assert!(restore_backup_for_state(&state, &backup.path).is_err());
+        assert_current_database_unchanged(&state);
+    }
+
+    #[test]
+    fn failed_sqlite_replacement_rolls_back_and_reopens_normal_access() {
+        let (_directory, state) = restore_test_database();
+        let source = old_backup(&state, 15);
+        // 模拟另一个连接意外持有写事务；即便连接租约之外存在写锁，替换也必须失败且保留旧库。
+        let outside_writer = Connection::open(&state.path).unwrap();
+        outside_writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let error = restore_backup_for_state(&state, source.to_str().unwrap())
+            .err()
+            .unwrap();
+        assert!(error.contains("恢复数据库失败"), "{error}");
+        outside_writer.execute_batch("ROLLBACK;").unwrap();
+        assert_current_database_unchanged(&state);
+        assert!(list_backup_entries(&state)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.kind == "pre-restore"));
+    }
+
+    #[test]
+    fn restore_waits_for_existing_connections_and_prevents_late_background_writes() {
+        use std::sync::mpsc;
+        let (_directory, state) = restore_test_database();
+        let source = old_backup(&state, 15);
+        let held = state.connect().unwrap();
+        let background = state.clone();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = restore_backup_for_state(&background, source.to_str().unwrap());
+            completed_tx.send(result).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while state.connect().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "恢复没有及时关闭连接入口"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(completed_rx.try_recv().is_err());
+        held.execute(
+            "UPDATE app_meta SET value='last-write' WHERE key='restore_test_marker'",
+            [],
+        )
+        .unwrap();
+        drop(held);
+        let result = completed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert!(state.connect().is_err());
+        let protection = result
+            .backups
+            .iter()
+            .find(|entry| entry.kind == "pre-restore")
+            .unwrap();
+        assert_eq!(
+            Connection::open(&protection.path)
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM app_meta WHERE key='restore_test_marker'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "last-write"
+        );
+    }
 
     #[test]
     fn compares_semantic_versions() {

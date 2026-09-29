@@ -123,6 +123,7 @@ function openSource(source: ReportSource) {
   else if (source.kind === "任务") void router.push(`/tasks?task=${source.id}`);
   else if (source.kind === "测试") void router.push(`/testing?run=${source.id}`);
   else if (source.kind === "TAPD 缺陷") void router.push(`/tapd?item=${source.id}`);
+  else if (source.kind === "Jenkins 发布") void router.push(`/deployments?run=${encodeURIComponent(source.id)}`);
 }
 function exportWord() {
   if (!selected.value) return;

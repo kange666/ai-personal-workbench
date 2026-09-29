@@ -6,6 +6,7 @@ mod codex;
 mod codex_video;
 mod content;
 mod database;
+mod diagnostics;
 mod email;
 mod git;
 mod inbox;
@@ -587,6 +588,7 @@ pub fn run() {
                 app.path().app_data_dir()?.join("workbench.sqlite3")
             };
             ensure_parent(&path).map_err(std::io::Error::other)?;
+            if let Some(directory) = path.parent() { diagnostics::initialize(directory.join("diagnostics")); }
             let state = DatabaseState::new(path).map_err(std::io::Error::other)?;
             testing::recover_incomplete_test_runs(&state).map_err(std::io::Error::other)?;
             app.manage(state.clone());
@@ -603,7 +605,8 @@ pub fn run() {
             app.manage(email::EmailTrayMenuItem(email_item.clone()));
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_item, &email_item, &quit_item])?;
-            let initial_quota = codex::latest_tray_quota();
+            // 启动窗口不等待网络或历史文件扫描，托盘额度由后台异步填充。
+            let initial_quota: Option<codex::TrayQuota> = None;
             let initial_tray_style = tray_icon_style_for_state(&state).unwrap_or_default();
             let initial_icon = quota_tray_icon(
                 initial_quota
@@ -666,9 +669,9 @@ pub fn run() {
             std::thread::spawn(move || {
                 let mut previous = initial_quota;
                 loop {
-                    std::thread::sleep(std::time::Duration::from_secs(30));
                     let current = codex::latest_tray_quota();
                     if current == previous {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
                         continue;
                     }
                     if let Some(tray) = quota_app.tray_by_id("workbench-tray") {
@@ -681,6 +684,7 @@ pub fn run() {
                         let _ = tray.set_tooltip(Some(quota_tray_tooltip(current.as_ref())));
                     }
                     previous = current;
+                    std::thread::sleep(std::time::Duration::from_secs(30));
                 }
             });
 
@@ -692,7 +696,7 @@ pub fn run() {
             let history_state = state.clone();
             let history_app = app.handle().clone();
             std::thread::spawn(move || {
-                if let Err(error) = maintenance::ensure_daily_backup_for_state(&history_state) {
+                if let Err(error) = diagnostics::run_task("daily-backup", "每日数据备份", || maintenance::ensure_daily_backup_for_state(&history_state)) {
                     eprintln!("启动时创建每日数据库备份失败：{error}");
                 }
                 if let Err(error) = parity::sync_feature_parity_for_state(&history_state) {
@@ -701,11 +705,11 @@ pub fn run() {
                 if let Err(error) = videos::sync_video_pipeline_for_state(&history_state) {
                     eprintln!("启动时同步视频生产流水线失败：{error}");
                 }
-                match reports::sync_history_if_sources_changed(&history_state) {
+                match diagnostics::run_task("history-sync", "历史记录同步", || reports::sync_history_if_sources_changed(&history_state)) {
                     Ok(_) => { let _ = history_app.emit("codex-data-updated", ()); }
                     Err(error) => eprintln!("启动时同步 Codex 历史失败：{error}"),
                 }
-                if let Err(error) = knowledge::sync_knowledge_for_state(&history_state) {
+                if let Err(error) = diagnostics::run_task("knowledge-sync", "知识整理", || knowledge::sync_knowledge_for_state(&history_state)) {
                     eprintln!("启动时自动整理知识失败：{error}");
                 }
                 if let Err(error) = suggestions::sync_task_suggestions_for_state(&history_state) {
@@ -721,7 +725,7 @@ pub fn run() {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(30));
                 loop {
-                    match codex::scan_codex_sessions_for_state(&token_refresh_state) {
+                    match diagnostics::run_task("codex-scan", "Codex 记录扫描", || codex::scan_codex_sessions_for_state(&token_refresh_state)) {
                         Ok(_) => { let _ = token_refresh_app.emit("codex-data-updated", ()); }
                         Err(error) => eprintln!("自动刷新 Codex Token 失败：{error}"),
                     }
@@ -730,7 +734,7 @@ pub fn run() {
             });
             let notification_state = state.clone();
             std::thread::spawn(move || loop {
-                if let Err(error) = notifications::sync_codex_notifications_for_state(&notification_state) {
+                if let Err(error) = diagnostics::run_task("notifications", "完成消息同步", || notifications::sync_codex_notifications_for_state(&notification_state)) {
                     eprintln!("同步 Codex 完成提醒失败：{error}");
                 }
                 std::thread::sleep(std::time::Duration::from_secs(15));
@@ -759,7 +763,7 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 let now = chrono::Local::now();
                 let maintenance_date = now.format("%Y-%m-%d").to_string();
-                if let Err(error) = audit::ensure_weekly_audit_for_state(&maintenance_state) {
+                if let Err(error) = diagnostics::run_task("weekly-audit", "自动周检", || audit::ensure_weekly_audit_for_state(&maintenance_state)) {
                     eprintln!("自动周检或漏跑补偿失败：{error}");
                 }
                 if let Err(error) = tauri::async_runtime::block_on(
@@ -805,6 +809,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_version,
+            diagnostics::list_background_task_status,
             tray_icon_style,
             set_tray_icon_style,
             database::database_health,
@@ -913,6 +918,7 @@ pub fn run() {
             git::list_repository_assets,
             project_identity::list_project_profiles,
             project_identity::save_project_profile,
+            project_identity::preview_project_profile,
             git::repository_asset_details,
             git::save_repository_asset,
             git::generate_commit_plan,
@@ -971,6 +977,7 @@ pub fn run() {
             ai::ask_knowledge,
             testing::list_test_menus,
             testing::list_test_projects,
+            testing::get_test_project,
             testing::list_test_scenarios,
             testing::list_test_suites,
             testing::start_test_case_generation,

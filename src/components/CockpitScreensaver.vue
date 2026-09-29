@@ -193,7 +193,7 @@ const heatMonthMarkers = computed(() => {
 
 const pulsePoints = computed(() => {
   const byDate = new Map(heatActivity.value.map(item => [item.date,item]));
-  return heatDates.value.slice(-7).map(date => byDate.get(date) || ({ date, conversationCount:0, archivedConversationCount:0, messageCount:0, userMessages:0, assistantMessages:0, inputTokens:0, cachedInputTokens:0, outputTokens:0, reasoningOutputTokens:0, totalTokens:0, gitCommits:0, contentIdeaCount:0, workMinutes:0, estimatedWorkMinutes:0, manualWorkMinutes:0, testRuns:0, testsPassed:0, knowledgeCount:0, taskActivityCount:0, quickCaptureCount:0, completedVideoCount:0 } satisfies DailyActivity));
+  return heatDates.value.slice(-7).map(date => byDate.get(date) || ({ date, conversationCount:0, archivedConversationCount:0, messageCount:0, userMessages:0, assistantMessages:0, inputTokens:0, cachedInputTokens:0, outputTokens:0, reasoningOutputTokens:0, totalTokens:0, gitCommits:0, contentIdeaCount:0, workMinutes:0, estimatedWorkMinutes:0, manualWorkMinutes:0, testRuns:0, testsPassed:0, knowledgeCount:0, taskActivityCount:0, quickCaptureCount:0, publishCount:0,publishesSucceeded:0,completedVideoCount:0 } satisfies DailyActivity));
 });
 
 const chart = { width:760, height:220, left:34, right:18, top:24, bottom:32 };

@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { isRegistered as isShortcutRegistered, register as registerShortcut, unregister as unregisterShortcut } from "@tauri-apps/plugin-global-shortcut";
 import { useWorkbenchStore } from "../stores/workbench";
-import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getSystemPerformanceSnapshot, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestCaseGenerations, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, openRepositoryRuntimeUrl, optimizeSystemMemory, retryFailedEmails, setCodexEmailEnabled, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type CodexQuotaWindow, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type SystemPerformanceSnapshot, type TapdCodexJob, type TestCaseGenerationJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
+import { databaseHealth, getCodexCliStatus, getCodexQuota, getEmailNotificationStatus, getSystemPerformanceSnapshot, getTapdStatus, getVipStatus, getWorkSummary, isTauriRuntime, listJenkinsPublishRecords, listNotifications, listRepositoryAssets, listRunningRepositoryProjects, listTapdCodexJobs, listTestCaseGenerations, listTestRuns, listWorkSessions, markAllNotificationsRead, markNotificationRead, openRepositoryRuntimeUrl, optimizeSystemMemory, retryFailedEmails, setCodexEmailEnabled, stopRepositoryProject, syncCodexNotifications, syncTapdItems, type CodexQuotaSnapshot, type EmailNotificationStatus, type JenkinsPublishRecord, type RepositoryAsset, type RunningProjectProcess, type SystemPerformanceSnapshot, type TapdCodexJob, type TestCaseGenerationJob, type TestRun, type VipStatus, type WorkbenchNotification, type WorkSession, type WorkSummary } from "../services/backend";
 import { getAlmanac } from "../utils/almanac";
 import appLogo from "../assets/app-logo.png";
 import appLogoWarm from "../assets/app-logo-warm.png";
@@ -34,9 +34,17 @@ import { buildJenkinsActiveOperations } from "../utils/jenkinsActiveOperations";
 import { confirmAction } from "../utils/confirm";
 import { loadWorkbenchNotificationsEnabled, workbenchNotificationPreferenceChangedEvent } from "../utils/notificationPreference";
 import { appendPerformanceHistory, emptySystemPerformanceSnapshot, formatPerformanceBytes, type SystemPerformanceHistoryPoint } from "../utils/systemPerformance";
+import { backgroundRequest } from "../services/backendRequest";
+import { usePageLoading } from "../composables/usePageLoading";
+import { useBackgroundPolling } from "../composables/useBackgroundPolling";
+import { latestTestsByProjectAndMode, notificationsChanged } from "../utils/workStatus";
+import { listBackgroundTaskStatus, type BackgroundTaskStatus } from "../services/backend";
+import CodexQuotaPopover from "./CodexQuotaPopover.vue";
 
 const store = useWorkbenchStore();
 const router = useRouter();
+const { pageLoading, pageLoadingSlow, pageLoadingTitle, revealSlowPage } = usePageLoading(router);
+const polling = useBackgroundPolling();
 const editorOpen = ref(false);
 const searchOpen = ref(false);
 const quickCaptureOpen = ref(false);
@@ -81,11 +89,11 @@ const memoryOptimizationMessage = ref("");
 const recentActivitiesOpen = ref(window.localStorage.getItem("workbench-right-rail-recent-open") === "true");
 const projectActionPath = ref("");
 const projectActionMessage = ref("");
-const pageLoading = ref(true);
-const pageLoadingSlow = ref(false);
 const startupLoading = ref(true);
 const startupSlow = ref(false);
-const backendRequestCount = ref(0);
+const allIssuesOpen = ref(false);
+const refreshError = ref("");
+const backgroundTasks = ref<BackgroundTaskStatus[]>([]);
 let topbarDragStart: { x:number; y:number } | null = null;
 const navigationOrder = ref(loadNavigationOrder());
 const hiddenNavigationPaths = ref(loadHiddenNavigationPaths());
@@ -100,9 +108,7 @@ const todayIso = computed(() => currentDate.value.toLocaleDateString("sv-SE"));
 const todayDay = computed(() => currentDate.value.getDate());
 const todayAlmanac = computed(() => getAlmanac(todayIso.value));
 watch(todayIso, () => { void loadSidebarWorktime(); });
-const pageLoadingTitle = computed(() => String(router.currentRoute.value.meta.title || "工作数据"));
 const latestWorkSession = computed(() => [...todayWorkSessions.value].sort((left,right) => right.endTime.localeCompare(left.endTime))[0]);
-const quotaWindows = computed(() => [quota.value.primary, quota.value.secondary].filter((item): item is CodexQuotaWindow => Boolean(item)));
 const primaryQuota = computed(() => quota.value.primary || quota.value.secondary);
 const remainingText = computed(() => primaryQuota.value ? `${Math.round(primaryQuota.value.remainingPercent)}%` : "--");
 const quotaFreshnessText = computed(() => ({ fresh:"刚刚更新", recent:"近期快照", stale:"快照较旧" } as Record<string,string>)[quota.value.freshness] || "暂无有效快照");
@@ -156,12 +162,11 @@ const railIssues = computed(() => {
     else if (project.healthLevel === "失败") issues.push({ id:`health:${project.path}`, title:`${project.name} 健康检查失败`, detail:project.healthSummary || "项目目录或 Git 状态无法读取", tone:"danger", to:{ path:"/projects", query:{ project:project.path } } });
     else if (project.behindCount > 0) issues.push({ id:`behind:${project.path}`, title:`${project.name} 落后远程 ${project.behindCount} 个提交`, detail:`当前分支 ${project.defaultBranch || "未识别"}`, tone:"warning", to:{ path:"/projects", query:{ project:project.path, tab:"git" } } });
   }
-  const latestTests=new Map<string,TestRun>();
-  for (const run of [...allTestRuns.value].sort((left,right) => right.startedAt.localeCompare(left.startedAt))) if (!latestTests.has(run.menuId)) latestTests.set(run.menuId,run);
-  for (const run of latestTests.values()) if (["failed","blocked","error"].includes(run.status)) issues.push({ id:`test:${run.id}`, title:`${run.menuName} 测试未通过`, detail:run.errorMessage || `${run.failedCount} 个场景失败`, tone:"danger", to:`/testing?run=${run.id}` });
+  for (const run of latestTestsByProjectAndMode(allTestRuns.value)) if (["failed","blocked","error"].includes(run.status)) issues.push({ id:`test:${run.id}`, title:`${run.project} · ${run.menuName} 测试未通过`, detail:run.errorMessage || `${run.failedCount} 个场景失败`, tone:"danger", to:{ path:"/testing", query:{ project:run.projectPath, run:run.id } } });
   for (const job of allTestCaseGenerations.value.filter(item => item.status === "failed").slice(0,3)) issues.push({ id:`test-case:${job.id}`, title:`${job.menuName} 专属用例生成失败`, detail:job.errorMessage || "请检查 Codex CLI 状态", tone:"danger", to:{ path:"/testing", query:{ project:job.projectPath } } });
   for (const job of [...allTapdJobs.value].filter(item => item.status === "failed").sort((left,right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0,3)) issues.push({ id:`tapd:${job.id}`, title:`TAPD 缺陷 ${job.itemKey} 处理失败`, detail:job.errorMessage || "可进入自动处理查看日志", tone:"danger", to:"/tapd-automation" });
   if (emailStatus.value.state === "error") issues.push({ id:"email", title:"邮件通知异常", detail:emailStatus.value.lastError || "请检查邮箱配置", tone:"warning", to:"/settings" });
+  for (const task of backgroundTasks.value) if (task.errorMessage) issues.push({ id:`background:${task.id}`, title:`${task.name}异常`, detail:task.errorMessage, tone:"warning", to:"/settings" });
   return issues.sort((left,right) => Number(right.tone === "danger")-Number(left.tone === "danger"));
 });
 const recentActivities = computed(() => {
@@ -182,25 +187,14 @@ const emailTooltip = computed(() => [
 ].filter(Boolean).join("\n"));
 
 watchEffect(() => document.documentElement.dataset.theme = store.theme);
-let statusTimer = 0;
-let quotaTimer = 0;
-let notificationTimer = 0;
-let tapdNotificationTimer = 0;
 let notificationToastTimer = 0;
-let emailTimer = 0;
-let healthTimer = 0;
-let activeOperationsTimer = 0;
 let railStatusTimer = 0;
 let cockpitIdleTimer = 0;
-let performanceTimer = 0;
 let memoryOptimizationResetTimer = 0;
 let performanceLoading = false;
 let cockpitLastActivityAt = Date.now();
 let cockpitIdleMinutes = loadCockpitIdleMinutes();
 let railStatusTicks = 0;
-let pageLoadingStartedAt = Date.now();
-let pageLoadingFinishTimer = 0;
-let pageLoadingSlowTimer = 0;
 let startupStartedAt = Date.now();
 let startupSlowTimer = 0;
 let startupFinishTimer = 0;
@@ -210,43 +204,6 @@ let vipUnlisten: UnlistenFn | undefined;
 let codexDataUnlisten: UnlistenFn | undefined;
 let windowResizeUnlisten: UnlistenFn | undefined;
 let quickShortcutRegistered = false;
-
-function finishPageLoadingWhenReady() {
-  window.clearTimeout(pageLoadingFinishTimer);
-  if (backendRequestCount.value > 0) return;
-  const minimumVisibleTime = Math.max(160, 620 - (Date.now() - pageLoadingStartedAt));
-  pageLoadingFinishTimer = window.setTimeout(() => {
-    if (backendRequestCount.value > 0) return;
-    pageLoading.value = false;
-    pageLoadingSlow.value = false;
-    window.clearTimeout(pageLoadingSlowTimer);
-  }, minimumVisibleTime);
-}
-
-function beginPageLoading() {
-  window.clearTimeout(pageLoadingFinishTimer);
-  window.clearTimeout(pageLoadingSlowTimer);
-  pageLoadingStartedAt = Date.now();
-  pageLoading.value = true;
-  pageLoadingSlow.value = false;
-  pageLoadingSlowTimer = window.setTimeout(() => { pageLoadingSlow.value = true; }, 3500);
-  finishPageLoadingWhenReady();
-}
-
-function handleBackendLoading(event: Event) {
-  const detail = (event as CustomEvent<{ active?: number }>).detail;
-  backendRequestCount.value = Math.max(0, Number(detail?.active || 0));
-  if (!pageLoading.value) return;
-  if (backendRequestCount.value > 0) window.clearTimeout(pageLoadingFinishTimer);
-  else finishPageLoadingWhenReady();
-}
-
-function revealSlowPage() {
-  pageLoading.value = false;
-  pageLoadingSlow.value = false;
-  window.clearTimeout(pageLoadingFinishTimer);
-  window.clearTimeout(pageLoadingSlowTimer);
-}
 
 async function initializeStartup() {
   startupStartedAt=Date.now();
@@ -263,6 +220,7 @@ async function initializeStartup() {
     loadProjectOptions(),
     loadSidebarWorktime(),
     loadSystemPerformance(),
+    loadBackgroundDiagnostics(),
   ]);
   const safetyLimit=new Promise<void>(resolve => {
     startupSafetyTimer=window.setTimeout(resolve,12_000);
@@ -272,22 +230,13 @@ async function initializeStartup() {
   startupFinishTimer=window.setTimeout(() => {
     startupLoading.value=false;
     startupSlow.value=false;
-    pageLoading.value=false;
-    pageLoadingSlow.value=false;
+    revealSlowPage();
     window.clearTimeout(startupSlowTimer);
     window.clearTimeout(startupSafetyTimer);
-    window.clearTimeout(pageLoadingFinishTimer);
-    window.clearTimeout(pageLoadingSlowTimer);
   },minimumVisibleTime);
 }
 
-watch(() => router.currentRoute.value.fullPath, (nextPath, previousPath) => {
-  // 接口详情使用查询参数定位；切换接口时由右侧详情面板自行展示加载状态。
-  if (previousPath && router.currentRoute.value.path === "/api-docs" && nextPath.split("?")[0] === previousPath.split("?")[0]) return;
-  beginPageLoading();
-}, { immediate: true, flush: "sync" });
 watch(recentActivitiesOpen, value => window.localStorage.setItem("workbench-right-rail-recent-open", String(value)));
-window.addEventListener("workbench-backend-loading", handleBackendLoading);
 function formatRailMinutes(value:number) {
   const hours=Math.floor(value/60);
   const minutes=value%60;
@@ -341,6 +290,9 @@ function handleCockpitVisibilityChange() {
     railNow.value=Date.now();
     evaluateCockpitIdle();
     void loadSystemPerformance();
+    void loadSidebarWorktime();
+    void loadActiveOperations();
+    void loadNotifications(false, false);
   }
   else cockpitIdleWarningSeconds.value=0;
 }
@@ -348,7 +300,7 @@ async function loadSystemPerformance() {
   if (!isTauriRuntime() || document.visibilityState === "hidden" || performanceLoading) return;
   performanceLoading=true;
   try {
-    const snapshot=await getSystemPerformanceSnapshot();
+    const snapshot=await backgroundRequest(() => getSystemPerformanceSnapshot());
     systemPerformance.value=snapshot;
     performanceHistory.value=appendPerformanceHistory(performanceHistory.value,snapshot);
   } catch {
@@ -388,34 +340,21 @@ function handleKeydown(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === "Space") { event.preventDefault(); quickCaptureOpen.value=true; }
   if (event.key === "Escape") { healthOpen.value=false; quotaOpen.value=false; notificationOpen.value=false; quickCaptureOpen.value=false; selectedNotification.value=null; }
 }
-function quotaPeriod(minutes:number) {
-  if (minutes >= 10_080 && minutes % 10_080 === 0) return `${minutes / 10_080}周`;
-  if (minutes >= 1_440 && minutes % 1_440 === 0) return `${minutes / 1_440}天`;
-  if (minutes >= 60) return `${Math.round(minutes / 60)}小时`;
-  return `${minutes}分钟`;
-}
-function quotaReset(timestamp:number) {
-  if (!timestamp) return "重置时间未知";
-  return `${new Intl.DateTimeFormat("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }).format(new Date(timestamp * 1000))} 重置`;
-}
-function capturedText(value?:string) {
-  if (!value) return "暂无快照时间";
-  return `${new Intl.DateTimeFormat("zh-CN", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }).format(new Date(value))} 更新`;
-}
-async function loadQuota() {
+function loadQuota() { return polling.run("loadQuota", loadQuotaData); }
+async function loadQuotaData() {
   if (!isTauriRuntime()) return;
   quotaLoading.value=true;
-  try { quota.value=await getCodexQuota(); }
-  catch { quota.value={ available:false, freshness:"", selectionReason:"" }; }
+  try { quota.value=await backgroundRequest(() => getCodexQuota()); }
+  catch { quota.value={ ...quota.value, resetCreditsAvailable:null, resetCreditsStatus:"error" }; }
   finally { quotaLoading.value=false; }
 }
 function openQuickCaptureFromPage() { quickCaptureOpen.value=true; }
 function refreshNotificationsFromTapd() { void loadNotifications(false); }
 async function loadSystemHealth() {
-  if (!isTauriRuntime() || healthLoading.value) return;
+  if (!isTauriRuntime() || document.visibilityState === "hidden" || healthLoading.value) return;
   healthLoading.value=true;
   const [databaseResult,codexResult,tapdResult,repositoriesResult,emailResult,quotaResult] = await Promise.allSettled([
-    databaseHealth(), getCodexCliStatus(), getTapdStatus(), listRepositoryAssets(), getEmailNotificationStatus(), getCodexQuota(),
+    backgroundRequest(() => databaseHealth()), backgroundRequest(() => getCodexCliStatus()), backgroundRequest(() => getTapdStatus()), backgroundRequest(() => listRepositoryAssets()), backgroundRequest(() => getEmailNotificationStatus()), loadQuota().then(() => quota.value),
   ]);
   const items:Array<{ label:string; state:"ok"|"warning"|"idle"|"error"; detail:string }> = [];
   if (databaseResult.status === "fulfilled") items.push({ label:"本地数据库", state:"ok", detail:`结构版本 ${databaseResult.value.schemaVersion}` });
@@ -471,22 +410,24 @@ async function initializeQuickCaptureShortcut() {
   } catch(cause) { console.error("注册快速记录快捷键失败",cause); }
 }
 async function loadNotifications(sync = true, announce = true) {
-  if (!isTauriRuntime() || notificationLoading.value) return;
+  if (!isTauriRuntime() || document.visibilityState === "hidden" || notificationLoading.value) return;
   notificationLoading.value=true;
   try {
-    if (sync) await syncCodexNotifications();
+    if (sync) await backgroundRequest(() => syncCodexNotifications());
     if (!workbenchNotificationsEnabled.value) {
+      const changed = notifications.value.length > 0;
       notifications.value=[];
       notificationToast.value=null;
-      window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:[] }));
+      if (changed) window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:[] }));
       return;
     }
     const knownIds = new Set(notifications.value.map(item => item.id));
-    const latest = await listNotifications();
+    const latest = await backgroundRequest(() => listNotifications());
     const newUnread = latest.filter(item => !item.isRead && !knownIds.has(item.id));
     const newestUnread = newUnread[0];
+    const changed = notificationsChanged(notifications.value, latest);
     notifications.value=latest;
-    window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:latest.slice(0,5) }));
+    if (changed) window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:latest.slice(0,5) }));
     if (announce) for (const item of newUnread) void sendSystemCompletionNotification(item);
     if (announce && newestUnread) {
       notificationToast.value=newestUnread;
@@ -497,25 +438,28 @@ async function loadNotifications(sync = true, announce = true) {
   catch (error) { console.error("读取工作台消息失败", error); }
   finally { notificationLoading.value=false; }
 }
-async function syncTapdNotifications() {
+function syncTapdNotifications() { return polling.run("syncTapdNotifications", syncTapdNotificationsData); }
+async function syncTapdNotificationsData() {
   if (!isTauriRuntime()) return;
   try {
-    const status=await getTapdStatus();
+    const status=await backgroundRequest(() => getTapdStatus());
     if (!status.configured || !status.projects.some(project => project.enabled)) return;
-    const result=await syncTapdItems();
+    const result=await backgroundRequest(() => syncTapdItems());
     await loadNotifications(false);
     window.dispatchEvent(new CustomEvent("tapd-background-synced",{detail:result}));
   }
   catch (error) { console.error("同步 TAPD 消息失败", error); }
 }
-async function loadEmailStatus() {
+function loadEmailStatus() { return polling.run("loadEmailStatus", loadEmailStatusData); }
+async function loadEmailStatusData() {
   if (!isTauriRuntime()) return;
-  try { emailStatus.value=await getEmailNotificationStatus(); }
+  try { emailStatus.value=await backgroundRequest(() => getEmailNotificationStatus()); }
   catch (cause) { console.error("读取 Codex 邮件通知状态失败", cause); }
 }
-async function loadVipStatus() {
+function loadVipStatus() { return polling.run("loadVipStatus", loadVipStatusData); }
+async function loadVipStatusData() {
   if (!isTauriRuntime()) return;
-  try { vipStatus.value=await getVipStatus(); }
+  try { vipStatus.value=await backgroundRequest(() => getVipStatus()); }
   catch (cause) { console.error("读取 VIP 状态失败", cause); }
 }
 async function syncWindowState() {
@@ -542,10 +486,11 @@ function applyWorkbenchNotificationPreference(event:Event) {
     window.dispatchEvent(new CustomEvent("workbench-notifications-updated", { detail:[] }));
   }
 }
-async function loadActiveOperations() {
+function loadActiveOperations() { return polling.run("loadActiveOperations", loadActiveOperationsData); }
+async function loadActiveOperationsData() {
   if (!isTauriRuntime()) return;
   railNow.value=Date.now();
-  const [testResult,generationResult,tapdResult,jenkinsResult,projectsResult] = await Promise.allSettled([listTestRuns(),listTestCaseGenerations(),listTapdCodexJobs(),listJenkinsPublishRecords(),listRunningRepositoryProjects()]);
+  const [testResult,generationResult,tapdResult,jenkinsResult,projectsResult] = await Promise.allSettled([backgroundRequest(() => listTestRuns(undefined,undefined,true)),backgroundRequest(() => listTestCaseGenerations()),backgroundRequest(() => listTapdCodexJobs()),backgroundRequest(() => listJenkinsPublishRecords()),backgroundRequest(() => listRunningRepositoryProjects())]);
   if (testResult.status === "fulfilled") { allTestRuns.value=testResult.value; activeTestRuns.value=testResult.value.filter(item => item.status === "queued" || item.status === "running"); }
   else console.error("读取正在执行的测试失败",testResult.reason);
   if (generationResult.status === "fulfilled") { allTestCaseGenerations.value=generationResult.value; activeTestCaseGenerations.value=generationResult.value.filter(item => item.status === "queued" || item.status === "running"); }
@@ -558,20 +503,39 @@ async function loadActiveOperations() {
   if (projectsResult.status === "fulfilled") runningProjects.value=projectsResult.value;
   else console.error("读取正在运行的项目失败",projectsResult.reason);
 }
-async function loadSidebarWorktime() {
+let sidebarRefreshRequested = false;
+function loadSidebarWorktime(refresh = false) {
+  sidebarRefreshRequested ||= refresh;
+  return polling.run("sidebar-worktime", async () => {
+    do {
+      const rebuild = sidebarRefreshRequested; sidebarRefreshRequested = false;
+      await loadSidebarWorktimeData(rebuild);
+    } while (sidebarRefreshRequested);
+  });
+}
+async function loadSidebarWorktimeData(refresh = false) {
   if (!isTauriRuntime()) return;
   const date=todayIso.value;
-  const [summaryResult,sessionsResult]=await Promise.allSettled([getWorkSummary(date,date,true),listWorkSessions(date,date,false)]);
+  const [summaryResult]=await Promise.allSettled([backgroundRequest(() => getWorkSummary(date,date,refresh))]);
+  const [sessionsResult]=await Promise.allSettled([backgroundRequest(() => listWorkSessions(date,date,false))]);
   if (date !== todayIso.value) return;
   if (summaryResult.status === "fulfilled") todayWorkSummary.value=summaryResult.value;
   else console.error("读取今日工时汇总失败",summaryResult.reason);
   if (sessionsResult.status === "fulfilled") todayWorkSessions.value=sessionsResult.value;
   else console.error("读取当前工作区间失败",sessionsResult.reason);
 }
-async function loadProjectOptions() {
+function loadProjectOptions() { return polling.run("loadProjectOptions", loadProjectOptionsData); }
+function loadBackgroundDiagnostics() {
+  return polling.run("background-diagnostics", async () => {
+    if (!isTauriRuntime()) return;
+    try { backgroundTasks.value = await backgroundRequest(listBackgroundTaskStatus); }
+    catch { /* 诊断读取失败不覆盖上次状态，也不扩大为全页错误。 */ }
+  });
+}
+async function loadProjectOptionsData() {
   if (!isTauriRuntime()) return;
   try {
-    repositoryAssets.value=await listRepositoryAssets();
+    repositoryAssets.value=await backgroundRequest(() => listRepositoryAssets());
   } catch (cause) { console.error("读取可启动项目失败",cause); }
 }
 async function stopRailProject(project:RunningProjectProcess) {
@@ -686,11 +650,15 @@ function closeNotificationOnBlur(event:FocusEvent) {
   if (!(event.currentTarget as HTMLElement).contains(next)) notificationOpen.value=false;
 }
 async function refreshLocalData() {
+  if (refreshing.value) return;
   refreshing.value=true;
-  await Promise.all([store.hydrate(),loadSystemHealth(),loadVipStatus()]);
-  await loadNotifications(true);
-  await syncTapdNotifications();
-  refreshing.value=false;
+  refreshError.value="";
+  try {
+    await Promise.all([store.hydrate(),loadSystemHealth(),loadVipStatus(),loadSidebarWorktime(true)]);
+    await loadNotifications(true);
+    window.dispatchEvent(new CustomEvent("workbench-data-refresh-requested"));
+  } catch (cause) { refreshError.value=`刷新失败：${String(cause)}`; }
+  finally { refreshing.value=false; }
 }
 onMounted(() => {
   resetCockpitIdle();
@@ -698,21 +666,22 @@ onMounted(() => {
   void initializeQuickCaptureShortcut();
   if (isTauriRuntime()) void listen<EmailNotificationStatus>("codex-email-status-changed", event => { emailStatus.value=event.payload; }).then(unlisten => { emailUnlisten=unlisten; });
   if (isTauriRuntime()) void listen<VipStatus>("vip-status-changed", event => { vipStatus.value=event.payload; }).then(unlisten => { vipUnlisten=unlisten; });
-  if (isTauriRuntime()) void listen("codex-data-updated", () => { window.dispatchEvent(new CustomEvent("workbench-codex-data-updated")); }).then(unlisten => { codexDataUnlisten=unlisten; });
+  if (isTauriRuntime()) void listen("codex-data-updated", () => { window.dispatchEvent(new CustomEvent("workbench-codex-data-updated")); void loadSidebarWorktime(true); }).then(unlisten => { codexDataUnlisten=unlisten; });
   if (isTauriRuntime()) {
     void syncWindowState();
     void getCurrentWindow().onResized(() => void syncWindowState()).then(unlisten => { windowResizeUnlisten=unlisten; });
   }
-  statusTimer = window.setInterval(store.refreshTaskStatuses, 60 * 60 * 1000);
-  quotaTimer = window.setInterval(loadQuota, 5 * 60 * 1000);
-  healthTimer = window.setInterval(loadSystemHealth, 10 * 60 * 1000);
-  notificationTimer = window.setInterval(() => void loadNotifications(true), 15 * 1000);
-  tapdNotificationTimer = window.setInterval(() => void syncTapdNotifications(), 5 * 60 * 1000);
-  emailTimer = window.setInterval(() => void loadEmailStatus(), 15 * 1000);
-  activeOperationsTimer = window.setInterval(() => void loadActiveOperations(), 3 * 1000);
+  polling.every("task-status-tick", 60 * 60 * 1000, store.refreshTaskStatuses);
+  polling.every("quota-tick", 5 * 60 * 1000, loadQuota);
+  polling.every("health-tick", 10 * 60 * 1000, loadSystemHealth);
+  polling.every("notification-tick", 15 * 1000, () => loadNotifications(true));
+  polling.every("tapd-tick", 5 * 60 * 1000, syncTapdNotifications);
+  polling.every("email-tick", 30 * 1000, loadEmailStatus);
+  polling.every("operations-tick", 5 * 1000, loadActiveOperations);
+  polling.every("diagnostics-tick", 30 * 1000, loadBackgroundDiagnostics);
   railStatusTimer = window.setInterval(() => { railNow.value=Date.now(); railStatusTicks+=1; if (railStatusTicks % 5 === 0) void Promise.all([loadSidebarWorktime(),loadProjectOptions()]); }, 60 * 1000);
   cockpitIdleTimer = window.setInterval(evaluateCockpitIdle,1_000);
-  performanceTimer = window.setInterval(() => void loadSystemPerformance(),1_000);
+  polling.every("performance-tick", 2_000, loadSystemPerformance);
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("pointerdown",handleCockpitActivity,true);
   window.addEventListener("wheel",handleCockpitActivity,{capture:true,passive:true});
@@ -730,19 +699,9 @@ onMounted(() => {
   window.addEventListener("mouseup", cancelWindowDragging);
 });
 onBeforeUnmount(() => {
-  window.clearInterval(statusTimer);
-  window.clearInterval(quotaTimer);
-  window.clearInterval(healthTimer);
-  window.clearInterval(notificationTimer);
-  window.clearInterval(tapdNotificationTimer);
-  window.clearInterval(emailTimer);
-  window.clearInterval(activeOperationsTimer);
   window.clearInterval(railStatusTimer);
   window.clearInterval(cockpitIdleTimer);
-  window.clearInterval(performanceTimer);
   window.clearTimeout(notificationToastTimer);
-  window.clearTimeout(pageLoadingFinishTimer);
-  window.clearTimeout(pageLoadingSlowTimer);
   window.clearTimeout(startupSlowTimer);
   window.clearTimeout(startupFinishTimer);
   window.clearTimeout(startupSafetyTimer);
@@ -765,7 +724,6 @@ onBeforeUnmount(() => {
   window.removeEventListener(workbenchNotificationPreferenceChangedEvent, applyWorkbenchNotificationPreference);
   window.removeEventListener(navigationOrderChangedEvent, refreshNavigationSettings);
   window.removeEventListener("workbench-active-operations-changed", loadActiveOperations);
-  window.removeEventListener("workbench-backend-loading", handleBackendLoading);
   window.removeEventListener("mousemove", continueWindowDragging);
   window.removeEventListener("mouseup", cancelWindowDragging);
 });
@@ -805,23 +763,7 @@ onBeforeUnmount(() => {
         <button class="top-quota-trigger" :class="{loading:quotaLoading, stale:quota.freshness==='stale'}" :aria-expanded="quotaOpen" title="查看 Codex 剩余用量" @click="quotaOpen=!quotaOpen">
           <i class="header-icon-box"><HeaderIcon name="quota" /></i><span><small>剩余用量</small><b>{{ remainingText }}</b></span><em class="disclosure-icon" aria-hidden="true"></em>
         </button>
-        <section v-if="quotaOpen" class="quota-popover panel">
-          <header><div><b>Codex 剩余用量</b><small>来源：本地 Codex 额度记录</small></div><button class="icon-button" title="关闭" @click="quotaOpen=false">×</button></header>
-          <div v-if="quotaWindows.length" class="quota-window-list">
-            <article v-for="(item,index) in quotaWindows" :key="index">
-              <div><b>{{ quotaPeriod(item.windowMinutes) }}</b><span>{{ Math.round(item.remainingPercent) }}%</span><small>{{ quotaReset(item.resetsAt) }}</small></div>
-              <div class="quota-progress"><i :style="{width:`${item.remainingPercent}%`}"></i></div>
-            </article>
-          </div>
-          <p v-else class="quota-empty">没有未过期的额度快照。使用一次 Codex 后刷新即可读取，工作台不会继续显示旧周期额度。</p>
-          <div class="quota-reset-credit">
-            <span><b>可用额度重置</b></span>
-            <strong v-if="quota.resetCreditsAvailable !== undefined">{{ quota.resetCreditsAvailable }} 次</strong>
-            <em v-else>暂未读取到</em>
-          </div>
-          <p v-if="quota.available" class="quota-source" :title="quota.selectionReason">来源：{{ quota.sourceFile || '本地 Codex 日志' }}</p>
-          <footer><span>{{ capturedText(quota.capturedAt) }} · {{ quotaFreshnessText }}</span><button class="text-button" :disabled="quotaLoading" @click="loadQuota">{{ quotaLoading ? '读取中…' : '刷新' }}</button></footer>
-        </section>
+        <CodexQuotaPopover v-if="quotaOpen" :quota="quota" :loading="quotaLoading" @close="quotaOpen=false" @refresh="loadQuota" />
       </div>
       <div class="top-notifications" @focusout="closeNotificationOnBlur">
         <button class="icon-button header-action-button notification-trigger" :class="{ active:notificationOpen }" :title="workbenchNotificationsEnabled ? '查看工作台消息' : '工作台消息通知已在设置中关闭'" :disabled="!workbenchNotificationsEnabled" @click="toggleNotifications"><HeaderIcon name="notification" /><b v-if="unreadCount">{{ unreadCount > 99 ? '99+' : unreadCount }}</b></button>
@@ -846,6 +788,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
     <main class="page-area">
+      <p v-if="refreshError || store.loadError" class="scan-message error" role="alert">{{ refreshError || store.loadError }}</p>
       <RouterView @new-task="editorOpen = true" />
       <Transition name="page-loader">
         <div v-if="pageLoading && !startupLoading" class="workbench-page-loader" role="status" aria-live="polite">
@@ -891,14 +834,14 @@ onBeforeUnmount(() => {
       </section>
       <section v-if="railIssues.length" class="rail-issues">
         <header class="rail-section-header"><span><i></i><b>异常状态</b></span><em>{{ railIssues.length }}</em></header>
-        <div class="rail-issue-list"><RouterLink v-for="issue in railIssues.slice(0,2)" :key="issue.id" class="rail-issue" :class="issue.tone" :to="issue.to" :title="issue.detail"><i></i><span><b>{{ issue.title }}</b></span><em>›</em></RouterLink><p v-if="railIssues.length > 2"><b>另有 {{ railIssues.length - 2 }} 项</b><span> · 点击上方异常进入对应页面</span></p></div>
+        <div class="rail-issue-list"><RouterLink v-for="issue in railIssues.slice(0,allIssuesOpen ? undefined : 2)" :key="issue.id" class="rail-issue" :class="issue.tone" :to="issue.to" :title="issue.detail"><i></i><span><b>{{ issue.title }}</b></span><em>›</em></RouterLink><button v-if="railIssues.length > 2" class="button secondary small" :aria-expanded="allIssuesOpen" @click="allIssuesOpen=!allIssuesOpen">{{ allIssuesOpen ? '收起异常' : `查看全部 ${railIssues.length} 项异常` }}</button></div>
       </section>
       <section class="rail-recent">
         <button class="rail-recent-toggle" :aria-expanded="recentActivitiesOpen" @click="recentActivitiesOpen=!recentActivitiesOpen"><span><i></i><b>最近活动</b></span><em>{{ recentActivities.length }} 条 · {{ recentActivitiesOpen ? '收起' : '全部' }} ›</em></button>
         <div class="rail-recent-list"><RouterLink v-for="activity in recentActivities.slice(0,recentActivitiesOpen ? 5 : 2)" :key="activity.id" :to="activity.to"><i :class="activity.tone"></i><span><b>{{ activity.title }}</b><small>{{ formatRailActivityTime(activity.at) }}</small></span></RouterLink><p v-if="!recentActivities.length">暂时没有新的运行、测试或完成记录。</p></div>
       </section>
     </aside>
-    <TaskEditor :open="editorOpen" @close="editorOpen = false" @save="store.addTask" />
+    <TaskEditor :open="editorOpen" @close="editorOpen = false" />
     <WorkspaceSearch :open="searchOpen" @close="searchOpen = false" />
     <NotificationDrawer :notification="selectedNotification" @close="selectedNotification=null" @reviewed="handleNotificationReviewed" />
     <QuickCapture :open="quickCaptureOpen" @close="quickCaptureOpen=false" />

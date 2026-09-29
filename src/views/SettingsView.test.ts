@@ -3,13 +3,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as backend from "../services/backend";
 import SettingsView from "./SettingsView.vue";
 import { applyFontSize, loadFontSize } from "../utils/fontSize";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { confirmAction } from "../utils/confirm";
 
 vi.mock("../services/backend");
 vi.mock("../services/updateStatus", () => ({ refreshUpdateStatus: vi.fn(async () => ({})) }));
 vi.mock("@tauri-apps/plugin-autostart", () => ({ isEnabled: vi.fn(async () => false) }));
 vi.mock("vue-router", () => ({ useRoute: () => ({ query: {} }) }));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn(async () => {}) }));
+vi.mock("../utils/confirm", () => ({ confirmAction: vi.fn(async () => true) }));
 
 let wrapper: VueWrapper;
+function mockLocalSettings() {
+  vi.mocked(backend.isTauriRuntime).mockReturnValue(true);
+  vi.mocked(backend.getAiStatus).mockResolvedValue({ configured: false, source: "未配置", model: "demo" });
+  vi.mocked(backend.getApifoxCredentialStatus).mockResolvedValue({ configured: false, source: "未配置" });
+  vi.mocked(backend.getTapdStatus).mockResolvedValue({ authMode: "token", owner: "", projects: [] } as unknown as backend.TapdStatus);
+  vi.mocked(backend.getEmailNotificationStatus).mockResolvedValue({ state: "unconfigured" } as backend.EmailNotificationStatus);
+  vi.mocked(backend.getVipStatus).mockResolvedValue({ active: false });
+  vi.mocked(backend.getTrayIconStyle).mockResolvedValue("B");
+  vi.mocked(backend.getWorkTimeSettings).mockResolvedValue({ gapMinutes: 45 });
+  vi.mocked(backend.getBackupStatus).mockResolvedValue({ databasePath: "anonymous.sqlite", backupDirectory: "backups", backups: [
+    { fileName: "old.sqlite", path: "backups/old.sqlite", kind: "manual", createdAt: "2026-09-29T01:00:00Z", sizeBytes: 1024 },
+  ] });
+}
 async function renderView() {
   wrapper = mount(SettingsView, {
     global: { stubs: { ThemeSwitch: true, NavIcon: true, RouterLink: true } },
@@ -76,6 +93,71 @@ describe("设置分类与工作台消息", () => {
     expect(toggle.attributes("aria-checked")).toBe("false");
     expect(localStorage.getItem("workbench-notifications-enabled")).toBe("false");
     expect(wrapper.get(".scan-message").text()).toContain("工作台消息通知已关闭");
+  });
+});
+
+describe("本地恢复与独立设置读取", () => {
+  async function openData() {
+    await renderView();
+    await wrapper.findAll(".settings-navigation nav button")[5].trigger("click");
+    return wrapper.get(".data-safety-collapsible .danger-text");
+  }
+
+  it("外部服务读取失败不影响本地备份和字号设置", async () => {
+    mockLocalSettings();
+    vi.mocked(backend.getTapdStatus).mockRejectedValue(new Error("unavailable"));
+    await openData();
+    expect(wrapper.get(".backup-list").text()).toContain("手工");
+    expect(wrapper.get(".scan-message.error").text()).toContain("TAPD设置读取失败");
+    expect(backend.getWorkTimeSettings).toHaveBeenCalledOnce();
+  });
+
+  it("恢复成功后真正重启，不再查询旧运行期数据库", async () => {
+    mockLocalSettings();
+    vi.mocked(backend.restoreDatabaseBackup).mockResolvedValue({ databasePath: "anonymous.sqlite", backupDirectory: "backups", backups: [] });
+    const restore = await openData();
+    const initialReads = vi.mocked(backend.getBackupStatus).mock.calls.length;
+    await restore.trigger("click"); await flushPromises();
+    expect(backend.restoreDatabaseBackup).toHaveBeenCalledWith("backups/old.sqlite");
+    expect(relaunch).toHaveBeenCalledOnce();
+    expect(backend.getBackupStatus).toHaveBeenCalledTimes(initialReads);
+    expect(wrapper.text()).toContain("正在重新启动工作台");
+  });
+
+  it("恢复失败保留旧数据且不重启，允许再次操作", async () => {
+    mockLocalSettings();
+    vi.mocked(backend.restoreDatabaseBackup).mockRejectedValue(new Error("备份校验失败"));
+    await (await openData()).trigger("click"); await flushPromises();
+    expect(relaunch).not.toHaveBeenCalled();
+    expect(wrapper.get(".scan-message.error").text()).toContain("备份校验失败");
+    expect(wrapper.get(".data-safety-collapsible .danger-text").attributes("disabled")).toBeUndefined();
+  });
+
+  it("确认期间不重复恢复，重启失败给出明确提示并保持数据操作锁定", async () => {
+    mockLocalSettings();
+    let confirm!: (value:boolean)=>void;
+    vi.mocked(confirmAction).mockReturnValue(new Promise(resolve=>{confirm=resolve;}));
+    vi.mocked(backend.restoreDatabaseBackup).mockResolvedValue({ databasePath: "anonymous.sqlite", backupDirectory: "backups", backups: [] });
+    vi.mocked(relaunch).mockRejectedValue(new Error("restart blocked"));
+    const restore=await openData();
+    await restore.trigger("click"); await restore.trigger("click");
+    expect(confirmAction).toHaveBeenCalledOnce();
+    confirm(true); await flushPromises();
+    expect(backend.restoreDatabaseBackup).toHaveBeenCalledOnce();
+    expect(wrapper.get(".scan-message.error").text()).toContain("数据已安全恢复，但自动重启失败");
+    expect(wrapper.get(".data-safety-body .button.primary").attributes("disabled")).toBeDefined();
+  });
+
+  it("诊断按需读取，失败后可以重试", async () => {
+    mockLocalSettings();
+    vi.mocked(backend.listBackgroundTaskStatus).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce([]);
+    await openData();
+    expect(backend.listBackgroundTaskStatus).not.toHaveBeenCalled();
+    const details=wrapper.get(".diagnostic-settings");
+    (details.element as HTMLDetailsElement).open=true;
+    await vi.waitFor(()=>expect(details.text()).toContain("运行诊断读取失败"));
+    await details.get("button").trigger("click"); await flushPromises();
+    expect(details.text()).toContain("本次启动尚无后台任务记录");
   });
 });
 

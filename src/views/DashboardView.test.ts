@@ -38,6 +38,45 @@ async function render(tests: backend.TestRun[]) {
 }
 
 describe("首页最近测试卡片", () => {
+  it("活动与生活状态均成功时只显示一条成功时间，状态失败仍可独立重试", async () => {
+    vi.mocked(backend.getDailyCheckin).mockResolvedValue({} as backend.DailyCheckin);
+    await render([]);
+    expect(wrapper.get(".passive-digest-panel").findAll(".async-section-status")).toHaveLength(1);
+    vi.mocked(backend.getDailyCheckin).mockRejectedValueOnce(new Error("checkin busy"));
+    window.dispatchEvent(new CustomEvent("workbench-codex-data-updated")); await flushPromises();
+    expect(wrapper.get(".passive-digest-panel .async-section-status.error").text()).toContain("重试");
+  });
+  it("单卡失败不阻塞其他卡片，卡内可独立重试", async () => {
+    vi.mocked(backend.listReports).mockRejectedValueOnce(new Error("reports busy"));
+    await render(sampleTests);
+    expect(wrapper.findAll(".dashboard-risk.test")).toHaveLength(4);
+    expect(wrapper.get(".recent-panel").text()).toContain("读取失败");
+    expect(wrapper.get(".recent-panel").text()).not.toContain("尚无真实报告");
+    const testsCalls=vi.mocked(backend.listTestRuns).mock.calls.length;
+    vi.mocked(backend.listReports).mockResolvedValue([]);
+    await wrapper.get(".recent-panel .async-section-status button").trigger("click"); await flushPromises();
+    expect(wrapper.get(".recent-panel").text()).toContain("上次成功");
+    expect(backend.listTestRuns).toHaveBeenCalledTimes(testsCalls);
+  });
+  it("通知刷新只读取待处理卡片，工时仅来源更新时重算", async () => {
+    await render(sampleTests);
+    expect(backend.getWorkSummary).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(backend.getWorkSummary).mock.calls.every(call=>call[2]===false)).toBe(true);
+    window.dispatchEvent(new CustomEvent("workbench-notifications-updated")); await flushPromises();
+    expect(backend.listInboxItems).toHaveBeenCalledTimes(2);
+    expect(backend.getWorkSummary).toHaveBeenCalledTimes(2);
+    window.dispatchEvent(new CustomEvent("workbench-codex-data-updated")); await flushPromises();
+    expect(backend.getWorkSummary).toHaveBeenCalledTimes(4);
+    expect(vi.mocked(backend.getWorkSummary).mock.calls.at(-2)?.[2]).toBe(true);
+  });
+  it("卡片后续刷新失败保留已显示记录和成功时间", async () => {
+    await render(sampleTests);
+    vi.mocked(backend.listTestRuns).mockRejectedValueOnce(new Error("busy"));
+    window.dispatchEvent(new CustomEvent("workbench-codex-data-updated")); await flushPromises();
+    expect(wrapper.findAll(".dashboard-risk.test")).toHaveLength(4);
+    expect(wrapper.get(".risk-panel").text()).toContain("上次成功");
+    expect(wrapper.get(".risk-panel").text()).toContain("读取失败");
+  });
   it("四条记录全部放入独立的可键盘滚动区域，不删减第四条", async () => {
     await render(sampleTests);
     const card = wrapper.get(".risk-panel");

@@ -5,6 +5,9 @@ import ActivityTrendChart from "../components/ActivityTrendChart.vue";
 import BrandWordmark from "../components/BrandWordmark.vue";
 import { APP_BRAND } from "../utils/brand";
 import WorkTimeDrawer from "../components/WorkTimeDrawer.vue";
+import AsyncSectionStatus from "../components/AsyncSectionStatus.vue";
+import { useAsyncSection } from "../composables/useAsyncSection";
+import { backgroundRequest } from "../services/backendRequest";
 import { getDailyActivity, getDailyCheckin, getHistoryCoverage, getTokenTrend, getWorkSummary, isTauriRuntime, listInboxItems, listReports, listTestRuns, saveDailyCheckin, type DailyActivity, type DailyCheckin, type HistoryCoverage, type InboxItem, type ReportRecord, type TestRun, type TokenTrendPoint, type WorkSummary } from "../services/backend";
 
 const router = useRouter();
@@ -24,6 +27,7 @@ const focusing = ref(false);
 const checkin = ref<DailyCheckin>({ date:todayIso, mood:"", exerciseMinutes:0, note:"", createdAt:"", updatedAt:"" });
 const checkinOpen = ref(false);
 const savingCheckin = ref(false);
+const checkinError = ref("");
 let focusTimer = 0;
 const todayLabel = new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(new Date());
 const todayReport = computed(() => reports.value.find(report => report.reportType === "daily" && report.periodStart === todayIso));
@@ -57,33 +61,57 @@ function toggleFocus() {
 const focusText = computed(() => `${String(Math.floor(focusSeconds.value / 60)).padStart(2, "0")}:${String(focusSeconds.value % 60).padStart(2, "0")}`);
 async function persistCheckin() {
   if (!isTauriRuntime()) return;
-  savingCheckin.value=true;
+  savingCheckin.value=true; checkinError.value="";
   try { checkin.value=await saveDailyCheckin(checkin.value); checkinOpen.value=false; }
+  catch (cause) { checkinError.value=`保存失败，输入已保留：${String(cause)}`; }
   finally { savingCheckin.value=false; }
 }
 
-async function loadDashboardData() {
-  if (!isTauriRuntime()) return;
-  try {
-    const activityStart = new Date(); activityStart.setDate(activityStart.getDate() - 6);
-    [tokenTrend.value, activityTrend.value, reports.value, history.value, recentTests.value, inboxItems.value] = await Promise.all([getTokenTrend(7), getDailyActivity(activityStart.toLocaleDateString("sv-SE"), todayIso), listReports(), getHistoryCoverage(), listTestRuns(), listInboxItems(undefined,30)]);
-    const todayDate = new Date(); const monday = new Date(todayDate); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
-    weekWork.value = await getWorkSummary(monday.toLocaleDateString("sv-SE"), todayIso, true);
-    todayWork.value = await getWorkSummary(todayIso, todayIso, false);
-    checkin.value = await getDailyCheckin(todayIso) || checkin.value;
-  }
-  catch (error) { console.error("首页统计读取失败", error); }
+const tokenSection = useAsyncSection(async () => { tokenTrend.value = await backgroundRequest(() => getTokenTrend(7)); });
+const activitySection = useAsyncSection(async () => {
+  const start = new Date(); start.setDate(start.getDate() - 6);
+  activityTrend.value = await backgroundRequest(() => getDailyActivity(start.toLocaleDateString("sv-SE"), todayIso));
+});
+const reportsSection = useAsyncSection(async () => { reports.value = await backgroundRequest(listReports); });
+const historySection = useAsyncSection(async () => { history.value = await backgroundRequest(getHistoryCoverage); });
+const testsSection = useAsyncSection(async () => { recentTests.value = await backgroundRequest(() => listTestRuns(undefined,undefined,true)); });
+const inboxSection = useAsyncSection(async () => { inboxItems.value = await backgroundRequest(() => listInboxItems(undefined,30)); });
+const workSection = useAsyncSection(async refresh => {
+  const monday = new Date(); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  const week = await backgroundRequest(() => getWorkSummary(monday.toLocaleDateString("sv-SE"), todayIso, refresh));
+  const today = await backgroundRequest(() => getWorkSummary(todayIso, todayIso, false));
+  weekWork.value = week; todayWork.value = today;
+});
+const checkinSection = useAsyncSection(async () => { const value = await backgroundRequest(() => getDailyCheckin(todayIso)); if (value && !checkinOpen.value) checkin.value = value; });
+function loadDashboardData(refresh = false) {
+  if (!isTauriRuntime()) return Promise.resolve();
+  return Promise.all([tokenSection, activitySection, reportsSection, historySection, testsSection, inboxSection, workSection, checkinSection].map(section => section.load(refresh)));
 }
-function refreshAfterCodexScan() { void loadDashboardData(); }
+let sourceChangedWhileHidden = false;
+function refreshAfterCodexScan() {
+  if (document.visibilityState === "hidden") sourceChangedWhileHidden = true;
+  else void loadDashboardData(true);
+}
+function refreshInbox() { if (isTauriRuntime() && document.visibilityState !== "hidden") void inboxSection.load(); }
+function refreshWhenVisible() {
+  if (document.visibilityState === "visible") {
+    const refresh = sourceChangedWhileHidden; sourceChangedWhileHidden = false;
+    void loadDashboardData(refresh);
+  }
+}
 onMounted(() => {
-  window.addEventListener("workbench-notifications-updated",refreshAfterCodexScan);
+  window.addEventListener("workbench-notifications-updated",refreshInbox);
   window.addEventListener("workbench-codex-data-updated",refreshAfterCodexScan);
+  window.addEventListener("workbench-data-refresh-requested",refreshAfterCodexScan);
+  document.addEventListener("visibilitychange",refreshWhenVisible);
   void loadDashboardData();
 });
 onBeforeUnmount(() => {
   window.clearInterval(focusTimer);
-  window.removeEventListener("workbench-notifications-updated",refreshAfterCodexScan);
+  window.removeEventListener("workbench-notifications-updated",refreshInbox);
   window.removeEventListener("workbench-codex-data-updated",refreshAfterCodexScan);
+  window.removeEventListener("workbench-data-refresh-requested",refreshAfterCodexScan);
+  document.removeEventListener("visibilitychange",refreshWhenVisible);
 });
 </script>
 
@@ -94,40 +122,45 @@ onBeforeUnmount(() => {
         <h1 :aria-label="APP_BRAND.name"><BrandWordmark variant="hero" /></h1>
 
       </div>
-      <div class="dashboard-brand-actions"><button class="button secondary" @click="openSearch">⌕ 搜索</button><button class="button primary" @click="openQuickCapture">＋ 快速记录</button></div>
+      <div class="dashboard-brand-actions"><button class="button secondary" @click="loadDashboardData(true)">↻ 刷新</button><button class="button secondary" @click="openSearch">⌕ 搜索</button><button class="button primary" @click="openQuickCapture">＋ 快速记录</button></div>
     </header>
-    <section class="welcome-strip action-overview"><div><b>{{ actionItems.length ? `当前有 ${actionItems.length} 项需要行动` : '当前没有阻塞事项' }}</b><p>{{ blockerCount ? `${blockerCount} 项高优先级 · 优先确认失败、缺陷和项目风险` : `今天已自动捕捉 ${todaySignals} 条工作信号` }}</p></div><div><RouterLink class="button primary link-button" to="/inbox">打开待处理收件箱</RouterLink><button class="button secondary" @click="toggleFocus">{{ focusing ? `暂停 ${focusText}` : '开始专注' }}</button></div></section>
-    <section class="metric-grid"><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:todayIso,end:todayIso,title:'今日工时明细'}"><span>今日工时</span><b>{{ compactHours(todayWork.totalMinutes) }}</b><p>{{ todayWork.hasManualCorrections ? '手工修正优先' : '估算工时' }} · 查看明细</p></article><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:weekWork.startDate,end:weekWork.endDate,title:'本周工时明细'}"><span>本周工时</span><b>{{ compactHours(weekWork.totalMinutes) }}</b><p>{{ weekWork.byProject.length }} 个项目 · 查看分布</p></article><article class="clickable-card" tabindex="0" @click="router.push('/work-records')"><span>今日活动</span><b>{{ todaySignals }}<small> 条</small></b><p>{{ todayActivity?.conversationCount || 0 }} 个 Codex 对话 · {{ todayActivity?.gitCommits || 0 }} 次提交</p></article><article class="clickable-card" tabindex="0" @click="router.push('/tokens')"><span>今日 Token</span><b>{{ compactToken(todayToken) }}</b></article></section>
+    <section class="welcome-strip action-overview"><div><b>{{ inboxSection.state.error && !inboxSection.state.updatedAt ? '待处理事项读取失败' : inboxSection.state.loading && !inboxSection.state.updatedAt ? '正在读取待处理事项…' : actionItems.length ? `当前有 ${actionItems.length} 项需要行动` : '当前没有阻塞事项' }}</b><p>{{ blockerCount ? `${blockerCount} 项高优先级 · 优先确认失败、缺陷和项目风险` : `今天已自动捕捉 ${todaySignals} 条工作信号` }}</p></div><div><RouterLink class="button primary link-button" to="/inbox">打开待处理收件箱</RouterLink><button class="button secondary" @click="toggleFocus">{{ focusing ? `暂停 ${focusText}` : '开始专注' }}</button></div></section>
+    <section class="metric-grid"><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:todayIso,end:todayIso,title:'今日工时明细'}"><AsyncSectionStatus :state="workSection.state" @retry="workSection.load()" /><span>今日工时</span><b>{{ workSection.state.updatedAt ? compactHours(todayWork.totalMinutes) : '—' }}</b><p>{{ todayWork.hasManualCorrections ? '手工修正优先' : '估算工时' }} · 查看明细</p></article><article class="clickable-card" tabindex="0" @click="selectedTimePeriod={start:weekWork.startDate,end:weekWork.endDate,title:'本周工时明细'}"><span>本周工时</span><b>{{ workSection.state.updatedAt ? compactHours(weekWork.totalMinutes) : '—' }}</b><p>{{ weekWork.byProject.length }} 个项目 · 查看分布</p></article><article class="clickable-card" tabindex="0" @click="router.push('/work-records')"><AsyncSectionStatus :state="activitySection.state" @retry="activitySection.load()" /><span>今日活动</span><b>{{ activitySection.state.updatedAt ? todaySignals : '—' }}<small> 条</small></b><p>{{ todayActivity?.conversationCount || 0 }} 个 Codex 对话 · {{ todayActivity?.gitCommits || 0 }} 次提交</p></article><article class="clickable-card" tabindex="0" @click="router.push('/tokens')"><AsyncSectionStatus :state="tokenSection.state" @retry="tokenSection.load()" /><span>今日 Token</span><b>{{ tokenSection.state.updatedAt ? compactToken(todayToken) : '—' }}</b></article></section>
     <section class="dashboard-notifications panel dashboard-actions">
       <div class="panel-head"><div><h2>今天优先处理</h2></div><RouterLink to="/inbox">查看全部 →</RouterLink></div>
+      <AsyncSectionStatus :state="inboxSection.state" @retry="inboxSection.load()" />
       <div class="dashboard-notification-list">
         <button v-for="item in topPriorities" :key="item.id" :class="[`priority-${item.priority}`,{unread:item.workflowStatus==='needs_decision'}]" @click="openInboxItem(item)"><i></i><span><b>{{ item.title }}</b><small>{{ item.project }} · {{ item.summary || item.detail }}</small></span><em>{{ notificationTime(item.updatedAt) }}</em></button>
-        <p v-if="!topPriorities.length" class="panel-empty">当前没有需要你决策的事项。新的 Codex 结果、TAPD 缺陷、测试失败和项目风险会显示在这里。</p>
+        <p v-if="!topPriorities.length && !inboxSection.state.loading && !inboxSection.state.error" class="panel-empty">当前没有需要你决策的事项。新的 Codex 结果、TAPD 缺陷、测试失败和项目风险会显示在这里。</p>
       </div>
     </section>
     <section class="dashboard-grid">
-      <article class="panel today-panel passive-digest-panel"><div class="panel-head"><div><h2>今天自动记录了什么</h2><p>{{ todayLabel }}</p></div><RouterLink to="/work-records">查看明细 →</RouterLink></div><div class="passive-sources"><RouterLink to="/tokens"><b>{{ todayActivity?.conversationCount || 0 }}</b><span>Codex 对话</span><small>{{ todayActivity?.messageCount || 0 }} 条消息</small></RouterLink><RouterLink to="/projects"><b>{{ todayActivity?.gitCommits || 0 }}</b><span>Git 提交</span><small>按项目归类</small></RouterLink><RouterLink to="/testing"><b>{{ todayActivity?.testRuns || 0 }}</b><span>测试执行</span><small>{{ todayActivity?.testsPassed || 0 }} 次通过</small></RouterLink><RouterLink to="/knowledge"><b>{{ todayActivity?.knowledgeCount || 0 }}</b><span>知识更新</span><small>自动去重留版本</small></RouterLink></div><footer><span><b>可选生活状态</b><small>{{ checkin.energy ? `精力 ${checkin.energy}/5` : '尚未记录' }}<template v-if="checkin.exerciseMinutes"> · 运动 {{ checkin.exerciseMinutes }} 分钟</template></small></span><button class="button secondary small" @click="checkinOpen=true">{{ checkin.updatedAt ? '修改状态' : '顺手记一下' }}</button></footer></article>
-      <article class="panel project-panel"><div class="panel-head"><div><h2>本周项目投入</h2><p>{{ projectProgress.length }} 个活跃项目 · 工时为估算/修正口径</p></div><RouterLink to="/work-records">工作记录 →</RouterLink></div><div v-for="item in projectProgress" :key="item.name" class="project-progress"><span><b>{{ item.name }}</b><em>{{ compactHours(item.minutes) }} · {{ item.progress }}%</em></span><div><i :style="{ width: `${item.progress}%` }"></i></div></div><p v-if="!projectProgress.length" class="panel-empty">本周暂无可估算的本地活动。</p></article>
-      <article class="panel chart-panel clickable-card" tabindex="0" @click="router.push('/work-records')"><div class="panel-head"><div><h2>Codex 活跃趋势</h2><p>近 7 天对话次数</p></div><b>{{ activityTrend.reduce((sum,item) => sum + item.conversationCount, 0) }} 次</b></div><ActivityTrendChart :points="activityTrend" @select="router.push(`/calendar?date=${$event.date}`)" /></article>
-      <article class="panel recent-panel"><div class="panel-head"><div><h2>最近报告</h2></div><RouterLink to="/reports">全部报告 →</RouterLink></div><RouterLink v-for="report in reports.slice(0,3)" :key="report.id" class="dashboard-report" :to="`/reports?report=${report.id}`"><span>▤</span><div><b>{{ report.title }}</b><small>{{ report.status === 'locked' ? '已锁定' : '可编辑' }} · {{ report.periodStart }}</small></div></RouterLink><p v-if="!reports.length" class="panel-empty">尚无真实报告，可前往报告中心生成。</p></article>
+      <article class="panel today-panel passive-digest-panel"><div class="panel-head"><div><h2>今天自动记录了什么</h2><p>{{ todayLabel }}</p></div><RouterLink to="/work-records">查看明细 →</RouterLink></div><AsyncSectionStatus :state="activitySection.state" @retry="activitySection.load()" /><AsyncSectionStatus v-if="checkinSection.state.loading || checkinSection.state.error" :state="checkinSection.state" @retry="checkinSection.load()" /><div class="passive-sources"><RouterLink to="/tokens"><b>{{ todayActivity?.conversationCount || 0 }}</b><span>Codex 对话</span><small>{{ todayActivity?.messageCount || 0 }} 条消息</small></RouterLink><RouterLink to="/projects"><b>{{ todayActivity?.gitCommits || 0 }}</b><span>Git 提交</span><small>按项目归类</small></RouterLink><RouterLink to="/testing"><b>{{ todayActivity?.testRuns || 0 }}</b><span>测试执行</span><small>{{ todayActivity?.testsPassed || 0 }} 次通过</small></RouterLink><RouterLink to="/knowledge"><b>{{ todayActivity?.knowledgeCount || 0 }}</b><span>知识更新</span><small>自动去重留版本</small></RouterLink></div><footer><span><b>可选生活状态</b><small>{{ checkin.energy ? `精力 ${checkin.energy}/5` : '尚未记录' }}<template v-if="checkin.exerciseMinutes"> · 运动 {{ checkin.exerciseMinutes }} 分钟</template></small></span><button class="button secondary small" @click="checkinOpen=true">{{ checkin.updatedAt ? '修改状态' : '顺手记一下' }}</button></footer></article>
+      <article class="panel project-panel"><div class="panel-head"><div><h2>本周项目投入</h2><p>{{ projectProgress.length }} 个活跃项目 · 工时为估算/修正口径</p></div><RouterLink to="/work-records">工作记录 →</RouterLink></div><AsyncSectionStatus :state="workSection.state" @retry="workSection.load()" /><div v-for="item in projectProgress" :key="item.name" class="project-progress"><span><b>{{ item.name }}</b><em>{{ compactHours(item.minutes) }} · {{ item.progress }}%</em></span><div><i :style="{ width: `${item.progress}%` }"></i></div></div><p v-if="!projectProgress.length && !workSection.state.loading && !workSection.state.error" class="panel-empty">本周暂无可估算的本地活动。</p></article>
+      <article class="panel chart-panel clickable-card" tabindex="0" @click="router.push('/work-records')"><div class="panel-head"><div><h2>Codex 活跃趋势</h2><p>近 7 天对话次数</p></div><b>{{ activityTrend.reduce((sum,item) => sum + item.conversationCount, 0) }} 次</b></div><AsyncSectionStatus :state="activitySection.state" @retry="activitySection.load()" /><ActivityTrendChart :points="activityTrend" @select="router.push(`/calendar?date=${$event.date}`)" /></article>
+      <article class="panel recent-panel"><div class="panel-head"><div><h2>最近报告</h2></div><RouterLink to="/reports">全部报告 →</RouterLink></div><AsyncSectionStatus :state="reportsSection.state" @retry="reportsSection.load()" /><RouterLink v-for="report in reports.slice(0,3)" :key="report.id" class="dashboard-report" :to="`/reports?report=${report.id}`"><span>▤</span><div><b>{{ report.title }}</b><small>{{ report.status === 'locked' ? '已锁定' : '可编辑' }} · {{ report.periodStart }}</small></div></RouterLink><p v-if="!reports.length && !reportsSection.state.loading && !reportsSection.state.error" class="panel-empty">尚无真实报告，可前往报告中心生成。</p></article>
       <article class="panel risk-panel">
         <div class="panel-head"><div><h2 title="仅显示实际测试结果">最近测试与需要关注</h2></div><RouterLink to="/testing">测试中心 →</RouterLink></div>
+        <AsyncSectionStatus :state="testsSection.state" @retry="testsSection.load()" />
         <div v-if="recentTests.length" class="dashboard-test-list" role="region" aria-label="最近测试记录" tabindex="0">
           <div v-for="test in recentTests.slice(0,4)" :key="test.id" class="dashboard-risk test" @click="router.push('/testing')">
             <i></i><span><b :title="test.menuName">{{ test.menuName }}</b><small :title="`${test.project} · ${test.status === 'passed' ? '测试通过' : '测试失败'} · ${test.startedAt.slice(0,10)}`">{{ test.project }} · {{ test.status === 'passed' ? '测试通过' : '测试失败' }} · {{ test.startedAt.slice(0,10) }}</small></span>
           </div>
         </div>
-        <p v-else class="panel-empty">当前没有测试记录。</p>
+        <p v-else-if="!testsSection.state.loading && !testsSection.state.error" class="panel-empty">当前没有测试记录。</p>
       </article>
-      <article class="panel history-panel"><div class="panel-head"><div><h2 title="普通与归档会话统一统计">今天和本周做了什么</h2><p>{{ history?.firstDate || '尚无数据' }}—{{ history?.lastDate || '尚无数据' }}</p></div><RouterLink to="/work-records">全部工作记录 →</RouterLink></div><div class="dashboard-result-columns"><RouterLink :to="todayReport ? `/reports?report=${todayReport.id}` : '/reports'"><b>今天</b><span v-for="item in todayFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!todayFeatures.length">尚未生成今天的项目成果总结</em></RouterLink><RouterLink :to="weekReport ? `/reports?report=${weekReport.id}` : '/reports'"><b>本周</b><span v-for="item in weekFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!weekFeatures.length">尚未生成本周的项目成果总结</em></RouterLink></div></article>
+      <article class="panel history-panel"><div class="panel-head"><div><h2 title="普通与归档会话统一统计">今天和本周做了什么</h2><p>{{ history?.firstDate || '尚无数据' }}—{{ history?.lastDate || '尚无数据' }}</p></div><RouterLink to="/work-records">全部工作记录 →</RouterLink></div><AsyncSectionStatus :state="historySection.state" @retry="historySection.load()" /><AsyncSectionStatus :state="reportsSection.state" @retry="reportsSection.load()" /><div class="dashboard-result-columns"><RouterLink :to="todayReport ? `/reports?report=${todayReport.id}` : '/reports'"><b>今天</b><span v-for="item in todayFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!todayFeatures.length && !reportsSection.state.loading && !reportsSection.state.error">尚未生成今天的项目成果总结</em></RouterLink><RouterLink :to="weekReport ? `/reports?report=${weekReport.id}` : '/reports'"><b>本周</b><span v-for="item in weekFeatures.slice(0,3)" :key="item">{{ item }}</span><em v-if="!weekFeatures.length && !reportsSection.state.loading && !reportsSection.state.error">尚未生成本周的项目成果总结</em></RouterLink></div></article>
     </section>
-    <WorkTimeDrawer :open="Boolean(selectedTimePeriod)" :start-date="selectedTimePeriod?.start || ''" :end-date="selectedTimePeriod?.end || ''" :title="selectedTimePeriod?.title" @close="selectedTimePeriod=null" @changed="router.go(0)" />
-    <div v-if="checkinOpen" class="editor-backdrop" @click.self="checkinOpen=false"><aside class="task-editor daily-checkin-editor"><header><div><h2>今日状态（可选）</h2><p>仅作个人回顾</p></div><button class="icon-button" @click="checkinOpen=false">×</button></header><label>精力<select v-model.number="checkin.energy"><option :value="undefined">不记录</option><option v-for="value in 5" :key="value" :value="value">{{ value }}/5</option></select></label><label>心情<input v-model="checkin.mood" placeholder="例如：平稳、专注、疲惫"></label><label>运动分钟<input v-model.number="checkin.exerciseMinutes" min="0" max="1440" type="number"></label><label>一句话备注<textarea v-model="checkin.note" rows="3" placeholder="今天身体或生活上值得记住的事"></textarea></label><footer><span></span><button class="button secondary" @click="checkinOpen=false">取消</button><button class="button primary" :disabled="savingCheckin" @click="persistCheckin">{{ savingCheckin ? '保存中…' : '保存' }}</button></footer></aside></div>
+    <WorkTimeDrawer :open="Boolean(selectedTimePeriod)" :start-date="selectedTimePeriod?.start || ''" :end-date="selectedTimePeriod?.end || ''" :title="selectedTimePeriod?.title" @close="selectedTimePeriod=null" @changed="workSection.load(true)" />
+    <div v-if="checkinOpen" class="editor-backdrop" @click.self="checkinOpen=false"><aside class="task-editor daily-checkin-editor"><header><div><h2>今日状态（可选）</h2><p>仅作个人回顾</p></div><button class="icon-button" @click="checkinOpen=false">×</button></header><p v-if="checkinError" class="scan-message error" role="alert">{{ checkinError }}</p><label>精力<select v-model.number="checkin.energy"><option :value="undefined">不记录</option><option v-for="value in 5" :key="value" :value="value">{{ value }}/5</option></select></label><label>心情<input v-model="checkin.mood" placeholder="例如：平稳、专注、疲惫"></label><label>运动分钟<input v-model.number="checkin.exerciseMinutes" min="0" max="1440" type="number"></label><label>一句话备注<textarea v-model="checkin.note" rows="3" placeholder="今天身体或生活上值得记住的事"></textarea></label><footer><span></span><button class="button secondary" @click="checkinOpen=false">取消</button><button class="button primary" :disabled="savingCheckin" @click="persistCheckin">{{ savingCheckin ? '保存中…' : '保存' }}</button></footer></aside></div>
   </div>
 </template>
 
 <style scoped>
 /* 卡片仍占原有固定网格行；仅记录区滚动，不能把第 4 条挤到下一张卡片上。 */
+.metric-grid article{height:auto;min-height:120px;padding-bottom:32px}
+.metric-grid .async-section-status{padding:0 0 4px}
+.dashboard-grid{grid-template-rows:minmax(244px,auto) minmax(230px,auto) minmax(210px,auto)}
 .risk-panel{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 .risk-panel>.panel-head{height:auto;min-height:58px;flex:0 0 auto;gap:12px}
 .risk-panel>.panel-head>div{min-width:0;overflow-wrap:anywhere}

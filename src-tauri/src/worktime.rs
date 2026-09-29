@@ -3,6 +3,9 @@ use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
 const DEFAULT_GAP_MINUTES: i64 = 45;
@@ -60,7 +63,7 @@ pub struct WorkTimeSettings {
     pub gap_minutes: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash)]
 struct ActivityEvent {
     time: NaiveDateTime,
     project: String,
@@ -136,8 +139,8 @@ fn activity_events(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<ActivityEvent>, String> {
-    project_identity::sync_project_profiles_for_state(state)?;
     let connection = state.connect()?;
+    let identities = project_identity::ProjectIdentityMap::load(&connection)?;
     let mut statement = connection
         .prepare(
             "SELECT local_time,project,kind,detail FROM (
@@ -186,11 +189,7 @@ fn activity_events(
         };
         events.push(ActivityEvent {
             time,
-            project: project_identity::canonical_project_name(
-                &connection,
-                &raw_project,
-                &raw_project,
-            ),
+            project: identities.canonical_name(&raw_project, &raw_project),
             work_type: work_type_for(&kind, &detail),
             kind,
         });
@@ -279,10 +278,14 @@ pub fn rebuild_estimated_sessions(
 ) -> Result<usize, String> {
     parse_date(start_date)?;
     parse_date(end_date)?;
-    let sessions = estimated_sessions(
-        activity_events(state, start_date, end_date)?,
-        gap_minutes(state)?,
-    );
+    let events = activity_events(state, start_date, end_date)?;
+    let threshold = gap_minutes(state)?;
+    let sessions = cached_estimated_sessions(&state.path, start_date, end_date, events, threshold);
+    let existing = session_rows(state, start_date, end_date)?;
+    // 没有新活动时保留估算记录的 ID 与时间，避免后台刷新反复 DELETE/INSERT。
+    if estimate_values(&sessions) == estimate_values(&existing) {
+        return Ok(sessions.len());
+    }
     let mut connection = state.connect()?;
     let transaction = connection
         .transaction()
@@ -298,6 +301,64 @@ pub fn rebuild_estimated_sessions(
     }
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(sessions.len())
+}
+
+type EstimateCacheKey = (PathBuf, String, String);
+type EstimateCache = HashMap<EstimateCacheKey, (u64, Vec<WorkSession>)>;
+static ESTIMATE_CACHE: OnceLock<Mutex<EstimateCache>> = OnceLock::new();
+
+fn cached_estimated_sessions(
+    database_path: &std::path::Path,
+    start_date: &str,
+    end_date: &str,
+    events: Vec<ActivityEvent>,
+    threshold: i64,
+) -> Vec<WorkSession> {
+    let mut hash = DefaultHasher::new();
+    events.hash(&mut hash);
+    threshold.hash(&mut hash);
+    let fingerprint = hash.finish();
+    let key = (
+        database_path.to_path_buf(),
+        start_date.to_owned(),
+        end_date.to_owned(),
+    );
+    let cache = ESTIMATE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut cache) = cache.lock() else {
+        return estimated_sessions(events, threshold);
+    };
+    if let Some((previous, sessions)) = cache.get(&key) {
+        if *previous == fingerprint {
+            return sessions.clone();
+        }
+    }
+    let sessions = estimated_sessions(events, threshold);
+    // 只缓存最近使用的少量日期范围；恢复数据库后仍用真实活动及现存估算做比对。
+    if cache.len() >= 32 {
+        cache.clear();
+    }
+    cache.insert(key, (fingerprint, sessions.clone()));
+    sessions
+}
+
+fn estimate_values(sessions: &[WorkSession]) -> Vec<(&str, &str, &str, i64, &str, &str, &str)> {
+    let mut values = sessions
+        .iter()
+        .filter(|item| item.source == "estimated")
+        .map(|item| {
+            (
+                item.date.as_str(),
+                item.start_time.as_str(),
+                item.end_time.as_str(),
+                item.duration_minutes,
+                item.project.as_str(),
+                item.work_type.as_str(),
+                item.note.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    values
 }
 
 fn session_rows(
@@ -375,7 +436,6 @@ pub fn summary_for_range(
     end_date: &str,
     refresh: bool,
 ) -> Result<WorkSummary, String> {
-    project_identity::sync_project_profiles_for_state(state)?;
     parse_date(start_date)?;
     parse_date(end_date)?;
     if refresh {
@@ -398,9 +458,9 @@ pub fn summary_for_range(
     let mut types = BTreeMap::<String, i64>::new();
     let mut daily = BTreeMap::<String, (i64, i64, i64)>::new();
     let connection = state.connect()?;
+    let identities = project_identity::ProjectIdentityMap::load(&connection)?;
     for item in &effective {
-        let project =
-            project_identity::canonical_project_name(&connection, &item.project, &item.project);
+        let project = identities.canonical_name(&item.project, &item.project);
         *projects.entry(project).or_default() += item.duration_minutes;
         *types.entry(item.work_type.clone()).or_default() += item.duration_minutes;
         daily.entry(item.date.clone()).or_default().0 += item.duration_minutes;
@@ -445,28 +505,38 @@ pub fn summary_for_range(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_work_sessions(
+pub async fn list_work_sessions(
     state: tauri::State<'_, DatabaseState>,
     start_date: String,
     end_date: String,
     refresh: Option<bool>,
 ) -> Result<Vec<WorkSession>, String> {
-    parse_date(&start_date)?;
-    parse_date(&end_date)?;
-    if refresh.unwrap_or(true) {
-        rebuild_estimated_sessions(&state, &start_date, &end_date)?;
-    }
-    session_rows(&state, &start_date, &end_date)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        parse_date(&start_date)?;
+        parse_date(&end_date)?;
+        if refresh.unwrap_or(true) {
+            rebuild_estimated_sessions(&state, &start_date, &end_date)?;
+        }
+        session_rows(&state, &start_date, &end_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn work_summary(
+pub async fn work_summary(
     state: tauri::State<'_, DatabaseState>,
     start_date: String,
     end_date: String,
     refresh: Option<bool>,
 ) -> Result<WorkSummary, String> {
-    summary_for_range(&state, &start_date, &end_date, refresh.unwrap_or(true))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        summary_for_range(&state, &start_date, &end_date, refresh.unwrap_or(true))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -544,6 +614,60 @@ mod tests {
     };
     use crate::database::DatabaseState;
     use chrono::NaiveDate;
+
+    #[test]
+    fn unchanged_refresh_preserves_estimates_and_read_only_summary_does_not_write() {
+        let directory =
+            std::env::temp_dir().join(format!("worktime-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let observer = state.connect().unwrap();
+        observer.execute_batch("INSERT INTO tasks(id,title,project,scope,status,priority,note,source,created_at,updated_at)
+            VALUES('task','开发功能','client','day','todo','P1','','manual','2026-08-03 08:00:00','2026-08-03 08:00:00');
+            INSERT INTO project_profiles(id,display_name,repository_path,tapd_workspace_id,aliases_json,category,created_at,updated_at)
+            VALUES('p','生产安全PC','F:/example/client','','[\"client\"]','','now','now');").unwrap();
+        let version = || {
+            observer
+                .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        super::rebuild_estimated_sessions(&state, "2026-08-03", "2026-08-03").unwrap();
+        let original = super::session_rows(&state, "2026-08-03", "2026-08-03").unwrap();
+        assert_eq!(original.len(), 1);
+        assert_eq!(original[0].project, "生产安全PC");
+        let before = version();
+        super::rebuild_estimated_sessions(&state, "2026-08-03", "2026-08-03").unwrap();
+        super::summary_for_range(&state, "2026-08-03", "2026-08-03", false).unwrap();
+        assert_eq!(version(), before, "无变化的刷新和汇总不应写入数据库");
+        assert_eq!(
+            super::session_rows(&state, "2026-08-03", "2026-08-03").unwrap()[0].id,
+            original[0].id
+        );
+
+        // 同一个时间点的任务内容改变也必须使估算失效，不能只比较最大更新时间。
+        observer
+            .execute("UPDATE tasks SET title='测试验证' WHERE id='task'", [])
+            .unwrap();
+        super::rebuild_estimated_sessions(&state, "2026-08-03", "2026-08-03").unwrap();
+        assert_eq!(
+            super::session_rows(&state, "2026-08-03", "2026-08-03").unwrap()[0].work_type,
+            "测试验证"
+        );
+        observer
+            .execute(
+                "UPDATE project_profiles SET display_name='新项目名' WHERE id='p'",
+                [],
+            )
+            .unwrap();
+        super::rebuild_estimated_sessions(&state, "2026-08-03", "2026-08-03").unwrap();
+        assert_eq!(
+            super::session_rows(&state, "2026-08-03", "2026-08-03").unwrap()[0].project,
+            "新项目名"
+        );
+        drop(observer);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn event(time: &str, project: &str) -> ActivityEvent {
         ActivityEvent {

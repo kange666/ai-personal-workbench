@@ -1,4 +1,4 @@
-use crate::database::DatabaseState;
+use crate::{database::DatabaseState, project_identity::ProjectIdentityMap};
 use chrono::Utc;
 use keyring::Entry;
 use reqwest::blocking::{Client, Response};
@@ -86,6 +86,7 @@ pub struct JenkinsPublishRecord {
     pub id: String,
     pub job_name: String,
     pub job_full_name: String,
+    pub canonical_project: Option<String>,
     pub job_url: String,
     pub branch_parameter: String,
     pub branch: String,
@@ -757,6 +758,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JenkinsPublishRe
         id: row.get(0)?,
         job_name: row.get(1)?,
         job_full_name: row.get(2)?,
+        canonical_project: None,
         job_url: row.get(3)?,
         branch_parameter: row.get(4)?,
         branch: row.get(5)?,
@@ -782,8 +784,8 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JenkinsPublishRe
 const RECORD_SELECT: &str = "SELECT id,job_name,job_full_name,job_url,branch_parameter,branch,queue_id,queue_url,build_number,build_url,status,sync_state,queue_reason,current_stage,progress_percent,stages_json,changes_json,started_at,build_started_at,finished_at,updated_at,result,error_message FROM jenkins_publish_records";
 
 fn get_record(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRecord, String> {
-    state
-        .connect()?
+    let connection = state.connect()?;
+    let mut record = connection
         .query_row(
             &format!("{RECORD_SELECT} WHERE id=?1"),
             [id],
@@ -791,7 +793,10 @@ fn get_record(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRecord, S
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "发布记录不存在。".to_string())
+        .ok_or_else(|| "发布记录不存在。".to_string())?;
+    record.canonical_project = ProjectIdentityMap::load(&connection)?
+        .exact_project_name(&[&record.job_full_name, &record.job_name]);
+    Ok(record)
 }
 
 fn is_terminal(status: &str) -> bool {
@@ -1230,7 +1235,7 @@ pub async fn trigger_jenkins_publish(
             .lock()
             .map_err(|_| "Jenkins 发布锁异常，请稍后重试。".to_string())?;
         if has_active_publish(
-            &database.connect()?,
+            &*database.connect()?,
             &connection.base_url,
             &job.full_name,
             &branch,
@@ -1271,10 +1276,18 @@ pub async fn trigger_jenkins_publish(
 }
 
 #[tauri::command]
-pub fn list_jenkins_publish_records(
+pub async fn list_jenkins_publish_records(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<Vec<JenkinsPublishRecord>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || publish_records_for_state(&state))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn publish_records_for_state(state: &DatabaseState) -> Result<Vec<JenkinsPublishRecord>, String> {
     let connection = state.connect()?;
+    let identities = ProjectIdentityMap::load(&connection)?;
     let mut statement = connection
         .prepare(&format!(
             "{RECORD_SELECT} ORDER BY datetime(started_at) DESC LIMIT 200"
@@ -1283,16 +1296,25 @@ pub fn list_jenkins_publish_records(
     let rows = statement
         .query_map([], record_from_row)
         .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let mut records = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for record in &mut records {
+        record.canonical_project =
+            identities.exact_project_name(&[&record.job_full_name, &record.job_name]);
+    }
+    Ok(records)
 }
 
 #[tauri::command]
-pub fn get_jenkins_publish_status(
+pub async fn get_jenkins_publish_status(
     state: tauri::State<'_, DatabaseState>,
     id: String,
 ) -> Result<JenkinsPublishRecord, String> {
-    get_record(&state, &id)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || get_record(&state, &id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

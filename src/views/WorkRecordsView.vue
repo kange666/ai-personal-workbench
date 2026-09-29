@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { backgroundRequest } from "../services/backendRequest";
 import { useRouter } from "vue-router";
 import WorkTimeDrawer from "../components/WorkTimeDrawer.vue";
 import { useWorkbenchStore } from "../stores/workbench";
@@ -91,22 +92,58 @@ function matches(date: string) {
   if (gitOnly.value && !activity?.gitCommits) return false;
   if (reportOnly.value && !report) return false;
   if (keyword.value.trim()) { const text = `${report?.title || ""} ${report?.contentMarkdown || ""} ${daySessions.map(item => `${item.project} ${item.note}`).join(" ")}`.toLowerCase(); if (!text.includes(keyword.value.trim().toLowerCase())) return false; }
-  return Boolean(activity?.messageCount || report || daySessions.length);
+  return Boolean(activity?.messageCount || activity?.publishCount || report || daySessions.length);
 }
 const dayRecords = computed(() => activities.value.map(item => ({ ...item, report: reportByDay.value.get(item.date), sessions: sessionsByDay.value.get(item.date) || [], workMinutes: effectiveMinutes(item.date) })).filter(item => matches(item.date)).sort((a,b) => b.date.localeCompare(a.date)));
 function monday(dateText: string) { const date = new Date(`${dateText}T00:00:00`); date.setDate(date.getDate() - ((date.getDay() + 6) % 7)); return iso(date); }
 const weekRecords = computed(() => {
   const groups = new Map<string, typeof dayRecords.value>();
   for (const item of dayRecords.value) { const key = monday(item.date); groups.set(key, [...(groups.get(key) || []), item]); }
-  return [...groups].map(([start,days]) => { const end = new Date(`${start}T00:00:00`); end.setDate(end.getDate()+6); const report = reports.value.find(item => item.reportType === "weekly" && item.periodStart === start); return { start, end:iso(end), days, report, workMinutes:days.reduce((sum,item)=>sum+item.workMinutes,0), tokens:days.reduce((sum,item)=>sum+item.totalTokens,0), commits:days.reduce((sum,item)=>sum+item.gitCommits,0), conversations:days.reduce((sum,item)=>sum+item.conversationCount,0), testRuns:days.reduce((sum,item)=>sum+item.testRuns,0), testsPassed:days.reduce((sum,item)=>sum+item.testsPassed,0), knowledgeCount:days.reduce((sum,item)=>sum+item.knowledgeCount,0), taskActivityCount:days.reduce((sum,item)=>sum+item.taskActivityCount,0) }; }).sort((a,b)=>b.start.localeCompare(a.start));
+  return [...groups].map(([start,days]) => { const end = new Date(`${start}T00:00:00`); end.setDate(end.getDate()+6); const report = reports.value.find(item => item.reportType === "weekly" && item.periodStart === start); return { start, end:iso(end), days, report, workMinutes:days.reduce((sum,item)=>sum+item.workMinutes,0), tokens:days.reduce((sum,item)=>sum+item.totalTokens,0), commits:days.reduce((sum,item)=>sum+item.gitCommits,0), conversations:days.reduce((sum,item)=>sum+item.conversationCount,0), testRuns:days.reduce((sum,item)=>sum+item.testRuns,0), testsPassed:days.reduce((sum,item)=>sum+item.testsPassed,0), knowledgeCount:days.reduce((sum,item)=>sum+item.knowledgeCount,0), publishCount:days.reduce((sum,item)=>sum+(item.publishCount || 0),0), publishesSucceeded:days.reduce((sum,item)=>sum+(item.publishesSucceeded || 0),0), taskActivityCount:days.reduce((sum,item)=>sum+item.taskActivityCount,0) }; }).sort((a,b)=>b.start.localeCompare(a.start));
 });
 
-async function load() {
-  if (!isTauriRuntime()) return;
-  loading.value = true; error.value = "";
-  try { workSummary.value = await getWorkSummary(startDate.value,endDate.value,true); [activities.value,reports.value,sessions.value,conversations.value,knowledge.value,testMenus.value,testRuns.value] = await Promise.all([getDailyActivity(startDate.value,endDate.value),listReports(),listWorkSessions(startDate.value,endDate.value,false),listConversationMetrics(1000),listKnowledge(),listTestMenus(),listTestRuns()]); }
-  catch (cause) { error.value=String(cause); }
-  finally { loading.value=false; }
+const lastLoadedAt = ref("");
+let loadPending: Promise<void> | undefined;
+let reloadRequested = false;
+let refreshRequested = false;
+let disposed = false;
+function load(refresh = false): Promise<void> {
+  if (!isTauriRuntime() || disposed) return Promise.resolve();
+  refreshRequested ||= refresh;
+  if (loadPending) { reloadRequested = true; return loadPending; }
+  loading.value = true;
+  loadPending = (async () => {
+    do {
+      reloadRequested = false;
+      const start = startDate.value; const end = endDate.value;
+      const rebuild = refreshRequested; refreshRequested = false;
+      const failures: string[] = [];
+      const current = () => !disposed && start === startDate.value && end === endDate.value;
+      error.value = "";
+      try { const value = await backgroundRequest(() => getWorkSummary(start,end,rebuild)); if (current()) workSummary.value = value; }
+      catch (cause) { failures.push(`工时：${String(cause)}`); }
+      if (disposed) break;
+      // 每组数据独立提交，某一组失败不会丢掉其余已成功的记录。
+      const read = async <T,>(label: string, query: () => Promise<T>, commit: (value: T) => void) => {
+        try { const value = await backgroundRequest(query); if (current()) commit(value); }
+        catch (cause) { failures.push(`${label}：${String(cause)}`); }
+      };
+      await Promise.all([
+        read("活动",() => getDailyActivity(start,end), value => activities.value=value),
+        read("报告",listReports,value => reports.value=value),
+        read("工时明细",() => listWorkSessions(start,end,false),value => sessions.value=value),
+        read("对话",() => listConversationMetrics(1000),value => conversations.value=value),
+        read("知识",listKnowledge,value => knowledge.value=value),
+        read("测试目录",listTestMenus,value => testMenus.value=value),
+        read("测试记录",listTestRuns,value => testRuns.value=value),
+      ]);
+      if (current()) {
+        error.value = failures.length ? `部分读取失败，保留上次成功数据：${failures.join("；")}` : "";
+        if (!failures.length) lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN");
+      }
+    } while (reloadRequested && !disposed);
+  })().finally(() => { loading.value=false; loadPending=undefined; });
+  return loadPending;
 }
 async function initialize() {
   if (!isTauriRuntime()) return;
@@ -128,24 +165,26 @@ async function copyContinuation() {
   try { await navigator.clipboard.writeText(text); message.value = "项目续接说明已复制，可直接粘贴到新的 Codex 任务。"; }
   catch { const area=document.createElement("textarea"); area.value=text; document.body.appendChild(area); area.select(); document.execCommand("copy"); area.remove(); message.value="项目续接说明已复制。"; }
 }
-async function openRecordSources(report: ReportRecord) { loading.value=true; error.value=""; try { recordSources.value=await getReportSources(report.id); sourceTitle.value=`${report.title} · Codex、Git 与任务来源`; } catch(cause){error.value=String(cause);} finally{loading.value=false;} }
-function openRecordSource(item: ReportSource) { if(item.kind==="Codex 对话") void router.push(`/tokens?conversation=${item.id}`); else if(item.kind==="任务") void router.push(`/tasks?task=${item.id}`); else if(item.kind==="测试") void router.push(`/testing?run=${item.id}`); }
-watch([startDate,endDate],load);
-function refreshAfterCodexScan() { void load(); }
-onMounted(() => { window.addEventListener("workbench-codex-data-updated",refreshAfterCodexScan); void initialize(); });
-onBeforeUnmount(() => window.removeEventListener("workbench-codex-data-updated",refreshAfterCodexScan));
+async function openRecordSources(report: ReportRecord) { loading.value=true; error.value=""; try { recordSources.value=await getReportSources(report.id); sourceTitle.value=`${report.title} · Codex、Git、发布与任务来源`; } catch(cause){error.value=String(cause);} finally{loading.value=false;} }
+function openRecordSource(item: ReportSource) { if(item.kind==="Jenkins 发布") void router.push(`/deployments?run=${encodeURIComponent(item.id)}`); else if(item.kind==="Codex 对话") void router.push(`/tokens?conversation=${item.id}`); else if(item.kind==="任务") void router.push(`/tasks?task=${item.id}`); else if(item.kind==="测试") void router.push(`/testing?run=${item.id}`); }
+watch([startDate,endDate],() => { void load(); });
+function refreshAfterCodexScan() { refreshRequested = true; if (document.visibilityState !== "hidden") void load(true); }
+function refreshWhenVisible() { if (document.visibilityState === "visible" && refreshRequested) void load(true); }
+onMounted(() => { window.addEventListener("workbench-codex-data-updated",refreshAfterCodexScan); window.addEventListener("workbench-data-refresh-requested",refreshAfterCodexScan); document.addEventListener("visibilitychange",refreshWhenVisible); void initialize(); });
+onBeforeUnmount(() => { disposed=true; window.removeEventListener("workbench-codex-data-updated",refreshAfterCodexScan); window.removeEventListener("workbench-data-refresh-requested",refreshAfterCodexScan); document.removeEventListener("visibilitychange",refreshWhenVisible); });
 </script>
 
-<template><div class="view work-records-view"><header class="page-header"><div><h1>工作记录</h1><p>按天、周查看工作成果与工时</p></div><div><button class="button secondary" :disabled="loading" @click="load">↻ 重新整理</button></div></header>
+<template><div class="view work-records-view"><header class="page-header"><div><h1>工作记录</h1><p>按天、周查看工作成果与工时</p></div><div><button class="button secondary" :disabled="loading" @click="load(true)">↻ 重新整理</button></div></header>
   <div v-if="error || message" class="scan-message" :class="{error:Boolean(error)}">{{ error || message }}</div>
+  <p v-if="loading || lastLoadedAt" class="scan-message" role="status">{{ loading ? '正在读取，已显示的数据来自上次成功读取。' : `上次成功读取 ${lastLoadedAt}` }}</p>
   <section class="panel work-record-filter"><div class="mode-switch"><button :class="{active:mode==='day'}" @click="mode='day'">日维度</button><button :class="{active:mode==='week'}" @click="mode='week'">周维度</button></div><input v-model="startDate" type="date"><span>至</span><input v-model="endDate" type="date"><select v-model="project"><option v-for="item in projects" :key="item">{{ item }}</option></select><select v-model="archive"><option value="all">全部对话</option><option value="normal">普通对话</option><option value="archived">含归档对话</option></select><label>⌕<input v-model="keyword" placeholder="搜索功能、项目或备注"></label><button class="filter-chip" :class="{active:gitOnly}" @click="gitOnly=!gitOnly">有 Git</button><button class="filter-chip" :class="{active:reportOnly}" @click="reportOnly=!reportOnly">有报告</button></section>
   <section class="work-record-summary"><button class="panel" @click="openTime(startDate,endDate,'当前筛选周期工时')"><small>有效工时</small><b>{{ minutesText(workSummary.totalMinutes) }}</b><span>{{ workSummary.hasManualCorrections ? '含手工修正' : '估算工时' }} · 点击查看</span></button><div class="panel"><small>原始估算</small><b>{{ minutesText(workSummary.estimatedMinutes) }}</b></div><div class="panel"><small>手工记录</small><b>{{ minutesText(workSummary.manualMinutes) }}</b></div><div class="panel"><small>活跃项目</small><b>{{ workSummary.byProject.length }}</b><span>{{ workSummary.byProject.slice(0,3).map(item=>item.name).join('、') || '暂无' }}</span></div></section>
   <section v-if="project !== '全部'" class="panel project-worktime-summary"><div><small>项目累计工时 · {{ startDate }}—{{ endDate }}</small><h2>{{ project }}</h2><p>{{ selectedProjectSessions.length }} 个工作区间 · {{ selectedProjectTypes.join('、') || '暂无工作类型' }}</p></div><button @click="openTime(startDate,endDate,`${project} 项目累计工时`)"><b>{{ minutesText(selectedProjectMinutes) }}</b><span>{{ selectedProjectSessions.some(item=>item.source==='manual') ? '含手工修正' : '估算工时' }} · 查看明细 →</span></button></section>
   <section v-if="projectOverview" class="panel project-overview"><header><div><h2>{{ project }}</h2><p>{{ projectOverview.paths.join(' · ') || '尚未识别本地路径' }} · 最近工作 {{ projectOverview.lastActivity?.slice(0,10) || '暂无' }}</p></div><button class="button primary" @click="copyContinuation">复制项目续接说明</button></header><div class="project-overview-grid"><article><h3>已完成的主要功能</h3><ul><li v-for="item in projectOverview.features" :key="item">{{ item }}</li></ul><p v-if="!projectOverview.features.length">生成或重建报告后显示整理后的功能成果。</p></article><article><h3>当前任务</h3><button v-for="item in projectOverview.tasks" :key="item.id" @click="router.push(`/tasks?task=${item.id}`)">{{ item.title }}<span>{{ item.status === 'draft' ? '建议待确认' : item.status }}</span></button><p v-if="!projectOverview.tasks.length">当前没有未完成任务。</p></article><article><h3>最近报告与测试</h3><button v-if="projectOverview.recentReport" @click="router.push(`/reports?report=${projectOverview.recentReport.id}`)">▤ {{ projectOverview.recentReport.title }}</button><button v-if="projectOverview.recentTest" @click="router.push('/testing')">✓ {{ projectOverview.recentTest.menuName }} · {{ projectOverview.recentTest.status === 'passed' ? '通过' : '失败' }}</button><p v-if="!projectOverview.recentReport && !projectOverview.recentTest">暂无项目报告或测试。</p></article><article><h3>相关知识与下一步</h3><button v-for="item in projectOverview.knowledge" :key="item.id" @click="router.push(`/knowledge?item=${item.id}`)">◇ {{ item.title }}</button><p><b>下一步：</b>{{ projectOverview.next }}</p></article></div></section>
-  <section v-if="mode==='day'" class="work-record-list"><article v-for="item in dayRecords" :key="item.date" class="panel work-record-card"><header><div><b>{{ item.date }}</b><span>{{ item.sessions.map(session=>session.project).filter((v,i,a)=>a.indexOf(v)===i).join('、') || '未归类项目' }}</span></div><button @click="openTime(item.date,item.date,`${item.date} 工时明细`)"><strong>{{ minutesText(item.workMinutes) }}</strong><small>估算/修正工时 →</small></button></header><div class="record-metrics"><span>Codex {{ item.conversationCount }} 次</span><span>归档 {{ item.archivedConversationCount }}</span><span>Git {{ item.gitCommits }} 次</span><span>测试 {{ item.testsPassed }}/{{ item.testRuns }}</span><span>任务操作 {{ item.taskActivityCount }}</span><span>知识 {{ item.knowledgeCount }}</span><span>Token {{ Math.round(item.totalTokens/1000) }}K</span><span>{{ item.report ? '已有日报' : '暂无日报' }}</span></div><ul v-if="reportSummary(item.report).length"><li v-for="line in reportSummary(item.report)" :key="line">{{ line }}</li></ul><p v-else>尚未生成当天成果总结</p><footer><button v-if="item.report" class="button primary small" @click="router.push(`/reports?report=${item.report.id}`)">查看当天做了什么</button><button v-if="item.report" class="button secondary small" @click="openRecordSources(item.report)">查看 Codex / Git 来源</button><button class="button secondary small" @click="router.push(`/calendar?date=${item.date}`)">打开日历</button><button v-if="item.testRuns" class="button secondary small" @click="router.push('/testing')">查看测试报告</button></footer></article><p v-if="!dayRecords.length" class="panel empty-state">没有符合筛选条件的工作记录。</p></section>
-  <section v-else class="work-record-list"><article v-for="item in weekRecords" :key="item.start" class="panel work-record-card weekly"><header><div><b>{{ item.start }}—{{ item.end }}</b><span>{{ item.days.length }} 个活跃日</span></div><button @click="openTime(item.start,item.end,`${item.start} 本周工时`)"><strong>{{ minutesText(item.workMinutes) }}</strong><small>本周有效工时 →</small></button></header><div class="record-metrics"><span>Codex {{ item.conversations }} 次</span><span>Git {{ item.commits }} 次</span><span>测试 {{ item.testsPassed }}/{{ item.testRuns }}</span><span>任务操作 {{ item.taskActivityCount }}</span><span>知识 {{ item.knowledgeCount }}</span><span>Token {{ Math.round(item.tokens/1000) }}K</span><span>{{ item.report ? '已有周报' : '暂无周报' }}</span></div><ul v-if="reportSummary(item.report).length"><li v-for="line in reportSummary(item.report)" :key="line">{{ line }}</li></ul><div v-if="reportSection(item.report,'## 下一步计划').length" class="record-next"><b>尚未完成 / 下周建议</b><span v-for="line in reportSection(item.report,'## 下一步计划')" :key="line">{{ line }}</span></div><p v-else-if="!reportSummary(item.report).length">生成周报后查看本周成果</p><footer><button v-if="item.report" class="button primary small" @click="router.push(`/reports?report=${item.report.id}`)">查看本周做了什么</button><button v-if="item.report" class="button secondary small" @click="openRecordSources(item.report)">重要 Git / Codex 来源</button><button class="button secondary small" @click="openTime(item.start,item.end,'本周工时与项目分布')">工时与项目分布</button><button v-if="item.testRuns" class="button secondary small" @click="router.push('/testing')">查看测试报告</button></footer></article></section>
+  <section v-if="mode==='day'" class="work-record-list"><article v-for="item in dayRecords" :key="item.date" class="panel work-record-card"><header><div><b>{{ item.date }}</b><span>{{ item.sessions.map(session=>session.project).filter((v,i,a)=>a.indexOf(v)===i).join('、') || '未归类项目' }}</span></div><button @click="openTime(item.date,item.date,`${item.date} 工时明细`)"><strong>{{ minutesText(item.workMinutes) }}</strong><small>估算/修正工时 →</small></button></header><div class="record-metrics"><span>Codex {{ item.conversationCount }} 次</span><span>归档 {{ item.archivedConversationCount }}</span><span>Git {{ item.gitCommits }} 次</span><span>测试 {{ item.testsPassed }}/{{ item.testRuns }}</span><span>发布 {{ item.publishCount || 0 }} 次 · 成功 {{ item.publishesSucceeded || 0 }} 次</span><span>任务操作 {{ item.taskActivityCount }}</span><span>知识 {{ item.knowledgeCount }}</span><span>Token {{ Math.round(item.totalTokens/1000) }}K</span><span>{{ item.report ? '已有日报' : '暂无日报' }}</span></div><ul v-if="reportSummary(item.report).length"><li v-for="line in reportSummary(item.report)" :key="line">{{ line }}</li></ul><p v-else>尚未生成当天成果总结</p><footer><button v-if="item.report" class="button primary small" @click="router.push(`/reports?report=${item.report.id}`)">查看当天做了什么</button><button v-if="item.report" class="button secondary small" @click="openRecordSources(item.report)">查看 Codex / Git / 发布来源</button><button class="button secondary small" @click="router.push(`/calendar?date=${item.date}`)">打开日历</button><button v-if="item.testRuns" class="button secondary small" @click="router.push('/testing')">查看测试报告</button><button v-if="item.publishCount" class="button secondary small" @click="router.push('/deployments')">查看发布记录</button></footer></article><p v-if="!dayRecords.length && !loading && !error" class="panel empty-state">没有符合筛选条件的工作记录。</p></section>
+  <section v-else class="work-record-list"><article v-for="item in weekRecords" :key="item.start" class="panel work-record-card weekly"><header><div><b>{{ item.start }}—{{ item.end }}</b><span>{{ item.days.length }} 个活跃日</span></div><button @click="openTime(item.start,item.end,`${item.start} 本周工时`)"><strong>{{ minutesText(item.workMinutes) }}</strong><small>本周有效工时 →</small></button></header><div class="record-metrics"><span>Codex {{ item.conversations }} 次</span><span>Git {{ item.commits }} 次</span><span>测试 {{ item.testsPassed }}/{{ item.testRuns }}</span><span>发布 {{ item.publishCount || 0 }} 次 · 成功 {{ item.publishesSucceeded || 0 }} 次</span><span>任务操作 {{ item.taskActivityCount }}</span><span>知识 {{ item.knowledgeCount }}</span><span>Token {{ Math.round(item.tokens/1000) }}K</span><span>{{ item.report ? '已有周报' : '暂无周报' }}</span></div><ul v-if="reportSummary(item.report).length"><li v-for="line in reportSummary(item.report)" :key="line">{{ line }}</li></ul><div v-if="reportSection(item.report,'## 下一步计划').length" class="record-next"><b>尚未完成 / 下周建议</b><span v-for="line in reportSection(item.report,'## 下一步计划')" :key="line">{{ line }}</span></div><p v-else-if="!reportSummary(item.report).length">生成周报后查看本周成果</p><footer><button v-if="item.report" class="button primary small" @click="router.push(`/reports?report=${item.report.id}`)">查看本周做了什么</button><button v-if="item.report" class="button secondary small" @click="openRecordSources(item.report)">重要 Git / Codex / 发布来源</button><button class="button secondary small" @click="openTime(item.start,item.end,'本周工时与项目分布')">工时与项目分布</button><button v-if="item.testRuns" class="button secondary small" @click="router.push('/testing')">查看测试报告</button><button v-if="item.publishCount" class="button secondary small" @click="router.push('/deployments')">查看发布记录</button></footer></article></section>
   <div v-if="sourceTitle" class="activity-backdrop" @click.self="sourceTitle=''"><aside class="activity-drawer panel"><header><div><h2>工作来源</h2><p>{{ sourceTitle }}</p></div><button class="icon-button" @click="sourceTitle=''">×</button></header><div class="report-source-list"><button v-for="item in recordSources" :key="`${item.kind}:${item.id}`" @click="openRecordSource(item)"><i>{{ item.kind }}</i><span><b>{{ item.title }}</b><small>{{ item.project }} · {{ item.date }} · {{ item.detail }}</small></span><em>{{ item.kind === 'Git 提交' ? '来源记录' : '查看 →' }}</em></button></div></aside></div>
-  <WorkTimeDrawer :open="Boolean(selectedPeriod)" :start-date="selectedPeriod?.start || ''" :end-date="selectedPeriod?.end || ''" :title="selectedPeriod?.title" @close="selectedPeriod=null" @changed="load" />
+  <WorkTimeDrawer :open="Boolean(selectedPeriod)" :start-date="selectedPeriod?.start || ''" :end-date="selectedPeriod?.end || ''" :title="selectedPeriod?.title" @close="selectedPeriod=null" @changed="load(true)" />
 </div></template>
 
 <style scoped>

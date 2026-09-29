@@ -12,6 +12,9 @@ use walkdir::WalkDir;
 
 static CODEX_SCAN_LOCK: Mutex<()> = Mutex::new(());
 
+#[path = "codex/quota.rs"]
+mod quota;
+
 #[derive(Default, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexScanSummary {
@@ -45,6 +48,7 @@ pub struct CodexQuotaSnapshot {
     captured_at: Option<String>,
     plan_type: Option<String>,
     reset_credits_available: Option<u32>,
+    reset_credits_status: String,
     primary: Option<CodexQuotaWindow>,
     secondary: Option<CodexQuotaWindow>,
     source_file: Option<String>,
@@ -147,6 +151,7 @@ fn quota_from_event(value: &Value) -> Option<CodexQuotaSnapshot> {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         reset_credits_available: None,
+        reset_credits_status: "unavailable".into(),
         primary,
         secondary,
         source_file: None,
@@ -154,38 +159,6 @@ fn quota_from_event(value: &Value) -> Option<CodexQuotaSnapshot> {
         freshness: String::new(),
         selection_reason: String::new(),
     })
-}
-
-fn reset_credits_from_state(state: &Value, account_id: Option<&str>) -> Option<u32> {
-    let accounts = state
-        .pointer(
-            "/electron-persisted-atom-state/rate-limit-reset-home-announcement-dismissal-by-account-id",
-        )?
-        .as_object()?;
-    let account = match account_id {
-        Some(account_id) => accounts.get(account_id)?,
-        None if accounts.len() == 1 => accounts.values().next()?,
-        None => return None,
-    };
-    account
-        .get("availableCount")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-}
-
-fn available_reset_credits(codex_home: &Path) -> Option<u32> {
-    let state: Value =
-        serde_json::from_reader(File::open(codex_home.join(".codex-global-state.json")).ok()?)
-            .ok()?;
-    let account_id = File::open(codex_home.join("auth.json"))
-        .ok()
-        .and_then(|file| serde_json::from_reader::<_, Value>(file).ok())
-        .and_then(|auth| {
-            auth.pointer("/tokens/account_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        });
-    reset_credits_from_state(&state, account_id.as_deref())
 }
 
 fn quota_from_file_tail(path: &Path) -> Option<CodexQuotaSnapshot> {
@@ -286,9 +259,7 @@ fn latest_quota_snapshot_from_files(
         .unwrap_or_default()
 }
 
-fn latest_quota_snapshot() -> CodexQuotaSnapshot {
-    let profile = std::env::var("USERPROFILE").unwrap_or_default();
-    let codex_home = PathBuf::from(profile).join(".codex");
+fn latest_log_quota_snapshot() -> CodexQuotaSnapshot {
     let files = roots()
         .into_iter()
         .filter(|(root, _)| root.exists())
@@ -308,9 +279,11 @@ fn latest_quota_snapshot() -> CodexQuotaSnapshot {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let mut snapshot = latest_quota_snapshot_from_files(files, Utc::now().timestamp());
-    snapshot.reset_credits_available = available_reset_credits(&codex_home);
-    snapshot
+    latest_quota_snapshot_from_files(files, Utc::now().timestamp())
+}
+
+fn latest_quota_snapshot() -> CodexQuotaSnapshot {
+    quota::latest_quota_snapshot()
 }
 
 pub(crate) fn latest_tray_quota() -> Option<TrayQuota> {
@@ -458,9 +431,17 @@ fn parse_session(path: &Path) -> Result<SessionData, String> {
     Ok(session)
 }
 
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join(".codex")
+        })
+}
+
 fn roots() -> Vec<(PathBuf, bool)> {
-    let profile = std::env::var("USERPROFILE").unwrap_or_default();
-    let codex = PathBuf::from(profile).join(".codex");
+    let codex = codex_home();
     vec![
         (codex.join("sessions"), false),
         (codex.join("archived_sessions"), true),
@@ -471,12 +452,15 @@ pub fn scan_codex_sessions_for_state(state: &DatabaseState) -> Result<CodexScanS
     let _scan_guard = CODEX_SCAN_LOCK
         .lock()
         .map_err(|_| "Codex 扫描锁异常，请重启工作台后重试。".to_string())?;
+    scan_roots_for_state(state, roots())
+}
+
+fn scan_roots_for_state(
+    state: &DatabaseState,
+    source_roots: Vec<(PathBuf, bool)>,
+) -> Result<CodexScanSummary, String> {
     let mut summary = CodexScanSummary::default();
-    let mut connection = state.connect()?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    for (root, archived) in roots().into_iter().filter(|(path, _)| path.exists()) {
+    for (root, archived) in source_roots.into_iter().filter(|(path, _)| path.exists()) {
         for entry in WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
@@ -512,23 +496,27 @@ pub fn scan_codex_sessions_for_state(state: &DatabaseState) -> Result<CodexScanS
                 .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
                 .map(|value| value.as_nanos().min(i64::MAX as u128) as i64)
                 .unwrap_or_default();
-            let unchanged = transaction
+            let connection = state.connect()?;
+            let unchanged = connection
                 .query_row(
-                    "SELECT 1 FROM conversations WHERE source_file=?1 AND source_size=?2 AND source_modified_ns=?3",
+                    "SELECT archived FROM conversations WHERE source_file=?1 AND source_size=?2 AND source_modified_ns=?3",
                     params![path.display().to_string(), source_size, source_modified_ns],
-                    |_| Ok(()),
+                    |row| row.get::<_, bool>(0),
                 )
                 .optional()
-                .map_err(|error| error.to_string())?
-                .is_some();
-            if unchanged {
-                let _ = transaction.execute(
-                    "UPDATE conversations SET archived=?1 WHERE source_file=?2",
-                    params![archived as i64, path.display().to_string()],
-                );
+                .map_err(|error| error.to_string())?;
+            if let Some(previous_archived) = unchanged {
+                if previous_archived != archived {
+                    connection.execute(
+                        "UPDATE conversations SET archived=?1 WHERE source_file=?2 AND archived<>?1",
+                        params![archived as i64, path.display().to_string()],
+                    ).map_err(|error| error.to_string())?;
+                }
                 summary.files_unchanged += 1;
                 continue;
             }
+            // 文件解析不持有连接/写事务；恢复流程不必等待大文件读取结束。
+            drop(connection);
             let session = match parse_session(path) {
                 Ok(session) => session,
                 Err(error) => {
@@ -543,48 +531,36 @@ pub fn scan_codex_sessions_for_state(state: &DatabaseState) -> Result<CodexScanS
                     continue;
                 }
             };
-            let final_usage = session.events.last().cloned().unwrap_or_default();
-            let imported_at = Utc::now().to_rfc3339();
-            let result = transaction.execute(
-                "INSERT INTO conversations(id,source_file,title,cwd,started_at,updated_at,model,input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens,total_tokens,context_used_tokens,context_window,source_size,source_modified_ns,archived,imported_at)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
-                 ON CONFLICT(id) DO UPDATE SET source_file=excluded.source_file,title=COALESCE(excluded.title,conversations.title),cwd=excluded.cwd,updated_at=excluded.updated_at,model=excluded.model,input_tokens=excluded.input_tokens,cached_input_tokens=excluded.cached_input_tokens,output_tokens=excluded.output_tokens,reasoning_output_tokens=excluded.reasoning_output_tokens,total_tokens=excluded.total_tokens,context_used_tokens=excluded.context_used_tokens,context_window=excluded.context_window,source_size=excluded.source_size,source_modified_ns=excluded.source_modified_ns,archived=excluded.archived,imported_at=excluded.imported_at",
-                params![session.id,path.display().to_string(),session.title,session.cwd,session.started_at,session.updated_at,session.model,final_usage.input,final_usage.cached,final_usage.output,final_usage.reasoning,final_usage.total,final_usage.context_used,final_usage.context_window,source_size,source_modified_ns,archived as i64,imported_at],
+            let result = persist_session(
+                state,
+                path,
+                session,
+                source_size,
+                source_modified_ns,
+                archived,
             );
-            if let Err(error) = result {
-                summary.errors += 1;
-                summary.error_details.push(format!(
-                    "{}：写入失败（{}）",
-                    path.file_name()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("未知文件"),
-                    error
-                ));
-                continue;
-            }
-            summary.conversations_imported += 1;
-            if archived {
-                summary.archived_conversations_imported += 1;
-            }
-            let _ = transaction.execute(
-                "DELETE FROM conversation_messages WHERE conversation_id=?1",
-                [&session.id],
-            );
-            for message in session.messages {
-                if transaction.execute(
-                    "INSERT INTO conversation_messages(conversation_id,source_index,event_time,role,content) VALUES(?1,?2,?3,?4,?5)",
-                    params![session.id,message.source_index,message.event_time,message.role,message.content],
-                ).is_ok() { summary.messages_imported += 1; }
-            }
-            for event in session.events {
-                if transaction.execute(
-                    "INSERT OR IGNORE INTO token_events(conversation_id,event_time,input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens,total_tokens) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                    params![session.id,event.event_time,event.input,event.cached,event.output,event.reasoning,event.total],
-                ).is_ok() { summary.token_events_imported += 1; }
+            match result {
+                Ok((messages, events)) => {
+                    summary.conversations_imported += 1;
+                    summary.messages_imported += messages;
+                    summary.token_events_imported += events;
+                    if archived {
+                        summary.archived_conversations_imported += 1;
+                    }
+                }
+                Err(error) => {
+                    summary.errors += 1;
+                    summary.error_details.push(format!(
+                        "{}：写入失败（{}）",
+                        path.file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("未知文件"),
+                        error
+                    ));
+                }
             }
         }
     }
-    transaction.commit().map_err(|error| error.to_string())?;
     let (conversations_total, archived_conversations_total): (i64, i64) = state
         .connect()?
         .query_row(
@@ -596,6 +572,51 @@ pub fn scan_codex_sessions_for_state(state: &DatabaseState) -> Result<CodexScanS
     summary.conversations_total = conversations_total.max(0) as usize;
     summary.archived_conversations_total = archived_conversations_total.max(0) as usize;
     Ok(summary)
+}
+
+fn persist_session(
+    state: &DatabaseState,
+    path: &Path,
+    session: SessionData,
+    source_size: i64,
+    source_modified_ns: i64,
+    archived: bool,
+) -> Result<(usize, usize), String> {
+    // 一个会话一个短事务，消息/Token 任一写入失败都会回滚，不产生半条会话。
+    let mut connection = state.connect()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let final_usage = session.events.last().cloned().unwrap_or_default();
+    let imported_at = Utc::now().to_rfc3339();
+    transaction.execute(
+                "INSERT INTO conversations(id,source_file,title,cwd,started_at,updated_at,model,input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens,total_tokens,context_used_tokens,context_window,source_size,source_modified_ns,archived,imported_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+                 ON CONFLICT(id) DO UPDATE SET source_file=excluded.source_file,title=COALESCE(excluded.title,conversations.title),cwd=excluded.cwd,updated_at=excluded.updated_at,model=excluded.model,input_tokens=excluded.input_tokens,cached_input_tokens=excluded.cached_input_tokens,output_tokens=excluded.output_tokens,reasoning_output_tokens=excluded.reasoning_output_tokens,total_tokens=excluded.total_tokens,context_used_tokens=excluded.context_used_tokens,context_window=excluded.context_window,source_size=excluded.source_size,source_modified_ns=excluded.source_modified_ns,archived=excluded.archived,imported_at=excluded.imported_at",
+                params![session.id,path.display().to_string(),session.title,session.cwd,session.started_at,session.updated_at,session.model,final_usage.input,final_usage.cached,final_usage.output,final_usage.reasoning,final_usage.total,final_usage.context_used,final_usage.context_window,source_size,source_modified_ns,archived as i64,imported_at],
+            ).map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM conversation_messages WHERE conversation_id=?1",
+            [&session.id],
+        )
+        .map_err(|error| error.to_string())?;
+    let mut messages = 0;
+    for message in session.messages {
+        messages += transaction.execute(
+                    "INSERT INTO conversation_messages(conversation_id,source_index,event_time,role,content) VALUES(?1,?2,?3,?4,?5)",
+                    params![session.id,message.source_index,message.event_time,message.role,message.content],
+                ).map_err(|error| error.to_string())?;
+    }
+    let mut events = 0;
+    for event in session.events {
+        events += transaction.execute(
+                    "INSERT OR IGNORE INTO token_events(conversation_id,event_time,input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens,total_tokens) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    params![session.id,event.event_time,event.input,event.cached,event.output,event.reasoning,event.total],
+                ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok((messages, events))
 }
 
 #[tauri::command]
@@ -640,36 +661,6 @@ mod quota_tests {
         assert_eq!(primary.remaining_percent, 53.0);
         assert_eq!(primary.window_minutes, 10_080);
         assert_eq!(quota.plan_type.as_deref(), Some("prolite"));
-    }
-
-    #[test]
-    fn reads_reset_credits_for_the_active_account() {
-        let state = serde_json::json!({
-            "electron-persisted-atom-state": {
-                "rate-limit-reset-home-announcement-dismissal-by-account-id": {
-                    "active-account": {"availableCount": 1},
-                    "other-account": {"availableCount": 3}
-                }
-            }
-        });
-        assert_eq!(
-            reset_credits_from_state(&state, Some("active-account")),
-            Some(1)
-        );
-        assert_eq!(reset_credits_from_state(&state, Some("missing")), None);
-        assert_eq!(reset_credits_from_state(&state, None), None);
-    }
-
-    #[test]
-    fn keeps_zero_reset_credits_distinct_from_missing_data() {
-        let state = serde_json::json!({
-            "electron-persisted-atom-state": {
-                "rate-limit-reset-home-announcement-dismissal-by-account-id": {
-                    "only-account": {"availableCount": 0}
-                }
-            }
-        });
-        assert_eq!(reset_credits_from_state(&state, None), Some(0));
     }
 
     fn quota_event(timestamp: &str, used_percent: f64, resets_at: i64) -> String {
@@ -813,6 +804,7 @@ mod quota_tests {
     }
 
     #[test]
+    #[ignore = "只读本机集成检查，不在匿名单元测试中读取用户历史"]
     fn latest_local_quota_snapshot_is_well_formed_when_available() {
         let quota = latest_quota_snapshot();
         if !quota.available {
@@ -822,5 +814,72 @@ mod quota_tests {
         assert!((0.0..=100.0).contains(&window.remaining_percent));
         assert!(window.window_minutes > 0);
         assert!(window.resets_at > 0);
+    }
+
+    #[test]
+    fn repeated_scan_is_read_only_and_tokens_are_idempotent() {
+        let directory =
+            std::env::temp_dir().join(format!("astrion-scan-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("test.sqlite3")).unwrap();
+        let source = directory.join("sessions");
+        std::fs::create_dir_all(&source).unwrap();
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session_meta","timestamp":"2026-09-29T01:00:00Z","payload":{"id":"anonymous-session","cwd":"X:/anonymous"}}),
+            serde_json::json!({"type":"event_msg","timestamp":"2026-09-29T01:01:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"total_tokens":10}}}})
+        );
+        std::fs::write(source.join("session.jsonl"), content).unwrap();
+        assert_eq!(
+            scan_roots_for_state(&state, vec![(source.clone(), false)])
+                .unwrap()
+                .token_events_imported,
+            1
+        );
+        let observer = state.connect().unwrap();
+        let before: i64 = observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap();
+        let second = scan_roots_for_state(&state, vec![(source.clone(), false)]).unwrap();
+        assert_eq!(second.files_unchanged, 1);
+        assert_eq!(second.token_events_imported, 0);
+        let after: i64 = observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, after, "无变化扫描不得产生数据库写入");
+        drop(observer);
+        let archived = scan_roots_for_state(&state, vec![(source, true)]).unwrap();
+        assert_eq!(archived.archived_conversations_total, 1);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_token_insert_rolls_back_the_entire_session() {
+        let directory =
+            std::env::temp_dir().join(format!("astrion-scan-rollback-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("test.sqlite3")).unwrap();
+        state.connect().unwrap().execute_batch("CREATE TRIGGER reject_token BEFORE INSERT ON token_events BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+        let session = SessionData {
+            id: "rollback-example".into(),
+            events: vec![TokenEvent::default()],
+            ..Default::default()
+        };
+        assert!(
+            persist_session(&state, Path::new("anonymous.jsonl"), session, 1, 1, false).is_err()
+        );
+        let count: i64 = state
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE id='rollback-example'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

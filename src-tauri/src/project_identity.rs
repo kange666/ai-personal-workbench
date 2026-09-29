@@ -2,7 +2,7 @@ use crate::database::DatabaseState;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
@@ -30,6 +30,238 @@ pub struct ProjectProfileUpdate {
     pub aliases: Vec<String>,
     #[serde(default)]
     pub category: String,
+}
+
+/// 一次请求共用一份映射快照，避免逐会话/逐记录重复查询和解析整个映射表。
+pub struct ProjectIdentityMap {
+    profiles: Vec<ProjectProfile>,
+}
+
+impl ProjectIdentityMap {
+    pub fn load(connection: &Connection) -> Result<Self, String> {
+        Ok(Self {
+            profiles: project_profiles(connection)?,
+        })
+    }
+
+    pub fn canonical_name(&self, raw_project: &str, source_path: &str) -> String {
+        self.matched_profile(raw_project, source_path)
+            .map(|profile| profile.display_name.clone())
+            .unwrap_or_else(|| {
+                if raw_project.trim().is_empty() {
+                    "未归类项目".to_string()
+                } else {
+                    folder_name(raw_project)
+                }
+            })
+    }
+
+    fn matched_profile(&self, raw_project: &str, source_path: &str) -> Option<&ProjectProfile> {
+        let mut best = None;
+        let mut best_score = (0, 0);
+        let mut ambiguous = false;
+        for profile in &self.profiles {
+            let Some(score) = profile_match_score(profile, raw_project, source_path) else {
+                continue;
+            };
+            if score > best_score {
+                best = Some(profile);
+                best_score = score;
+                ambiguous = false;
+            } else if score == best_score {
+                // 旧数据中可能已有同路径/同名冲突；不能靠列表排序任意合并身份。
+                ambiguous = true;
+            }
+        }
+        if ambiguous {
+            None
+        } else {
+            best
+        }
+    }
+
+    pub fn identity_key(&self, raw_project: &str, source_path: &str) -> String {
+        if let Some(profile) = self.matched_profile(raw_project, source_path) {
+            format!("project:{}", profile.id)
+        } else if !source_path.trim().is_empty() {
+            format!("path:{}", normalized(source_path))
+        } else {
+            format!("name:{}", normalized(raw_project))
+        }
+    }
+
+    /// Jenkins 完整 Job 名优先，其次显示名；只接受唯一精确别名，不用目录前缀推断。
+    pub fn exact_project_name(&self, candidates: &[&str]) -> Option<String> {
+        for candidate in candidates {
+            let key = normalized(candidate);
+            if key.is_empty() {
+                continue;
+            }
+            let matches = self
+                .profiles
+                .iter()
+                .filter(|profile| {
+                    std::iter::once(profile.display_name.as_str())
+                        .chain(profile.aliases.iter().map(String::as_str))
+                        .any(|alias| normalized(alias) == key)
+                })
+                .collect::<Vec<_>>();
+            if matches.len() == 1 {
+                return Some(matches[0].display_name.clone());
+            }
+            if matches.len() > 1 {
+                return None;
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMappingCounts {
+    pub conversations: usize,
+    pub test_runs: usize,
+    pub work_sessions: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMappingPreview {
+    pub before: ProjectMappingCounts,
+    pub after: ProjectMappingCounts,
+    pub added: ProjectMappingCounts,
+    pub removed: ProjectMappingCounts,
+    pub unmatched: ProjectMappingCounts,
+    pub conflicts: Vec<String>,
+    pub blocking_conflicts: Vec<String>,
+}
+
+fn proposed_profile(profile: &ProjectProfileUpdate) -> ProjectProfile {
+    ProjectProfile {
+        id: if profile.id.trim().is_empty() {
+            "__new_mapping__".into()
+        } else {
+            profile.id.clone()
+        },
+        display_name: profile.display_name.trim().into(),
+        repository_path: profile.repository_path.trim().into(),
+        tapd_workspace_id: profile.tapd_workspace_id.trim().into(),
+        aliases: clean_aliases(profile.aliases.clone(), &profile.display_name),
+        category: profile.category.trim().into(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn mapping_conflicts(
+    profiles: &[ProjectProfile],
+    target: &ProjectProfile,
+) -> BTreeMap<String, String> {
+    fn labels(profile: &ProjectProfile) -> Vec<&str> {
+        std::iter::once(profile.display_name.as_str())
+            .chain(std::iter::once(profile.repository_path.as_str()))
+            .chain(profile.aliases.iter().map(String::as_str))
+            .filter(|value| !value.trim().is_empty())
+            .collect()
+    }
+    let mut conflicts = BTreeMap::new();
+    for other in profiles.iter().filter(|other| other.id != target.id) {
+        let other_labels = labels(other)
+            .into_iter()
+            .map(normalized)
+            .collect::<HashSet<_>>();
+        for label in labels(target) {
+            let key = normalized(label);
+            if other_labels.contains(&key) {
+                conflicts.insert(
+                    format!("{}:{key}", other.id),
+                    format!("“{label}”也被“{}”使用", other.display_name),
+                );
+            }
+        }
+    }
+    conflicts
+}
+
+fn preview_project_mapping(
+    connection: &Connection,
+    profile: &ProjectProfileUpdate,
+) -> Result<ProjectMappingPreview, String> {
+    let before = ProjectIdentityMap::load(connection)?;
+    let proposed = proposed_profile(profile);
+    let existing_conflicts = before
+        .profiles
+        .iter()
+        .find(|item| item.id == proposed.id)
+        .map(|item| mapping_conflicts(&before.profiles, item))
+        .unwrap_or_default();
+    let proposed_conflicts = mapping_conflicts(&before.profiles, &proposed);
+    let mut result = ProjectMappingPreview {
+        conflicts: proposed_conflicts.values().cloned().collect(),
+        blocking_conflicts: proposed_conflicts
+            .iter()
+            .filter(|(key, _)| !existing_conflicts.contains_key(*key))
+            .map(|(_, value)| value.clone())
+            .collect(),
+        ..Default::default()
+    };
+    let target_id = proposed.id.clone();
+    let mut profiles = before
+        .profiles
+        .iter()
+        .filter(|item| item.id != target_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    profiles.push(proposed);
+    profiles.sort_by(|left, right| {
+        left.display_name
+            .to_ascii_lowercase()
+            .cmp(&right.display_name.to_ascii_lowercase())
+    });
+    let after = ProjectIdentityMap { profiles };
+    for (kind, sql) in [
+        (0, "SELECT COALESCE(NULLIF(project_override,''),cwd,''),COALESCE(cwd,'') FROM conversations"),
+        (1, "SELECT project,project_path FROM test_runs"),
+        (2, "SELECT project,project FROM work_sessions"),
+    ] {
+        let mut statement = connection.prepare(sql).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?;
+        let increment = |counts: &mut ProjectMappingCounts| match kind {
+            0 => counts.conversations += 1,
+            1 => counts.test_runs += 1,
+            _ => counts.work_sessions += 1,
+        };
+        for row in rows {
+            let (project, path) = row.map_err(|error| error.to_string())?;
+            let old = before.matched_profile(&project, &path).map(|item| item.id.as_str());
+            let new = after.matched_profile(&project, &path).map(|item| item.id.as_str());
+            if old == Some(target_id.as_str()) { increment(&mut result.before); }
+            if new == Some(target_id.as_str()) { increment(&mut result.after); }
+            if old != Some(target_id.as_str()) && new == Some(target_id.as_str()) { increment(&mut result.added); }
+            if old == Some(target_id.as_str()) && new != Some(target_id.as_str()) { increment(&mut result.removed); }
+            if new.is_none() { increment(&mut result.unmatched); }
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn preview_project_profile(
+    state: tauri::State<'_, DatabaseState>,
+    profile: ProjectProfileUpdate,
+) -> Result<ProjectMappingPreview, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = state.connect()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        preview_project_mapping(&transaction, &profile)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn normalized(value: &str) -> String {
@@ -73,27 +305,49 @@ fn aliases_from_json(value: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
 }
 
-fn profile_matches(profile: &ProjectProfile, raw_project: &str, source_path: &str) -> bool {
+fn profile_match_score(
+    profile: &ProjectProfile,
+    raw_project: &str,
+    source_path: &str,
+) -> Option<(u8, usize)> {
     let raw_key = normalized(raw_project);
     let path_key = normalized(source_path);
     let raw_folder = normalized(&folder_name(raw_project));
-    let repository_key = normalized(&profile.repository_path);
-    if !repository_key.is_empty()
-        && ((!path_key.is_empty() && path_key.starts_with(&repository_key))
-            || (!raw_key.is_empty() && raw_key.starts_with(&repository_key)))
+    let mut path_score = None;
+    for root in std::iter::once(profile.repository_path.as_str())
+        .chain(profile.aliases.iter().map(String::as_str))
     {
-        return true;
+        let root = normalized(root);
+        // 普通名称/Job 名不能充当路径前缀。路径必须命中完整目录边界。
+        if !root.contains('\\') {
+            continue;
+        }
+        for (rank, candidate) in [(3, path_key.as_str()), (2, raw_key.as_str())] {
+            if path_belongs_to_root(candidate, &root) {
+                path_score = path_score.max(Some((rank, root.len())));
+            }
+        }
     }
+    if path_score.is_some() {
+        return path_score;
+    }
+    // 只有没有路径证据时才使用名称；全名优先于从路径提取的末级目录名称。
     std::iter::once(profile.display_name.as_str())
         .chain(profile.aliases.iter().map(String::as_str))
         .chain(std::iter::once(profile.tapd_workspace_id.as_str()))
-        .any(|alias| {
+        .filter_map(|alias| {
             let alias_key = normalized(alias);
-            !alias_key.is_empty()
-                && (alias_key == raw_key
-                    || alias_key == raw_folder
-                    || (!path_key.is_empty() && path_key.starts_with(&alias_key)))
+            if alias_key.is_empty() {
+                None
+            } else if alias_key == raw_key || alias_key == path_key {
+                Some((1, 2))
+            } else if alias_key == raw_folder {
+                Some((1, 1))
+            } else {
+                None
+            }
         })
+        .max()
 }
 
 fn path_belongs_to_root(path: &str, root: &str) -> bool {
@@ -449,13 +703,14 @@ fn merge_profile_aliases(
         aliases_from_json(&current).into_iter().chain(additions),
         display_name,
     );
+    let serialized = serde_json::to_string(&aliases).map_err(|error| error.to_string())?;
+    if serialized == current {
+        return Ok(());
+    }
     connection
         .execute(
             "UPDATE project_profiles SET aliases_json=?1 WHERE id=?2",
-            params![
-                serde_json::to_string(&aliases).map_err(|error| error.to_string())?,
-                id
-            ],
+            params![serialized, id],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -549,7 +804,7 @@ pub fn sync_project_profiles_for_state(state: &DatabaseState) -> Result<usize, S
         {
             connection
                 .execute(
-                    "UPDATE project_profiles SET tapd_workspace_id=?1,updated_at=?2 WHERE id=?3",
+                    "UPDATE project_profiles SET tapd_workspace_id=?1,updated_at=?2 WHERE id=?3 AND tapd_workspace_id<>?1",
                     params![workspace_id, now, id],
                 )
                 .map_err(|error| error.to_string())?;
@@ -591,30 +846,39 @@ pub fn canonical_project_name(
     raw_project: &str,
     source_path: &str,
 ) -> String {
-    let profiles = project_profiles(connection).unwrap_or_default();
-    for profile in profiles {
-        if profile_matches(&profile, raw_project, source_path) {
-            return profile.display_name;
-        }
-    }
-    if raw_project.trim().is_empty() {
-        "未归类项目".to_string()
-    } else {
-        folder_name(raw_project)
-    }
+    ProjectIdentityMap::load(connection)
+        .unwrap_or_else(|_| ProjectIdentityMap {
+            profiles: Vec::new(),
+        })
+        .canonical_name(raw_project, source_path)
 }
 
 #[tauri::command]
-pub fn list_project_profiles(
+pub async fn list_project_profiles(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<Vec<ProjectProfile>, String> {
-    sync_project_profiles_for_state(&state)?;
-    project_profiles(&state.connect()?)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sync_project_profiles_for_state(&state)?;
+        project_profiles(&*state.connect()?)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn save_project_profile(
+pub async fn save_project_profile(
     state: tauri::State<'_, DatabaseState>,
+    profile: ProjectProfileUpdate,
+) -> Result<ProjectProfile, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || save_profile_for_state(&state, profile))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn save_profile_for_state(
+    state: &DatabaseState,
     profile: ProjectProfileUpdate,
 ) -> Result<ProjectProfile, String> {
     let display_name = profile.display_name.trim();
@@ -630,10 +894,31 @@ pub fn save_project_profile(
     } else {
         profile.id.clone()
     };
-    let aliases = clean_aliases(profile.aliases, display_name);
+    let aliases = clean_aliases(profile.aliases.clone(), display_name);
     let now = Utc::now().to_rfc3339();
-    let connection = state.connect()?;
-    connection
+    let mut connection = state.connect()?;
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let profiles = project_profiles(&transaction)?;
+    let proposed = proposed_profile(&profile);
+    let old_conflicts = profiles
+        .iter()
+        .find(|item| item.id == proposed.id)
+        .map(|item| mapping_conflicts(&profiles, item))
+        .unwrap_or_default();
+    let conflicts = mapping_conflicts(&profiles, &proposed)
+        .into_iter()
+        .filter(|(key, _)| !old_conflicts.contains_key(key))
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "新增别名与其他项目冲突，请调整后保存：{}",
+            conflicts.join("；")
+        ));
+    }
+    transaction
         .execute(
             "INSERT INTO project_profiles(id,display_name,repository_path,tapd_workspace_id,aliases_json,category,created_at,updated_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?7)
@@ -647,6 +932,7 @@ pub fn save_project_profile(
                 error.to_string()
             }
         })?;
+    transaction.commit().map_err(|error| error.to_string())?;
     project_profiles(&connection)?
         .into_iter()
         .find(|item| item.id == id)
@@ -657,6 +943,194 @@ pub fn save_project_profile(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn identity_snapshot_keeps_alias_resolution_without_requerying_database() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE project_profiles(id TEXT,display_name TEXT,repository_path TEXT,tapd_workspace_id TEXT,aliases_json TEXT,category TEXT,created_at TEXT,updated_at TEXT);
+            INSERT INTO project_profiles VALUES('p','生产安全PC','F:/work/new-client','42','[\"F:/work/client\",\"client\"]','','','');").unwrap();
+        let snapshot = ProjectIdentityMap::load(&connection).unwrap();
+        let expected = canonical_project_name(&connection, "client", "F:/work/client/src");
+        // 快照建立后移除数据表，批量解析仍应成功，而不是继续逐项访问 SQLite。
+        connection
+            .execute("DROP TABLE project_profiles", [])
+            .unwrap();
+        for _ in 0..1_000 {
+            assert_eq!(
+                snapshot.canonical_name("client", "F:/work/client/src"),
+                expected
+            );
+            assert_eq!(snapshot.canonical_name("42", ""), "生产安全PC");
+        }
+        assert_eq!(snapshot.canonical_name("F:/other/project", ""), "project");
+        assert_eq!(snapshot.canonical_name("", ""), "未归类项目");
+    }
+
+    #[test]
+    fn jenkins_identity_requires_unique_exact_alias() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE project_profiles(id TEXT,display_name TEXT,repository_path TEXT,tapd_workspace_id TEXT,aliases_json TEXT,category TEXT,created_at TEXT,updated_at TEXT);
+            INSERT INTO project_profiles VALUES('pc','PC','','','[\"group/client\",\"shared\"]','','',''),('app','APP','','','[\"shared\"]','','','');").unwrap();
+        let identities = ProjectIdentityMap::load(&connection).unwrap();
+        assert_eq!(
+            identities.exact_project_name(&["group/client", "client"]),
+            Some("PC".into())
+        );
+        assert_eq!(
+            identities.exact_project_name(&["group/client-copy", "client"]),
+            None
+        );
+        assert_eq!(identities.exact_project_name(&["shared"]), None);
+        assert_ne!(
+            identities.identity_key("same", "F:/one"),
+            identities.identity_key("same", "F:/two")
+        );
+    }
+
+    #[test]
+    fn identity_paths_use_directory_boundaries_and_the_most_specific_root() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE project_profiles(id TEXT,display_name TEXT,repository_path TEXT,tapd_workspace_id TEXT,aliases_json TEXT,category TEXT,created_at TEXT,updated_at TEXT);
+            INSERT INTO project_profiles VALUES
+            ('parent','A parent','F:/repo/client','','[\"client\",\"F:/old/client\"]','','',''),
+            ('nested','Z nested','F:/repo/client/modules','','[]','','',''),
+            ('other','Other','F:/repo/other','','[\"client\"]','','','');").unwrap();
+        let identities = ProjectIdentityMap::load(&connection).unwrap();
+        assert_eq!(
+            identities.identity_key("client2", "F:/repo/client2"),
+            r"path:f:\repo\client2"
+        );
+        assert_eq!(
+            identities.identity_key("client-copy", "F:/old/client-copy"),
+            r"path:f:\old\client-copy"
+        );
+        assert_eq!(
+            identities.identity_key("client", "f:\\REPO\\CLIENT\\src"),
+            "project:parent"
+        );
+        assert_eq!(
+            identities.identity_key("client", "F:/repo/client/modules/src"),
+            "project:nested"
+        );
+        assert_eq!(
+            identities.identity_key("client", "F:/repo/other/src"),
+            "project:other"
+        );
+        assert_eq!(
+            identities.identity_key("old", "F:/old/client/src"),
+            "project:parent"
+        );
+        // 普通重名别名没有路径佐证时，保留未匹配，不能随机选名字靠前的项目。
+        assert_eq!(identities.identity_key("client", ""), "name:client");
+    }
+
+    #[test]
+    fn conflicting_path_profiles_never_fall_back_to_an_arbitrary_name_match() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE project_profiles(id TEXT,display_name TEXT,repository_path TEXT,tapd_workspace_id TEXT,aliases_json TEXT,category TEXT,created_at TEXT,updated_at TEXT);
+            INSERT INTO project_profiles VALUES
+            ('a','A','F:/repo/client','','[]','','',''),
+            ('b','B','F:/REPO/client/','','[]','','','');").unwrap();
+        let identities = ProjectIdentityMap::load(&connection).unwrap();
+        assert_eq!(
+            identities.identity_key("A", "F:/repo/client/src"),
+            r"path:f:\repo\client\src"
+        );
+        assert_eq!(
+            identities.identity_key("B", "F:/repo/client/src"),
+            r"path:f:\repo\client\src"
+        );
+        assert_eq!(identities.identity_key("A", ""), "project:a");
+    }
+
+    #[test]
+    fn unchanged_alias_merge_does_not_write_database() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE project_profiles(id TEXT,aliases_json TEXT);
+            INSERT INTO project_profiles VALUES('p','[\"client\"]');",
+            )
+            .unwrap();
+        let before = connection.total_changes();
+        merge_profile_aliases(&connection, "p", "生产安全PC", vec!["client".into()]).unwrap();
+        assert_eq!(connection.total_changes(), before);
+        merge_profile_aliases(&connection, "p", "生产安全PC", vec!["new-client".into()]).unwrap();
+        assert_eq!(connection.total_changes(), before + 1);
+    }
+
+    #[test]
+    fn mapping_preview_counts_historical_sources_without_writing_them() {
+        let directory = std::env::temp_dir().join(format!(
+            "workbench-mapping-preview-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let connection = state.connect().unwrap();
+        connection.execute_batch("INSERT INTO project_profiles(id,display_name,repository_path,tapd_workspace_id,aliases_json,category,created_at,updated_at)
+            VALUES('pc','PC','F:/new/client','','[]','','now','now'),('app','APP','F:/new/app','','[]','','now','now');
+            INSERT INTO conversations(id,source_file,cwd,imported_at) VALUES('current','current.jsonl','F:/new/client','now'),('old','old.jsonl','F:/old/client','now'),('unmatched','unmatched.jsonl','F:/unknown','now');
+            INSERT INTO test_runs(id,menu_id,project,project_path,menu_name,mode,status,started_at) VALUES('run','page','legacy','F:/old/client','页面','mock','passed','now');
+            INSERT INTO work_sessions(id,date,start_time,end_time,duration_minutes,project,work_type,source,note,created_at,updated_at)
+            VALUES('work','2026-09-01','09:00','10:00',60,'legacy','开发','manual','','now','now');").unwrap();
+        let mut draft = ProjectProfileUpdate {
+            id: "pc".into(),
+            display_name: "PC".into(),
+            repository_path: "F:/new/client".into(),
+            tapd_workspace_id: String::new(),
+            aliases: vec!["legacy".into(), "F:/old/client".into()],
+            category: String::new(),
+        };
+        let before_changes = connection.total_changes();
+        let preview = preview_project_mapping(&connection, &draft).unwrap();
+        assert_eq!(preview.before.conversations, 1);
+        assert_eq!(
+            preview.after,
+            ProjectMappingCounts {
+                conversations: 2,
+                test_runs: 1,
+                work_sessions: 1
+            }
+        );
+        assert_eq!(
+            preview.added,
+            ProjectMappingCounts {
+                conversations: 1,
+                test_runs: 1,
+                work_sessions: 1
+            }
+        );
+        assert_eq!(preview.unmatched.conversations, 1);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row("SELECT cwd FROM conversations WHERE id='old'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "F:/old/client"
+        );
+
+        draft.aliases.push("APP".into());
+        let preview = preview_project_mapping(&connection, &draft).unwrap();
+        assert_eq!(preview.blocking_conflicts.len(), 1);
+        assert!(save_profile_for_state(&state, draft)
+            .unwrap_err()
+            .contains("冲突"));
+        assert_eq!(
+            project_profiles(&connection)
+                .unwrap()
+                .into_iter()
+                .find(|profile| profile.id == "pc")
+                .unwrap()
+                .aliases,
+            Vec::<String>::new()
+        );
+        drop(connection);
+        drop(state);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn aliases_are_trimmed_and_deduplicated() {

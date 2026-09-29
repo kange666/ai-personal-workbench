@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
 
@@ -20,6 +20,74 @@ const GIT_CREDENTIAL_SERVICE: &str = "ai-personal-workbench";
 const GIT_CREDENTIAL_ACCOUNT: &str = "git-default";
 const DEFAULT_GIT_USERNAME: &str = "lzsk";
 const RUNTIME_SNAPSHOT_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+// 本地读取通常很快；网络操作/提交钩子保留更长时间，但不能无限占用工作线程。
+const GIT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+static REPOSITORY_OPERATIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static PROJECT_RUNTIME_OPERATIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// 操作开始时占用仓库，结束/出错时自动释放；多个项目可以独立执行。
+struct RepositoryOperationGuard(String);
+
+impl RepositoryOperationGuard {
+    fn acquire(path: &str) -> Result<Self, String> {
+        let path = path
+            .trim()
+            .trim_end_matches(['/', '\\'])
+            .replace('/', "\\")
+            .to_lowercase();
+        let mut active = REPOSITORY_OPERATIONS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|_| "Git 操作状态不可用。".to_string())?;
+        if !active.insert(path.clone()) {
+            return Err("该项目已有 Git 操作正在执行，请完成后重试。".into());
+        }
+        Ok(Self(path))
+    }
+}
+
+impl Drop for RepositoryOperationGuard {
+    fn drop(&mut self) {
+        if let Some(active) = REPOSITORY_OPERATIONS.get() {
+            if let Ok(mut active) = active.lock() {
+                active.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// 项目启动/停止共用独立单飞范围，不与该目录的 Git 操作相互阻塞。
+struct ProjectRuntimeOperationGuard(String);
+
+impl ProjectRuntimeOperationGuard {
+    fn acquire(path: &str) -> Result<Self, String> {
+        let path = path
+            .trim()
+            .trim_end_matches(['/', '\\'])
+            .replace('/', "\\")
+            .to_lowercase();
+        let mut active = PROJECT_RUNTIME_OPERATIONS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|_| "项目运行操作状态不可用。".to_string())?;
+        if !active.insert(path.clone()) {
+            return Err("该项目正在启动或停止，请完成后重试。".into());
+        }
+        Ok(Self(path))
+    }
+}
+
+impl Drop for ProjectRuntimeOperationGuard {
+    fn drop(&mut self) {
+        if let Some(active) = PROJECT_RUNTIME_OPERATIONS.get() {
+            if let Ok(mut active) = active.lock() {
+                active.remove(&self.0);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,9 +218,38 @@ struct RuntimeTelemetry {
     error_message: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProjectProcessState {
-    processes: Mutex<HashMap<String, ManagedProjectProcess>>,
+    processes: Arc<Mutex<HashMap<String, ManagedProjectProcess>>>,
+    pending: Arc<Mutex<HashMap<String, Arc<Mutex<ManagedProjectProcess>>>>>,
+    shutting_down: Arc<Mutex<bool>>,
+}
+
+struct PendingProjectGuard {
+    state: ProjectProcessState,
+    run_id: String,
+}
+
+impl Drop for PendingProjectGuard {
+    fn drop(&mut self) {
+        let pending = self
+            .state
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.run_id)
+            .cloned();
+        if let Some(pending) = pending {
+            let mut pending = pending.lock().unwrap_or_else(|error| error.into_inner());
+            if terminate_managed_process(&mut pending).is_ok() {
+                self.state
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&self.run_id);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -423,9 +520,11 @@ fn git_output(arguments: &[&str]) -> Result<String, String> {
     command.args(arguments);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().map_err(|error| error.to_string())?;
+    let output = bounded_command_output(command, GIT_READ_TIMEOUT)?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(sanitized_git_error(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -446,9 +545,11 @@ fn git_status_output(repository: &str) -> Result<String, String> {
     ]);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().map_err(|error| error.to_string())?;
+    let output = bounded_command_output(command, GIT_READ_TIMEOUT)?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(sanitized_git_error(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -484,13 +585,171 @@ fn git_credential_status_value() -> GitCredentialStatus {
 fn command_output(mut command: Command) -> Result<String, String> {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().map_err(|error| error.to_string())?;
+    let password = command.get_envs().find_map(|(name, value)| {
+        (name == "WORKBENCH_GIT_PASSWORD")
+            .then(|| value.and_then(|value| value.to_str()).map(str::to_owned))
+            .flatten()
+    });
+    let output = bounded_command_output(command, GIT_OPERATION_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success() {
-        return Err(if stderr.is_empty() { stdout } else { stderr });
+        let mut error = sanitized_git_error(if stderr.is_empty() { &stdout } else { &stderr });
+        if let Some(password) = password.filter(|value| !value.is_empty()) {
+            error = error.replace(&password, "[已隐藏]");
+        }
+        return Err(error);
     }
     Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+fn sanitized_git_error(value: &str) -> String {
+    let mut result = value.to_string();
+    for token in value.split_whitespace() {
+        let start = ["https://", "http://", "ssh://"]
+            .iter()
+            .filter_map(|prefix| token.find(prefix))
+            .min();
+        let Some(start) = start else {
+            continue;
+        };
+        let raw = token[start..].trim_end_matches(['\'', '"', ')', ']', '>', ',', ';']);
+        let Ok(mut url) = reqwest::Url::parse(raw) else {
+            continue;
+        };
+        if !url.username().is_empty() {
+            let _ = url.set_username("[已隐藏]");
+        }
+        let _ = url.set_password(None);
+        if url.query().is_some() {
+            url.set_query(Some("redacted"));
+        }
+        url.set_fragment(None);
+        result = result.replace(raw, url.as_str());
+    }
+    result
+}
+
+pub(crate) fn terminate_command_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("taskkill.exe");
+        command
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Ok(mut killer) = command.spawn() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while matches!(killer.try_wait(), Ok(None)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let _ = killer.kill();
+            let _ = killer.wait();
+        }
+    }
+    #[cfg(unix)]
+    {
+        // 子进程独立进程组，只回收本次 Git 命令及其辅助进程。
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub(crate) fn bounded_command_output(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<Output, String> {
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| sanitized_git_error(&error.to_string()))?;
+    let stdout = child.stdout.take().ok_or("无法读取命令输出")?;
+    let stderr = child.stderr.take().ok_or("无法读取命令错误输出")?;
+    // 两个管道同时排空，避免输出超过系统管道缓冲区后子进程自身阻塞。
+    fn read_pipe(
+        mut pipe: impl Read + Send + 'static,
+    ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = (|| {
+                const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+                let mut buffer = [0_u8; 8192];
+                let mut exceeded = false;
+                loop {
+                    let count = pipe.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    if bytes.len() + count <= MAX_OUTPUT_BYTES {
+                        bytes.extend_from_slice(&buffer[..count]);
+                    } else {
+                        exceeded = true;
+                    }
+                }
+                if exceeded {
+                    Err(std::io::Error::other(
+                        "Git 输出超过 32 MiB，请缩小查询范围后重试。",
+                    ))
+                } else {
+                    Ok(bytes)
+                }
+            })();
+            let _ = sender.send(result);
+        });
+        receiver
+    }
+    let stdout = read_pipe(stdout);
+    let stderr = read_pipe(stderr);
+    let deadline = Instant::now() + timeout;
+    let timeout_message = || {
+        format!(
+            "Git 命令超过 {} 秒仍未结束，已停止本次命令。请检查网络/仓库状态后重试。",
+            timeout.as_secs_f64()
+        )
+    };
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                terminate_command_tree(&mut child);
+                return Err(timeout_message());
+            }
+            Err(error) => {
+                terminate_command_tree(&mut child);
+                return Err(sanitized_git_error(&error.to_string()));
+            }
+        }
+    };
+    let read = |receiver: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| timeout_message())?
+            .map_err(|error| error.to_string())
+    };
+    match (read(stdout), read(stderr)) {
+        (Ok(stdout), Ok(stderr)) => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        // try_wait 已回收主进程；不能再按旧 PID taskkill，以免系统重用 PID 后误伤其他进程。
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 fn git_operation_output(
@@ -2042,7 +2301,7 @@ pub fn scan_git_repositories_for_state(state: &DatabaseState) -> Result<GitScanS
 pub fn git_scan_configuration(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<GitScanConfiguration, String> {
-    load_scan_configuration(&state.connect()?)
+    load_scan_configuration(&*state.connect()?)
 }
 
 #[tauri::command]
@@ -2123,31 +2382,36 @@ pub async fn scan_git_repositories(
 }
 
 #[tauri::command]
-pub fn list_repository_assets(
+pub async fn list_repository_assets(
     state: tauri::State<'_, DatabaseState>,
 ) -> Result<Vec<RepositoryAsset>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || repository_assets_for_state(&state))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn repository_assets_for_state(state: &DatabaseState) -> Result<Vec<RepositoryAsset>, String> {
     let connection = state.connect()?;
+    let identities = project_identity::ProjectIdentityMap::load(&connection)?;
     let mut statement = connection
         .prepare(
             "SELECT a.path,a.name,a.is_pinned,a.is_hidden,a.category,a.purpose,a.technology_stack,a.main_modules,
                     a.install_command,a.start_command,a.test_command,a.build_command,a.command_source,
                     a.remote_url,a.default_branch,a.has_uncommitted_changes,a.changed_file_count,a.ahead_count,a.behind_count,a.inference_status,
                     a.manually_confirmed,a.last_scanned_at,
-                    COALESCE(NULLIF(MAX(
-                      COALESCE((SELECT MAX(c.committed_at) FROM git_commits c WHERE c.repository_path=a.path),''),
-                      COALESCE((SELECT MAX(c.updated_at) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%'),'')
-                    ),''),a.updated_at) AS activity_updated_at,
+                    COALESCE(NULLIF((SELECT MAX(c.committed_at) FROM git_commits c WHERE c.repository_path=a.path),''),a.updated_at) AS activity_updated_at,
                     CASE COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证') WHEN '警告' THEN '健康' ELSE COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证') END,
                     CASE COALESCE((SELECT h.health_level FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'未验证') WHEN '警告' THEN '目录与 Git 仓库可正常读取' ELSE COALESCE((SELECT h.summary FROM repository_health_snapshots h WHERE h.repository_path=a.path ORDER BY h.verified_at DESC LIMIT 1),'尚未执行健康检查') END,
                     (SELECT COUNT(*) FROM git_commits c WHERE c.repository_path=a.path),
-                    (SELECT COUNT(*) FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%'),
+                    0,
                     COALESCE((SELECT r.status FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
                     COALESCE((SELECT r.local_url FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
                     COALESCE((SELECT r.error_message FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
                     COALESCE((SELECT r.started_at FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
                     COALESCE((SELECT r.log_path FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
                     COALESCE((SELECT r.log_excerpt FROM repository_runtime_runs r WHERE r.repository_path=a.path ORDER BY r.started_at DESC LIMIT 1),''),
-                    COALESCE((SELECT COALESCE(NULLIF(c.title,''),'未命名 Codex 任务') FROM conversations c WHERE lower(replace(COALESCE(c.cwd,''),'/','\')) LIKE lower(replace(a.path,'/','\')) || '%' ORDER BY COALESCE(c.updated_at,c.started_at) DESC LIMIT 1),'')
+                    ''
              FROM repository_assets a ORDER BY a.is_pinned DESC,datetime(activity_updated_at) DESC,a.name COLLATE NOCASE",
         )
         .map_err(|error| error.to_string())?;
@@ -2231,34 +2495,37 @@ pub fn list_repository_assets(
             .map_err(|error| error.to_string())?;
         rows
     };
-    for asset in &mut assets {
-        let canonical_project =
-            project_identity::canonical_project_name(&connection, &asset.name, &asset.path);
-        let mut related = conversations
-            .iter()
-            .filter(|(cwd, project_override, _, _)| {
-                project_identity::canonical_project_name(
-                    &connection,
-                    if project_override.trim().is_empty() {
-                        cwd
-                    } else {
-                        project_override
-                    },
-                    cwd,
-                ) == canonical_project
-            })
-            .collect::<Vec<_>>();
-        related.sort_by(|left, right| right.3.cmp(&left.3));
-        asset.conversation_count = related.len() as i64;
-        let latest_title = related
-            .first()
-            .map(|(_, _, title, _)| title.as_str())
-            .unwrap_or("");
-        if let Some((_, _, _, updated_at)) = related.first() {
-            if updated_at > &asset.last_activity_at {
-                asset.last_activity_at = updated_at.clone();
-            }
+    // 每条会话只解析一次项目身份，再与资产关联；不在资产 × 会话循环内访问数据库。
+    let mut activity = HashMap::<String, (i64, String, String)>::new();
+    for (cwd, project_override, title, updated_at) in conversations {
+        let project = identities.identity_key(
+            if project_override.trim().is_empty() {
+                &cwd
+            } else {
+                &project_override
+            },
+            &cwd,
+        );
+        let summary = activity.entry(project).or_default();
+        summary.0 += 1;
+        if summary.0 == 1 || updated_at > summary.2 {
+            summary.1 = title;
+            summary.2 = updated_at;
         }
+    }
+    for asset in &mut assets {
+        let canonical_project = identities.identity_key(&asset.name, &asset.path);
+        let latest_title =
+            if let Some((count, title, updated_at)) = activity.get(&canonical_project) {
+                asset.conversation_count = *count;
+                if updated_at > &asset.last_activity_at {
+                    asset.last_activity_at = updated_at.clone();
+                }
+                title.as_str()
+            } else {
+                ""
+            };
+        asset.updated_at = asset.last_activity_at.clone();
         (
             asset.pending_level,
             asset.pending_summary,
@@ -2272,15 +2539,33 @@ pub fn list_repository_assets(
             latest_title,
         );
     }
+    assets.sort_by(|left, right| {
+        right
+            .is_pinned
+            .cmp(&left.is_pinned)
+            .then_with(|| right.last_activity_at.cmp(&left.last_activity_at))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
     Ok(assets)
 }
 
 #[tauri::command]
-pub fn repository_asset_details(
+pub async fn repository_asset_details(
     state: tauri::State<'_, DatabaseState>,
     path: String,
 ) -> Result<RepositoryAssetDetails, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || repository_asset_details_for_state(&state, path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn repository_asset_details_for_state(
+    state: &DatabaseState,
+    path: String,
+) -> Result<RepositoryAssetDetails, String> {
     let connection = state.connect()?;
+    let identities = project_identity::ProjectIdentityMap::load(&connection)?;
     let (repository_name, build_command, remote_url): (String, String, String) = connection
         .query_row(
             "SELECT name,build_command,remote_url FROM repository_assets WHERE path=?1",
@@ -2288,12 +2573,11 @@ pub fn repository_asset_details(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| error.to_string())?;
-    let canonical_project =
-        project_identity::canonical_project_name(&connection, &repository_name, &path);
+    let canonical_project = identities.identity_key(&repository_name, &path);
     let mut conversation_statement = connection
         .prepare(
             "SELECT id,COALESCE(NULLIF(title,''),'未命名 Codex 任务'),COALESCE(updated_at,started_at,''),archived,COALESCE(cwd,''),COALESCE(project_override,'')
-             FROM conversations ORDER BY COALESCE(updated_at,started_at) DESC LIMIT 500",
+             FROM conversations ORDER BY COALESCE(updated_at,started_at) DESC",
         )
         .map_err(|error| error.to_string())?;
     let conversations = conversation_statement
@@ -2314,8 +2598,7 @@ pub fn repository_asset_details(
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|(_, cwd, project_override)| {
-            project_identity::canonical_project_name(
-                &connection,
+            identities.identity_key(
                 if project_override.trim().is_empty() {
                     cwd
                 } else {
@@ -2366,57 +2649,78 @@ pub fn repository_asset_details(
 
     let mut test_statement = connection
         .prepare(
-            "SELECT id,menu_name,status,started_at FROM test_runs
-             WHERE lower(project)=lower(?1) OR lower(project)=lower(?2)
-             ORDER BY started_at DESC LIMIT 12",
+            "SELECT id,menu_name,status,started_at,project,project_path FROM test_runs
+             ORDER BY started_at DESC,id DESC",
         )
         .map_err(|error| error.to_string())?;
     associations.extend(
         test_statement
-            .query_map(params![repository_name, path], |row| {
+            .query_map([], |row| {
                 let id: String = row.get(0)?;
-                Ok(RepositoryAssociation {
-                    route: format!("/testing?run={id}"),
-                    id,
-                    kind: "test".to_string(),
-                    title: row.get(1)?,
-                    status: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    subtitle: "项目测试记录".to_string(),
-                })
+                Ok((
+                    RepositoryAssociation {
+                        route: format!("/testing?run={id}"),
+                        id,
+                        kind: "test".to_string(),
+                        title: row.get(1)?,
+                        status: row.get(2)?,
+                        updated_at: row.get(3)?,
+                        subtitle: "项目测试记录".to_string(),
+                    },
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
             })
             .map_err(|error| error.to_string())?
+            .filter_map(|row| match row {
+                Ok((item, project, source_path)) => {
+                    (identities.identity_key(&project, &source_path) == canonical_project)
+                        .then_some(Ok(item))
+                }
+                Err(error) => Some(Err(error)),
+            })
+            .take(12)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?,
     );
 
     let mut work_statement = connection
         .prepare(
-            "SELECT id,work_type,duration_minutes,updated_at,note FROM work_sessions
-             WHERE lower(project)=lower(?1) OR lower(project)=lower(?2)
-             ORDER BY updated_at DESC LIMIT 12",
+            "SELECT id,work_type,duration_minutes,updated_at,note,project FROM work_sessions
+             ORDER BY updated_at DESC,id DESC",
         )
         .map_err(|error| error.to_string())?;
     associations.extend(
         work_statement
-            .query_map(params![repository_name, path], |row| {
+            .query_map([], |row| {
                 let duration: i64 = row.get(2)?;
                 let note: String = row.get(4)?;
-                Ok(RepositoryAssociation {
-                    id: row.get(0)?,
-                    kind: "work".to_string(),
-                    title: row.get(1)?,
-                    subtitle: if note.trim().is_empty() {
-                        format!("工作记录 · {duration} 分钟")
-                    } else {
-                        format!("{duration} 分钟 · {note}")
+                Ok((
+                    RepositoryAssociation {
+                        id: row.get(0)?,
+                        kind: "work".to_string(),
+                        title: row.get(1)?,
+                        subtitle: if note.trim().is_empty() {
+                            format!("工作记录 · {duration} 分钟")
+                        } else {
+                            format!("{duration} 分钟 · {note}")
+                        },
+                        status: "recorded".to_string(),
+                        updated_at: row.get(3)?,
+                        route: "/work-records".to_string(),
                     },
-                    status: "recorded".to_string(),
-                    updated_at: row.get(3)?,
-                    route: "/work-records".to_string(),
-                })
+                    row.get::<_, String>(5)?,
+                ))
             })
             .map_err(|error| error.to_string())?
+            .filter_map(|row| match row {
+                // 工时只有项目字段；含糊的同名记录保持未匹配，不猜到某个目录。
+                Ok((item, project)) => (identities.identity_key(&project, &project)
+                    == canonical_project)
+                    .then_some(Ok(item)),
+                Err(error) => Some(Err(error)),
+            })
+            .take(12)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?,
     );
@@ -2576,6 +2880,25 @@ pub async fn generate_commit_plan(
     grouping_mode: String,
     use_ai: Option<bool>,
 ) -> Result<CommitPlanView, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(generate_commit_plan_for_state(
+            &state,
+            path,
+            grouping_mode,
+            use_ai,
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn generate_commit_plan_for_state(
+    state: &DatabaseState,
+    path: String,
+    grouping_mode: String,
+    use_ai: Option<bool>,
+) -> Result<CommitPlanView, String> {
     let grouping_mode = normalized_commit_grouping_mode(&grouping_mode)?;
     let expected_state = smart_review_state(&path).ok();
     let status = git_status_output(&path)?;
@@ -2666,7 +2989,7 @@ pub async fn generate_commit_plan(
     if expected_state.is_some() && smart_review_state(&path).ok() != expected_state {
         return Err("生成期间分支或暂存内容发生变化，请重新生成提交信息。".into());
     }
-    let mut plan = latest_commit_plan(&state.connect()?, &path)?
+    let mut plan = latest_commit_plan(&*state.connect()?, &path)?
         .ok_or_else(|| "提交建议生成失败".to_string())?;
     plan.expected_state = expected_state;
     Ok(plan)
@@ -2992,7 +3315,7 @@ fn hbuilderx_compiler() -> Option<HBuilderxCompiler> {
 // 直接使用 HBuilderX 自带的 Node 和 uni-app 编译器启动 H5 服务，
 // 不启动 HBuilderX 编辑器、浏览器或命令行窗口。
 #[cfg(windows)]
-fn spawn_hbuilderx_h5_project(path: &Path) -> Result<(Child, String), String> {
+fn prepare_hbuilderx_h5_project(path: &Path) -> Result<(Command, String), String> {
     let compiler = hbuilderx_compiler().ok_or_else(|| {
         "已识别为 HBuilderX 项目，但没有找到本机 uni-app 编译器。请先安装 HBuilderX 的 uni-app 编译插件，或在项目资料中填写自定义启动命令。".to_string()
     })?;
@@ -3020,15 +3343,12 @@ fn spawn_hbuilderx_h5_project(path: &Path) -> Result<(Child, String), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW);
-    let child = command
-        .spawn()
-        .map_err(|error| format!("启动 HBuilderX 项目的 H5 服务失败：{error}"))?;
     let description = format!(
         "{} {} (H5)",
         compiler.node.display(),
         compiler.cli.display()
     );
-    Ok((child, description))
+    Ok((command, description))
 }
 
 fn runtime_log_excerpt(lines: &VecDeque<String>) -> String {
@@ -3258,11 +3578,12 @@ fn spawn_runtime_output_reader<R: Read + Send + 'static>(
 
 fn create_managed_project_process(
     database: &DatabaseState,
+    process_state: &ProjectProcessState,
     project_path: String,
     project_name: String,
     command: String,
-    mut child: Child,
-) -> Result<ManagedProjectProcess, String> {
+    spawn: impl FnOnce() -> Result<Child, String>,
+) -> Result<RunningProjectProcess, String> {
     let run_id = uuid::Uuid::new_v4().to_string();
     let started_at = Utc::now().to_rfc3339();
     let log_directory = database
@@ -3272,6 +3593,15 @@ fn create_managed_project_process(
         .join("project-runtime-logs");
     fs::create_dir_all(&log_directory).map_err(|error| error.to_string())?;
     let log_path = log_directory.join(format!("{run_id}.log"));
+    // 目录准备在创建子进程前完成；短锁仅协调创建/登记与退出，不包含数据库操作。
+    let closing = process_state
+        .shutting_down
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if *closing {
+        return Err("工作台正在退出，不能再启动项目。".into());
+    }
+    let mut child = spawn()?;
     let telemetry = Arc::new(Mutex::new(RuntimeTelemetry {
         status: "starting".to_string(),
         ..RuntimeTelemetry::default()
@@ -3294,12 +3624,22 @@ fn create_managed_project_process(
         log_excerpt: String::new(),
         error_message: String::new(),
     };
-    let mut managed = ManagedProjectProcess {
-        info,
+    let managed = Arc::new(Mutex::new(ManagedProjectProcess {
+        info: info.clone(),
         child,
-        run_id,
+        run_id: run_id.clone(),
         telemetry,
         last_persisted_at: Instant::now(),
+    }));
+    process_state
+        .pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(run_id.clone(), managed.clone());
+    drop(closing);
+    let _pending = PendingProjectGuard {
+        state: process_state.clone(),
+        run_id: run_id.clone(),
     };
     let persist_result = database.connect().and_then(|connection| {
         connection
@@ -3307,21 +3647,44 @@ fn create_managed_project_process(
                 "INSERT INTO repository_runtime_runs(id,repository_path,status,command,process_id,log_path,started_at)
                  VALUES(?1,?2,'starting',?3,?4,?5,?6)",
                 params![
-                    managed.run_id,
+                    run_id,
                     project_path,
                     command,
-                    managed.info.process_id as i64,
-                    managed.info.log_path,
+                    info.process_id as i64,
+                    info.log_path,
                     started_at
                 ],
             )
             .map_err(|error| error.to_string())
     });
-    if let Err(error) = persist_result {
-        let _ = terminate_managed_process(&mut managed);
-        return Err(error);
+    persist_result?;
+    let closing = process_state
+        .shutting_down
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if *closing {
+        drop(closing);
+        let mut stopped = info.clone();
+        stopped.status = "stopped".into();
+        let _ = persist_stopped_runtime(database, &run_id, &stopped, true);
+        return Err("工作台正在退出，本次项目启动已取消。".into());
     }
-    Ok(managed)
+    process_state
+        .pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&run_id);
+    let managed = Arc::try_unwrap(managed)
+        .map_err(|_| "项目启动状态已变化。".to_string())?
+        .into_inner()
+        .unwrap_or_else(|error| error.into_inner());
+    process_state
+        .processes
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(project_path, managed);
+    drop(closing);
+    Ok(info)
 }
 
 fn managed_process_info(process: &ManagedProjectProcess) -> RunningProjectProcess {
@@ -3414,53 +3777,96 @@ fn terminate_managed_process(process: &mut ManagedProjectProcess) -> Result<(), 
         return Ok(());
     }
 
-    #[cfg(windows)]
+    terminate_command_tree(&mut process.child);
+    if process
+        .child
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_some()
     {
-        let mut command = Command::new("taskkill.exe");
-        command.args(["/PID", &process.info.process_id.to_string(), "/T", "/F"]);
-        command.creation_flags(CREATE_NO_WINDOW);
-        let output = command.output().map_err(|error| error.to_string())?;
-        if !output.status.success()
-            && process
-                .child
-                .try_wait()
-                .map_err(|error| error.to_string())?
-                .is_none()
-        {
-            let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if error.is_empty() {
-                "停止项目进程失败。".to_string()
-            } else {
-                error
-            });
-        }
+        Ok(())
+    } else {
+        Err("停止项目进程失败，请稍后重试。".into())
     }
-
-    #[cfg(not(windows))]
-    process.child.kill().map_err(|error| error.to_string())?;
-
-    let _ = process.child.wait();
-    Ok(())
 }
 
 pub fn stop_all_repository_projects(state: &ProjectProcessState, database: &DatabaseState) {
-    if let Ok(mut processes) = state.processes.lock() {
-        for process in processes.values_mut() {
-            let _ = terminate_managed_process(process);
-            if let Ok(mut telemetry) = process.telemetry.lock() {
-                telemetry.status = "stopped".to_string();
-            }
-            let finished_at = Utc::now().to_rfc3339();
-            let _ = persist_runtime_snapshot(database, process, Some(&finished_at), Some(0));
+    let mut closing = state
+        .shutting_down
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *closing = true;
+    let mut processes = std::mem::take(
+        &mut *state
+            .processes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    );
+    let pending = std::mem::take(
+        &mut *state
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    );
+    drop(closing);
+    // 先结束全部自有子进程，再保存状态；不等待启动线程的数据库或目录探测。
+    let mut stopped = Vec::new();
+    for process in processes.values_mut() {
+        if terminate_managed_process(process).is_ok() {
+            stopped.push(stopped_runtime_info(process));
         }
-        processes.clear();
+    }
+    for process in pending.into_values() {
+        let mut process = process.lock().unwrap_or_else(|error| error.into_inner());
+        if terminate_managed_process(&mut process).is_ok() {
+            stopped.push(stopped_runtime_info(&mut process));
+        }
+    }
+    for (run_id, info) in stopped {
+        let _ = persist_stopped_runtime(database, &run_id, &info, true);
     }
 }
 
+fn stopped_runtime_info(process: &mut ManagedProjectProcess) -> (String, RunningProjectProcess) {
+    if let Ok(mut telemetry) = process.telemetry.lock() {
+        telemetry.status = "stopped".to_string();
+    }
+    (process.run_id.clone(), managed_process_info(process))
+}
+
+fn persist_stopped_runtime(
+    database: &DatabaseState,
+    run_id: &str,
+    info: &RunningProjectProcess,
+    exiting: bool,
+) -> Result<(), String> {
+    let connection = database.connect()?;
+    if exiting {
+        connection
+            .busy_timeout(Duration::from_millis(250))
+            .map_err(|error| error.to_string())?;
+    }
+    connection.execute("UPDATE repository_runtime_runs SET status=?2,local_url=?3,log_excerpt=?4,error_message=?5,finished_at=?6,exit_code=0 WHERE id=?1",
+        params![run_id, info.status, info.local_url, info.log_excerpt, info.error_message, Utc::now().to_rfc3339()])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
-pub fn list_running_repository_projects(
+pub async fn list_running_repository_projects(
     database: tauri::State<'_, DatabaseState>,
     state: tauri::State<'_, ProjectProcessState>,
+) -> Result<Vec<RunningProjectProcess>, String> {
+    let database = database.inner().clone();
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || running_repository_projects(&database, &state))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn running_repository_projects(
+    database: &DatabaseState,
+    state: &ProjectProcessState,
 ) -> Result<Vec<RunningProjectProcess>, String> {
     let mut processes = state
         .processes
@@ -3510,23 +3916,57 @@ pub fn list_running_repository_projects(
 }
 
 #[tauri::command]
-pub fn stop_repository_project(
+pub async fn stop_repository_project(
     database: tauri::State<'_, DatabaseState>,
     state: tauri::State<'_, ProjectProcessState>,
     path: String,
 ) -> Result<ProjectLaunchResult, String> {
-    let mut process = state
+    let database = database.inner().clone();
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || stop_project(&database, &state, path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn stop_project(
+    database: &DatabaseState,
+    state: &ProjectProcessState,
+    path: String,
+) -> Result<ProjectLaunchResult, String> {
+    let _operation = ProjectRuntimeOperationGuard::acquire(&path)?;
+    let closing = state
+        .shutting_down
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if *closing {
+        return Err("工作台正在退出，不能再操作项目。".into());
+    }
+    let process = state
         .processes
         .lock()
         .map_err(|_| "读取运行项目状态失败。".to_string())?
         .remove(path.trim())
         .ok_or_else(|| "该项目当前没有由工作台启动的运行进程。".to_string())?;
-    terminate_managed_process(&mut process)?;
-    if let Ok(mut telemetry) = process.telemetry.lock() {
-        telemetry.status = "stopped".to_string();
-    }
-    let finished_at = Utc::now().to_rfc3339();
-    let info = persist_runtime_snapshot(&database, &mut process, Some(&finished_at), Some(0))?;
+    let run_id = process.run_id.clone();
+    let process = Arc::new(Mutex::new(process));
+    state
+        .pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(run_id.clone(), process.clone());
+    drop(closing);
+    let pending = PendingProjectGuard {
+        state: state.clone(),
+        run_id: run_id.clone(),
+    };
+    let info = {
+        let mut process = process.lock().unwrap_or_else(|error| error.into_inner());
+        terminate_managed_process(&mut process)?;
+        stopped_runtime_info(&mut process).1
+    };
+    // 已确认进程结束后才移除占位；数据库写入不阻碍退出取得进程句柄。
+    drop(pending);
+    persist_stopped_runtime(database, &run_id, &info, false)?;
     Ok(launch_result(
         &info,
         false,
@@ -3535,11 +3975,32 @@ pub fn stop_repository_project(
 }
 
 #[tauri::command]
-pub fn start_repository_project(
+pub async fn start_repository_project(
     state: tauri::State<'_, DatabaseState>,
     process_state: tauri::State<'_, ProjectProcessState>,
     path: String,
 ) -> Result<ProjectLaunchResult, String> {
+    let state = state.inner().clone();
+    let process_state = process_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || start_project(&state, &process_state, path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn start_project(
+    state: &DatabaseState,
+    process_state: &ProjectProcessState,
+    path: String,
+) -> Result<ProjectLaunchResult, String> {
+    // 覆盖检查、普通/HBuilderX 分支启动、数据库登记及托管插入的完整生命周期。
+    let _operation = ProjectRuntimeOperationGuard::acquire(&path)?;
+    if *process_state
+        .shutting_down
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+    {
+        return Err("工作台正在退出，不能再启动项目。".into());
+    }
     let path = path.trim().to_string();
     let (project_name, configured_start): (String, String) = state
         .connect()?
@@ -3575,7 +4036,7 @@ pub fn start_repository_project(
                 processes.remove(&path);
             }
         }
-        let (child, command) = spawn_hbuilderx_h5_project(repository_path)?;
+        let (mut prepared_command, command) = prepare_hbuilderx_h5_project(repository_path)?;
         state
             .connect()?
             .execute(
@@ -3585,19 +4046,18 @@ pub fn start_repository_project(
                 params![path, Utc::now().to_rfc3339()],
             )
             .map_err(|error| error.to_string())?;
-        let managed_process = create_managed_project_process(
+        let info = create_managed_project_process(
             &state,
+            process_state,
             path.clone(),
             project_name.clone(),
             command.clone(),
-            child,
+            move || {
+                prepared_command
+                    .spawn()
+                    .map_err(|error| format!("启动 HBuilderX 项目的 H5 服务失败：{error}"))
+            },
         )?;
-        let info = managed_process_info(&managed_process);
-        process_state
-            .processes
-            .lock()
-            .map_err(|_| "保存运行项目状态失败。".to_string())?
-            .insert(path, managed_process);
         return Ok(launch_result(
             &info,
             true,
@@ -3653,20 +4113,14 @@ pub fn start_repository_project(
             processes.remove(&path);
         }
     }
-    let child = spawn_project_start_command(repository_path, &start_command)?;
-    let managed_process = create_managed_project_process(
+    let info = create_managed_project_process(
         &state,
+        process_state,
         path.clone(),
         project_name.clone(),
-        start_command,
-        child,
+        start_command.clone(),
+        || spawn_project_start_command(repository_path, &start_command),
     )?;
-    let info = managed_process_info(&managed_process);
-    process_state
-        .processes
-        .lock()
-        .map_err(|_| "保存运行项目状态失败。".to_string())?
-        .insert(path, managed_process);
     Ok(launch_result(
         &info,
         true,
@@ -3705,10 +4159,17 @@ pub fn clear_git_default_credential() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn git_repository_status(
+pub async fn git_repository_status(
     state: tauri::State<'_, DatabaseState>,
     path: String,
 ) -> Result<GitRepositoryStatus, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || repository_status(&state, path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn repository_status(state: &DatabaseState, path: String) -> Result<GitRepositoryStatus, String> {
     ensure_managed_repository(&state, &path)?;
     let status = git_status_output(&path)?;
     let current_branch = git_output(&["-C", &path, "branch", "--show-current"])
@@ -4186,10 +4647,18 @@ fn reconcile_upstream(
 }
 
 #[tauri::command]
-pub fn git_fetch_repository(
+pub async fn git_fetch_repository(
     state: tauri::State<'_, DatabaseState>,
     path: String,
 ) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || fetch_repository(&state, &path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn fetch_repository(state: &DatabaseState, path: &str) -> Result<GitOperationResult, String> {
+    let _operation = RepositoryOperationGuard::acquire(path)?;
     ensure_managed_repository(&state, &path)?;
     let output = git_operation_output(
         &path,
@@ -4201,10 +4670,18 @@ pub fn git_fetch_repository(
 }
 
 #[tauri::command]
-pub fn git_pull_repository(
+pub async fn git_pull_repository(
     state: tauri::State<'_, DatabaseState>,
     path: String,
 ) -> Result<GitPullResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || pull_repository(&state, &path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn pull_repository(state: &DatabaseState, path: &str) -> Result<GitPullResult, String> {
+    let _operation = RepositoryOperationGuard::acquire(path)?;
     ensure_managed_repository(&state, &path)?;
     ensure_clean_worktree(&path)?;
     let fetch_output = git_operation_output(
@@ -4849,6 +5326,30 @@ pub async fn git_smart_sync_repository(
     on_progress: tauri::ipc::Channel<GitSmartProgress>,
     expected_state: Option<String>,
 ) -> Result<GitSmartSyncResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        tauri::async_runtime::block_on(smart_sync_repository_for_state(
+            &state,
+            path,
+            files,
+            strategy,
+            on_progress,
+            expected_state,
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn smart_sync_repository_for_state(
+    state: &DatabaseState,
+    path: String,
+    files: Vec<String>,
+    strategy: Option<String>,
+    on_progress: tauri::ipc::Channel<GitSmartProgress>,
+    expected_state: Option<String>,
+) -> Result<GitSmartSyncResult, String> {
     ensure_managed_repository(&state, &path)?;
     let progress = |phase: &str, detail: &str| {
         let _ = on_progress.send(GitSmartProgress {
@@ -4884,6 +5385,28 @@ pub async fn git_resolve_pull_conflicts(
     local_head: String,
     remote_head: String,
 ) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        tauri::async_runtime::block_on(resolve_pull_conflicts_for_state(
+            &state,
+            path,
+            strategy,
+            local_head,
+            remote_head,
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+async fn resolve_pull_conflicts_for_state(
+    state: &DatabaseState,
+    path: String,
+    strategy: String,
+    local_head: String,
+    remote_head: String,
+) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
     let result =
         resolve_pull_conflicts_inner(&path, &strategy, local_head.trim(), remote_head.trim()).await;
@@ -4911,8 +5434,22 @@ pub async fn git_resolve_pull_conflicts(
 }
 
 #[tauri::command]
-pub fn git_stage_repository_changes(
+pub async fn git_stage_repository_changes(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    files: Vec<String>,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_stage_repository_changes_for_state(&state, path, files)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_stage_repository_changes_for_state(
+    state: &DatabaseState,
     path: String,
     files: Vec<String>,
 ) -> Result<GitOperationResult, String> {
@@ -4934,8 +5471,21 @@ pub fn git_stage_repository_changes(
 }
 
 #[tauri::command]
-pub fn git_repository_file_diff(
+pub async fn git_repository_file_diff(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    file: String,
+) -> Result<GitFileDiff, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        git_repository_file_diff_for_state(&state, path, file)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_repository_file_diff_for_state(
+    state: &DatabaseState,
     path: String,
     file: String,
 ) -> Result<GitFileDiff, String> {
@@ -5005,8 +5555,21 @@ pub fn git_repository_file_diff(
 }
 
 #[tauri::command]
-pub fn git_repository_commit_files(
+pub async fn git_repository_commit_files(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    commit_hash: String,
+) -> Result<Vec<GitCommitFile>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        git_repository_commit_files_for_state(&state, path, commit_hash)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_repository_commit_files_for_state(
+    state: &DatabaseState,
     path: String,
     commit_hash: String,
 ) -> Result<Vec<GitCommitFile>, String> {
@@ -5015,8 +5578,22 @@ pub fn git_repository_commit_files(
 }
 
 #[tauri::command]
-pub fn git_repository_commit_file_diff(
+pub async fn git_repository_commit_file_diff(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    commit_hash: String,
+    file: String,
+) -> Result<GitCommitFileDiff, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        git_repository_commit_file_diff_for_state(&state, path, commit_hash, file)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_repository_commit_file_diff_for_state(
+    state: &DatabaseState,
     path: String,
     commit_hash: String,
     file: String,
@@ -5100,8 +5677,22 @@ fn discard_repository_files(path: &str, files: &[String]) -> Result<String, Stri
 }
 
 #[tauri::command]
-pub fn git_discard_repository_changes(
+pub async fn git_discard_repository_changes(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    files: Vec<String>,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_discard_repository_changes_for_state(&state, path, files)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_discard_repository_changes_for_state(
+    state: &DatabaseState,
     path: String,
     files: Vec<String>,
 ) -> Result<GitOperationResult, String> {
@@ -5116,8 +5707,22 @@ pub fn git_discard_repository_changes(
 }
 
 #[tauri::command]
-pub fn git_unstage_repository_changes(
+pub async fn git_unstage_repository_changes(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    files: Vec<String>,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_unstage_repository_changes_for_state(&state, path, files)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_unstage_repository_changes_for_state(
+    state: &DatabaseState,
     path: String,
     files: Vec<String>,
 ) -> Result<GitOperationResult, String> {
@@ -5167,8 +5772,21 @@ pub fn git_unstage_repository_changes(
 }
 
 #[tauri::command]
-pub fn git_abort_repository_merge(
+pub async fn git_abort_repository_merge(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_abort_repository_merge_for_state(&state, path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_abort_repository_merge_for_state(
+    state: &DatabaseState,
     path: String,
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
@@ -5185,8 +5803,21 @@ pub fn git_abort_repository_merge(
 }
 
 #[tauri::command]
-pub fn git_stash_repository_changes(
+pub async fn git_stash_repository_changes(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_stash_repository_changes_for_state(&state, path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_stash_repository_changes_for_state(
+    state: &DatabaseState,
     path: String,
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
@@ -5217,8 +5848,21 @@ pub fn git_stash_repository_changes(
 }
 
 #[tauri::command]
-pub fn git_restore_repository_stash(
+pub async fn git_restore_repository_stash(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_restore_repository_stash_for_state(&state, path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_restore_repository_stash_for_state(
+    state: &DatabaseState,
     path: String,
 ) -> Result<GitOperationResult, String> {
     ensure_managed_repository(&state, &path)?;
@@ -5258,11 +5902,23 @@ pub fn git_restore_repository_stash(
 }
 
 #[tauri::command]
-pub fn git_push_repository(
+pub async fn git_push_repository(
     state: tauri::State<'_, DatabaseState>,
     path: String,
     expected_state: Option<String>,
 ) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || push_repository(&state, &path, expected_state))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn push_repository(
+    state: &DatabaseState,
+    path: &str,
+    expected_state: Option<String>,
+) -> Result<GitOperationResult, String> {
+    let _operation = RepositoryOperationGuard::acquire(path)?;
     ensure_managed_repository(&state, &path)?;
     if let Some(expected) = expected_state {
         if smart_review_state(&path)? != expected {
@@ -5311,8 +5967,22 @@ pub fn git_push_repository(
 }
 
 #[tauri::command]
-pub fn git_switch_repository_branch(
+pub async fn git_switch_repository_branch(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    branch: String,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_switch_repository_branch_for_state(&state, path, branch)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_switch_repository_branch_for_state(
+    state: &DatabaseState,
     path: String,
     branch: String,
 ) -> Result<GitOperationResult, String> {
@@ -5327,8 +5997,22 @@ pub fn git_switch_repository_branch(
 }
 
 #[tauri::command]
-pub fn git_merge_repository_branch(
+pub async fn git_merge_repository_branch(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    branch: String,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_merge_repository_branch_for_state(&state, path, branch)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_merge_repository_branch_for_state(
+    state: &DatabaseState,
     path: String,
     branch: String,
 ) -> Result<GitOperationResult, String> {
@@ -5347,8 +6031,22 @@ pub fn git_merge_repository_branch(
 }
 
 #[tauri::command]
-pub fn git_revert_repository_commit(
+pub async fn git_revert_repository_commit(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    commit_hash: String,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        git_revert_repository_commit_for_state(&state, path, commit_hash)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn git_revert_repository_commit_for_state(
+    state: &DatabaseState,
     path: String,
     commit_hash: String,
 ) -> Result<GitOperationResult, String> {
@@ -5386,8 +6084,24 @@ pub fn git_revert_repository_commit(
 }
 
 #[tauri::command]
-pub fn execute_commit_plan_group(
+pub async fn execute_commit_plan_group(
     state: tauri::State<'_, DatabaseState>,
+    path: String,
+    group_id: String,
+    commit_message: String,
+    expected_state: Option<String>,
+) -> Result<GitOperationResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = RepositoryOperationGuard::acquire(&path)?;
+        execute_commit_plan_group_for_state(&state, path, group_id, commit_message, expected_state)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn execute_commit_plan_group_for_state(
+    state: &DatabaseState,
     path: String,
     group_id: String,
     commit_message: String,
@@ -5505,6 +6219,304 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn repository_operation_guard_rejects_only_same_repository_and_releases_on_drop() {
+        let directory = format!("F:/guard-test/{}", uuid::Uuid::new_v4());
+        let guard = super::RepositoryOperationGuard::acquire(&directory).unwrap();
+        assert!(super::RepositoryOperationGuard::acquire(
+            &directory.to_uppercase().replace('/', "\\")
+        )
+        .is_err());
+        assert!(super::RepositoryOperationGuard::acquire(&format!("{directory}-other")).is_ok());
+        drop(guard);
+        assert!(super::RepositoryOperationGuard::acquire(&directory).is_ok());
+    }
+
+    #[test]
+    fn runtime_operation_guard_is_per_project_and_independent_of_git() {
+        let directory = format!("F:/runtime-guard-test/{}", uuid::Uuid::new_v4());
+        let guard = super::ProjectRuntimeOperationGuard::acquire(&directory).unwrap();
+        let duplicate = directory.to_uppercase().replace('/', "\\") + "\\";
+        let blocked = std::thread::spawn(move || {
+            super::ProjectRuntimeOperationGuard::acquire(&duplicate).is_err()
+        });
+        assert!(blocked.join().unwrap());
+        assert!(
+            super::ProjectRuntimeOperationGuard::acquire(&format!("{directory}-other")).is_ok()
+        );
+        assert!(super::RepositoryOperationGuard::acquire(&directory).is_ok());
+        drop(guard);
+        assert!(super::ProjectRuntimeOperationGuard::acquire(&directory).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_start_and_stop_share_runtime_guard_for_normal_and_hbuilderx_projects() {
+        let directory = std::env::temp_dir().join(format!(
+            "workbench-runtime-lifecycle-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let normal = directory.join("normal");
+        let hbuilder = directory.join("hbuilder");
+        std::fs::create_dir_all(&normal).unwrap();
+        std::fs::create_dir_all(&hbuilder).unwrap();
+        std::fs::write(hbuilder.join("manifest.json"), "{}").unwrap();
+        std::fs::write(hbuilder.join("pages.json"), "{}").unwrap();
+        let database = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let processes = super::ProjectProcessState::default();
+        let normal = normal.display().to_string();
+        let hbuilder = hbuilder.display().to_string();
+        for (path, command) in [(&normal, "ping 127.0.0.1 -n 30 > nul"), (&hbuilder, "")] {
+            database.connect().unwrap().execute("INSERT INTO repository_assets(path,name,start_command,last_scanned_at,updated_at) VALUES(?1,'匿名测试',?2,'now','now')", rusqlite::params![path,command]).unwrap();
+            let guard = super::ProjectRuntimeOperationGuard::acquire(path).unwrap();
+            assert!(super::start_project(&database, &processes, path.clone())
+                .unwrap_err()
+                .contains("正在启动或停止"));
+            assert!(super::stop_project(&database, &processes, path.clone())
+                .unwrap_err()
+                .contains("正在启动或停止"));
+            drop(guard);
+        }
+        // 只启动自己的临时普通项目；HBuilderX 分支验证在调用本机编译器之前即被拦截。
+        let started = super::start_project(&database, &processes, normal.clone()).unwrap();
+        let duplicate = super::start_project(&database, &processes, normal.clone());
+        let stopped = super::stop_project(&database, &processes, normal).unwrap();
+        assert!(started.managed);
+        assert!(!stopped.managed);
+        assert!(duplicate.unwrap_err().contains("已在运行中"));
+        assert!(processes.processes.lock().unwrap().is_empty());
+        let count: i64 = database
+            .connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM repository_runtime_runs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(processes);
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn application_exit_stops_pending_start_without_waiting_for_its_database_write() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-runtime-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.display().to_string();
+        let database = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        database.connect().unwrap().execute("INSERT INTO repository_assets(path,name,last_scanned_at,updated_at) VALUES(?1,'匿名退出测试','now','now')", [&path]).unwrap();
+        let processes = super::ProjectProcessState::default();
+        let write_lock = database.connect().unwrap();
+        write_lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let startup_state = processes.clone();
+        let startup_database = database.clone();
+        let startup_path = path.clone();
+        let startup_directory = directory.clone();
+        let starting = std::thread::spawn(move || {
+            super::create_managed_project_process(
+                &startup_database,
+                &startup_state,
+                startup_path,
+                "匿名退出测试".into(),
+                "ping 127.0.0.1 -n 30 > nul".into(),
+                || spawn_project_start_command(&startup_directory, "ping 127.0.0.1 -n 30 > nul"),
+            )
+        });
+        // 暂存区已有真实进程，启动线程正等数据库写锁；退出不能等待该写入。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while processes.pending.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let pending = processes.pending.lock().unwrap().values().next().cloned();
+        let began_exit = Instant::now();
+        super::stop_all_repository_projects(&processes, &database);
+        let exit_elapsed = began_exit.elapsed();
+        let terminated = pending
+            .as_ref()
+            .is_some_and(|process| process.lock().unwrap().child.try_wait().unwrap().is_some());
+        write_lock.execute_batch("ROLLBACK").unwrap();
+        drop(write_lock);
+        let started = starting.join().unwrap();
+        let new_start = super::start_project(&database, &processes, path.clone());
+        let new_stop = super::stop_project(&database, &processes, path.clone());
+        assert!(terminated);
+        assert!(exit_elapsed < Duration::from_secs(8));
+        assert!(started.unwrap_err().contains("正在退出"));
+        assert!(new_start.unwrap_err().contains("正在退出"));
+        assert!(new_stop.unwrap_err().contains("正在退出"));
+        assert!(processes.processes.lock().unwrap().is_empty());
+        assert!(processes.pending.lock().unwrap().is_empty());
+        let status: String = database
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM repository_runtime_runs LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "stopped");
+        drop(processes);
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn application_exit_stops_child_transferred_to_pending_stop() {
+        let directory =
+            std::env::temp_dir().join(format!("workbench-pending-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.display().to_string();
+        let database = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let state = super::ProjectProcessState::default();
+        database.connect().unwrap().execute("INSERT INTO repository_assets(path,name,last_scanned_at,updated_at) VALUES(?1,'匿名停止测试','now','now')", [&path]).unwrap();
+        super::create_managed_project_process(
+            &database,
+            &state,
+            path.clone(),
+            "匿名停止测试".into(),
+            "ping".into(),
+            || spawn_project_start_command(&directory, "ping 127.0.0.1 -n 30 > nul"),
+        )
+        .unwrap();
+        let closing = state.shutting_down.lock().unwrap();
+        let managed = state.processes.lock().unwrap().remove(&path).unwrap();
+        let run_id = managed.run_id.clone();
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(managed));
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .insert(run_id.clone(), pending.clone());
+        drop(closing);
+        let cleanup = super::PendingProjectGuard {
+            state: state.clone(),
+            run_id,
+        };
+        super::stop_all_repository_projects(&state, &database);
+        assert!(pending.lock().unwrap().child.try_wait().unwrap().is_some());
+        drop(cleanup);
+        assert!(state.pending.lock().unwrap().is_empty());
+        assert!(state.processes.lock().unwrap().is_empty());
+        drop(pending);
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn git_error_redacts_remote_credentials_and_query_values() {
+        let error = super::sanitized_git_error("fatal: unable to access 'https://demo:example-password@git.example/repo?token=example-token': denied");
+        assert!(!error.contains("example-password"));
+        assert!(!error.contains("example-token"));
+        assert!(error.contains("git.example"));
+        assert!(error.contains("denied"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_git_command_drains_both_output_pipes_and_times_out() {
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::Out.Write('x' * 131072); [Console]::Error.Write('y' * 131072)",
+        ]);
+        let output = super::bounded_command_output(command, Duration::from_secs(10)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 131072);
+        assert_eq!(output.stderr.len(), 131072);
+
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 30",
+        ]);
+        let started = Instant::now();
+        let error = super::bounded_command_output(command, Duration::from_millis(200)).unwrap_err();
+        assert!(error.contains("已停止本次命令"));
+        assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[test]
+    fn repository_assets_aggregate_historical_aliases_once_per_conversation() {
+        let directory = std::env::temp_dir().join(format!(
+            "workbench-asset-aggregation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let connection = state.connect().unwrap();
+        connection.execute_batch("INSERT INTO repository_assets(path,name,remote_url,default_branch,last_scanned_at,updated_at)
+            VALUES('F:/example/new-client','new-client','','main','2026-08-01','2026-08-01'),('F:/example/app','app','','main','2026-08-01','2026-08-01');
+            INSERT INTO project_profiles(id,display_name,repository_path,tapd_workspace_id,aliases_json,category,created_at,updated_at)
+            VALUES('p','生产安全PC','F:/example/new-client','','[\"F:/example/client\",\"client\"]','','now','now'),('a','生产安全H5','F:/example/app','','[\"app\"]','','now','now');
+            INSERT INTO conversations(id,source_file,title,cwd,updated_at,imported_at)
+            VALUES('old','old.jsonl','历史对话','F:/example/client','2026-08-02','now'),('new','new.jsonl','新对话','F:/example/new-client','2026-08-03','now'),('app','app.jsonl','H5对话','F:/example/app','2026-08-04','now');").unwrap();
+        let assets = super::repository_assets_for_state(&state).unwrap();
+        let pc = assets
+            .iter()
+            .find(|asset| asset.name == "new-client")
+            .unwrap();
+        assert_eq!(pc.conversation_count, 2);
+        assert_eq!(pc.last_activity_at, "2026-08-03");
+        assert_eq!(assets[0].name, "app");
+        assert_eq!(assets[0].conversation_count, 1);
+        // 没有映射的同名目录也不能因为显示名相同而互相混入 Codex 对话。
+        connection.execute_batch("INSERT INTO repository_assets(path,name,remote_url,default_branch,last_scanned_at,updated_at)
+            VALUES('F:/one/same','same','','main','2026-08-01','2026-08-01'),('F:/two/same','same','','main','2026-08-01','2026-08-01');
+            INSERT INTO conversations(id,source_file,title,cwd,updated_at,imported_at)
+            VALUES('same-1','same-1.jsonl','目录一对话','F:/one/same','2026-08-05','now'),('same-2','same-2.jsonl','目录二对话','F:/two/same','2026-08-06','now');").unwrap();
+        let assets = super::repository_assets_for_state(&state).unwrap();
+        for path in ["F:/one/same", "F:/two/same"] {
+            assert_eq!(
+                assets
+                    .iter()
+                    .find(|asset| asset.path == path)
+                    .unwrap()
+                    .conversation_count,
+                1
+            );
+        }
+        let details =
+            super::repository_asset_details_for_state(&state, "F:/one/same".into()).unwrap();
+        assert_eq!(details.conversations.len(), 1);
+        assert_eq!(details.conversations[0].id, "same-1");
+        connection.execute_batch("INSERT INTO test_runs(id,menu_id,project,project_path,menu_name,mode,status,started_at)
+            VALUES('test-old','page','client','F:/example/client','历史页面','mock','passed','2026-08-01'),
+            ('test-one','page','same','F:/one/same','页面一','mock','passed','2026-08-02'),
+            ('test-two','page','same','F:/two/same','页面二','mock','failed','2026-08-03'),
+            ('test-unknown','page','same','','归属不明','mock','failed','2026-08-04');
+            INSERT INTO work_sessions(id,date,start_time,end_time,duration_minutes,project,work_type,source,note,created_at,updated_at)
+            VALUES('work-old','2026-08-01','09:00','10:00',60,'client','开发','manual','','now','2026-08-01'),
+            ('work-one','2026-08-02','09:00','10:00',60,'F:/one/same','开发','manual','','now','2026-08-02'),
+            ('work-two','2026-08-03','09:00','10:00',60,'F:/two/same','开发','manual','','now','2026-08-03'),
+            ('work-unknown','2026-08-04','09:00','10:00',60,'same','开发','manual','','now','2026-08-04');").unwrap();
+        for (path, expected) in [
+            ("F:/example/new-client", ["test-old", "work-old"]),
+            ("F:/one/same", ["test-one", "work-one"]),
+            ("F:/two/same", ["test-two", "work-two"]),
+        ] {
+            let details = super::repository_asset_details_for_state(&state, path.into()).unwrap();
+            let mut ids = details
+                .associations
+                .iter()
+                .filter(|item| item.kind == "test" || item.kind == "work")
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            assert_eq!(ids, expected, "{path}");
+        }
+        drop(connection);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn remote_branch_scenario(scenario: &str) {
         let directory =
@@ -6171,15 +7183,21 @@ mod tests {
             spawn_project_start_command(&directory, "echo started>launch-marker.txt").unwrap();
 
         let marker = directory.join("launch-marker.txt");
-        for _ in 0..40 {
-            if marker.exists() {
-                break;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let content = loop {
+            // 重定向先创建文件再写入；仅等待 exists 会在并行测试时读到空文件。
+            let content = std::fs::read_to_string(&marker).unwrap_or_default();
+            if content.trim() == "started" || Instant::now() >= deadline {
+                break content;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if content.trim() != "started" {
+            let _ = child.kill();
         }
-        assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "started");
         let _ = child.wait();
         std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(content.trim(), "started", "启动标记未在 5 秒内写入完成");
     }
 
     #[test]

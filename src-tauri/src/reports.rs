@@ -69,6 +69,8 @@ pub struct DailyActivity {
     pub task_activity_count: i64,
     pub quick_capture_count: i64,
     pub completed_video_count: i64,
+    pub publish_count: i64,
+    pub publishes_succeeded: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +138,111 @@ struct TestFact {
     status: String,
     date: String,
     error_message: String,
+}
+
+#[derive(Debug)]
+struct PublishFact {
+    id: String,
+    project: String,
+    job_name: String,
+    branch: String,
+    status: String,
+    date: String,
+    build_number: Option<i64>,
+}
+
+fn publish_facts(
+    connection: &rusqlite::Connection,
+    start: &str,
+    end: &str,
+) -> Result<Vec<PublishFact>, String> {
+    let identities = project_identity::ProjectIdentityMap::load(connection)?;
+    let mut statement = connection.prepare(
+        "SELECT id,job_name,job_full_name,branch,status,date(finished_at,'localtime'),build_number
+         FROM jenkins_publish_records WHERE status IN ('success','failed','aborted')
+         AND finished_at IS NOT NULL AND date(finished_at,'localtime') BETWEEN ?1 AND ?2
+         ORDER BY finished_at DESC,id"
+    ).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![start, end], |row| {
+            let job_name: String = row.get(1)?;
+            let job_full_name: String = row.get(2)?;
+            Ok(PublishFact {
+                id: row.get(0)?,
+                project: identities
+                    .exact_project_name(&[&job_full_name, &job_name])
+                    .unwrap_or_else(|| "未匹配项目".into()),
+                job_name,
+                branch: row.get(3)?,
+                status: row.get(4)?,
+                date: row.get(5)?,
+                build_number: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn publish_outcome(status: &str) -> &str {
+    match status {
+        "success" => "发布成功",
+        "failed" => "发布失败",
+        _ => "发布已中止",
+    }
+}
+
+fn add_publish_section(content: String, publishes: &[PublishFact]) -> String {
+    if publishes.is_empty() {
+        return content;
+    }
+    let mut lines = vec![
+        "## 发布验证".to_string(),
+        String::new(),
+        format!(
+            "- 共 {} 次已完成的 Jenkins 发布：成功 {} 次，失败 {} 次，中止 {} 次。",
+            publishes.len(),
+            publishes
+                .iter()
+                .filter(|item| item.status == "success")
+                .count(),
+            publishes
+                .iter()
+                .filter(|item| item.status == "failed")
+                .count(),
+            publishes
+                .iter()
+                .filter(|item| item.status == "aborted")
+                .count()
+        ),
+        "- 以下为构建结果证据，构建耗时不计作人工工时。".into(),
+        String::new(),
+    ];
+    for item in publishes.iter().take(20) {
+        lines.push(format!(
+            "- {} [{}] {} · 分支 {} · {}{}。",
+            item.date,
+            item.project,
+            clean_excerpt(&item.job_name, 80),
+            clean_excerpt(&item.branch, 80),
+            publish_outcome(&item.status),
+            item.build_number
+                .map(|number| format!(" · 构建 #{number}"))
+                .unwrap_or_default()
+        ));
+    }
+    if publishes.len() > 20 {
+        lines.push(format!(
+            "- 其余 {} 次发布可在发布中心查看。",
+            publishes.len() - 20
+        ));
+    }
+    let section = lines.join("\n");
+    if let Some(index) = content.find("## 问题与风险") {
+        format!("{}{section}\n\n{}", &content[..index], &content[index..])
+    } else {
+        format!("{content}\n\n{section}")
+    }
 }
 
 fn clean_excerpt_with_limit(
@@ -1383,6 +1490,10 @@ fn generate_for_date(
         report_type,
         &tests,
     );
+    let content = add_publish_section(
+        content,
+        &publish_facts(&connection, &start_text, &end_text)?,
+    );
     let now = Utc::now().to_rfc3339();
     let record = ReportRecord {
         id: existing
@@ -1446,9 +1557,19 @@ pub fn list_reports(state: tauri::State<'_, DatabaseState>) -> Result<Vec<Report
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn report_sources(
+pub async fn report_sources(
     state: tauri::State<'_, DatabaseState>,
     report_id: String,
+) -> Result<Vec<ReportSource>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || report_sources_for_state(&state, &report_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn report_sources_for_state(
+    state: &DatabaseState,
+    report_id: &str,
 ) -> Result<Vec<ReportSource>, String> {
     let connection = state.connect()?;
     let (start, end): (String, String) = connection
@@ -1647,6 +1768,25 @@ pub fn report_sources(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     sources.extend(tapd_items);
+    sources.extend(
+        publish_facts(&connection, &start, &end)?
+            .into_iter()
+            .map(|item| ReportSource {
+                kind: "Jenkins 发布".into(),
+                id: item.id,
+                title: item.job_name,
+                project: item.project,
+                date: item.date,
+                detail: format!(
+                    "{} · 分支 {}{}",
+                    publish_outcome(&item.status),
+                    item.branch,
+                    item.build_number
+                        .map(|number| format!(" · 构建 #{number}"))
+                        .unwrap_or_default()
+                ),
+            }),
+    );
     sources.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.kind.cmp(&b.kind)));
     Ok(sources)
 }
@@ -1659,6 +1799,9 @@ fn historical_activity_dates(state: &DatabaseState) -> Result<Vec<NaiveDate>, St
                SELECT DISTINCT date(event_time,'localtime') AS activity_date FROM conversation_messages WHERE event_time IS NOT NULL
                UNION
                SELECT DISTINCT date(event_time,'localtime') AS activity_date FROM token_events WHERE event_time IS NOT NULL
+               UNION
+               SELECT DISTINCT date(finished_at,'localtime') AS activity_date FROM jenkins_publish_records
+                 WHERE finished_at IS NOT NULL AND status IN ('success','failed','aborted')
              ) WHERE activity_date IS NOT NULL ORDER BY activity_date",
         )
         .map_err(|error| error.to_string())?;
@@ -1900,7 +2043,9 @@ fn daily_activity_for_state(
                (SELECT COUNT(*) FROM knowledge_items WHERE date(updated_at,'localtime')=dates.day),
                 (SELECT COUNT(*) FROM tasks WHERE date(updated_at,'localtime')=dates.day),
                 (SELECT COUNT(*) FROM quick_captures WHERE date(created_at,'localtime')=dates.day),
-                (SELECT COUNT(*) FROM video_jobs WHERE status='complete' AND date(completed_at,'localtime')=dates.day)
+                (SELECT COUNT(*) FROM video_jobs WHERE status='complete' AND date(completed_at,'localtime')=dates.day),
+                (SELECT COUNT(*) FROM jenkins_publish_records WHERE status IN ('success','failed','aborted') AND date(finished_at,'localtime')=dates.day),
+                (SELECT COUNT(*) FROM jenkins_publish_records WHERE status='success' AND date(finished_at,'localtime')=dates.day)
              FROM dates LEFT JOIN messages ON messages.day=dates.day LEFT JOIN tokens ON tokens.day=dates.day
                LEFT JOIN commits ON commits.day=dates.day ORDER BY dates.day",
         )
@@ -1929,6 +2074,8 @@ fn daily_activity_for_state(
                 task_activity_count: row.get(18)?,
                 quick_capture_count: row.get(19)?,
                 completed_video_count: row.get(20)?,
+                publish_count: row.get(21)?,
+                publishes_succeeded: row.get(22)?,
                 work_minutes: 0,
                 estimated_work_minutes: 0,
                 manual_work_minutes: 0,
@@ -1955,6 +2102,56 @@ fn daily_activity_for_state(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn finished_jenkins_publishes_are_evidence_without_becoming_human_worktime() {
+        let directory = std::env::temp_dir().join(format!(
+            "workbench-publish-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state =
+            crate::database::DatabaseState::new(directory.join("workbench.sqlite3")).unwrap();
+        let connection = state.connect().unwrap();
+        connection.execute_batch("INSERT INTO project_profiles(id,display_name,repository_path,tapd_workspace_id,aliases_json,category,created_at,updated_at)
+            VALUES('pc','生产安全PC','','','[\"folder/service\"]','','now','now');
+            INSERT INTO jenkins_publish_records(id,jenkins_base_url,job_name,job_full_name,job_url,branch_parameter,branch,status,started_at,finished_at,updated_at)
+            VALUES('ok','https://jenkins.example','service','folder/service','https://jenkins.example/job/service','BRANCH','main','success','2026-09-01T00:00:00Z','2026-09-01T07:00:00Z','2026-09-01T07:00:00Z'),
+            ('bad','https://jenkins.example','unmapped','folder/unmapped','https://jenkins.example/job/other','BRANCH','main','failed','2026-09-01T00:00:00Z','2026-09-01T07:00:00Z','2026-09-01T07:00:00Z'),
+            ('pending','https://jenkins.example','service','folder/service','https://jenkins.example/job/service','BRANCH','main','running','2026-09-01T00:00:00Z',NULL,'2026-09-01T07:00:00Z');").unwrap();
+        let facts = super::publish_facts(&connection, "2026-09-01", "2026-09-01").unwrap();
+        assert_eq!(facts.len(), 2);
+        assert!(facts
+            .iter()
+            .any(|fact| fact.id == "ok" && fact.project == "生产安全PC"));
+        assert!(facts
+            .iter()
+            .any(|fact| fact.id == "bad" && fact.project == "未匹配项目"));
+        let report = super::generate_for_date(
+            &state,
+            "daily",
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+        )
+        .unwrap();
+        assert!(report.content_markdown.contains("发布成功"));
+        assert!(report.content_markdown.contains("发布失败"));
+        assert!(report.content_markdown.contains("构建耗时不计作人工工时"));
+        let sources = super::report_sources_for_state(&state, &report.id).unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| source.kind == "Jenkins 发布")
+                .count(),
+            2
+        );
+        let activities =
+            super::daily_activity_for_state(&state, "2026-09-01", "2026-09-01").unwrap();
+        assert_eq!(activities[0].publish_count, 2);
+        assert_eq!(activities[0].publishes_succeeded, 1);
+        assert_eq!(activities[0].work_minutes, 0);
+        drop(connection);
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     use super::{
         add_test_section, add_work_time_section, build_content, clean_excerpt,
         conversation_work_summary, git_work_summary, is_low_value_process, project_label,
