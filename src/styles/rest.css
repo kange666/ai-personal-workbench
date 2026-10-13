@@ -24,6 +24,7 @@
 .rest-footnote { text-align:center; color:var(--muted); font-size:10px; margin:21px 0; letter-spacing:.08em; }
 .rest-backdrop { position:fixed; inset:0; z-index:1500; padding:20px; display:flex; align-items:center; justify-content:center; background:rgba(5,9,18,.65); backdrop-filter:blur(5px); }
 .rest-dialog { width:min(560px,100%); max-height:calc(100dvh - 40px); overflow-y:auto; overscroll-behavior:contain; color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:18px; box-shadow:0 24px 90px #0005; }
+.rest-dialog.rest-dialog-mota { width:min(760px,100%); }
 .rest-dialog-header { display:flex; align-items:center; gap:9px; padding:15px 18px; border-bottom:1px solid var(--line); }
 .rest-dialog-mark { color:var(--game-accent); background:color-mix(in srgb,var(--game-accent) 10%,var(--surface)); border-radius:10px; padding:5px; }
 .rest-dialog-mark svg { width:29px; height:29px; }

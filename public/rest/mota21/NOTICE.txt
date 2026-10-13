@@ -1,0 +1,12 @@
+Classic Magic Tower / 经典 21 层魔塔
+Original game: 胖老鼠工作室
+Original SWF is preserved without changes.
+Source: https://flash.homes/flash/5WB8-3BW6-TA04/download
+SHA-256: 2f1681af86d28042009c7c1a43cfd9da8df20abcc598501db67175f31d87c646
+Original artwork, music, text and game rights remain with their respective authors.
+
+Ruffle Flash emulator: 0.7.1
+Source: https://registry.npmjs.org/@ruffle-rs/ruffle/-/ruffle-0.7.1.tgz
+Project: https://github.com/ruffle-rs/ruffle
+Licenses: ruffle/LICENSE_MIT and ruffle/LICENSE_APACHE
+Distributed runtime files are unchanged. Source maps and development files are omitted.

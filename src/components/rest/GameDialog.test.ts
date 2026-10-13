@@ -31,3 +31,16 @@ it("工作台快捷键不会在游戏背后打开搜索或快捷记录", async (
   window.dispatchEvent(new KeyboardEvent("keydown", { key:" ",code:"Space",ctrlKey:true,shiftKey:true }));
   expect(background).not.toHaveBeenCalled(); window.removeEventListener("keydown", background);
 });
+it("魔塔播放器位于持久节点中时，Tab与Shift+Tab仍限制在游戏弹窗内", async () => {
+  const MotaStub = markRaw(defineComponent({ template: '<div tabindex="0" data-game-focus>魔塔区域</div>' }));
+  wrapper = mount(GameDialog, { props: { game: "mota", component: MotaStub }, attachTo: document.body });
+  await nextTick();
+  const host = document.createElement("div"); host.className = "mota-player-host";
+  const player = document.createElement("button"); host.appendChild(player); document.body.appendChild(host);
+  player.focus(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", cancelable: true }));
+  expect(document.activeElement).toBe(button("暂停游戏"));
+  player.focus(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, cancelable: true }));
+  expect(document.activeElement).toBe(button("保存并关闭"));
+  expect(document.querySelector(".rest-dialog-mota")?.textContent).toContain("经典 21 层 · 原版内容");
+  host.remove();
+});

@@ -3,15 +3,8 @@ import { computed, ref } from "vue";
 import { restGames, type RestGameId } from "../utils/rest/catalog";
 import { gameBest, restStorageWarning } from "../composables/useGameSave";
 import GameIcon from "../components/rest/GameIcon.vue";
-import GameDialog from "../components/rest/GameDialog.vue";
-import WiringGame from "../components/rest/WiringGame.vue";
-import BreakoutGame from "../components/rest/BreakoutGame.vue";
-import TowerGame from "../components/rest/TowerGame.vue";
-import FishingGame from "../components/rest/FishingGame.vue";
-import SokobanGame from "../components/rest/SokobanGame.vue";
-import GomokuGame from "../components/rest/GomokuGame.vue";
+import RestGameDialog from "../components/rest/RestGameDialog.vue";
 import "../styles/rest.css";
-const components = { wiring: WiringGame, breakout: BreakoutGame, tower: TowerGame, fishing: FishingGame, sokoban: SokobanGame, gomoku: GomokuGame };
 const active = ref<RestGameId | null>(null);
 const revision = ref(0);
 const bests = computed(() => { void revision.value; return Object.fromEntries(restGames.map(game => [game.id, gameBest(game.id)])); });
@@ -30,6 +23,6 @@ function close() { active.value = null; queueMicrotask(() => revision.value++); 
       <p class="rest-footnote">自动续玩 · 本机记录 · 随时暂停</p>
       <p v-if="restStorageWarning" class="rest-storage-warning" role="status">{{ restStorageWarning }}</p>
     </div>
-    <GameDialog v-if="active" :game="active" :component="components[active]" @close="close" />
+    <RestGameDialog v-if="active" :game="active" @close="close" />
   </div>
 </template>

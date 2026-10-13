@@ -15,8 +15,9 @@ defineProps<{ name: RestGameId }>();
     <g v-else-if="name === 'tower'" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
       <path d="m9 43 25-9 21 9-25 9z" opacity=".35"/><path d="M9 43v7l21 8 25-9v-6L30 52Z" opacity=".6"/><path d="m14 30 20-8 17 7-21 8z" opacity=".7"/><path d="M14 30v7l16 7 21-8v-7l-21 8Z" opacity=".45"/><path d="m20 14 16-6 13 5-16 7z"/><path d="M20 14v6l13 6 16-7v-6l-16 7Z" opacity=".7"/>
     </g>
-    <g v-else-if="name === 'fishing'" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M35 8v21c0 9-12 9-12 1v-3l4 4"/><path d="M8 44q6-5 12 0t12 0t12 0t12 0M12 53q6-5 12 0t12 0t12 0" opacity=".4"/><path d="M43 30q-6-10-14-3 8 8 14 3l7 5V24z" fill="currentColor" opacity=".75"/>
+    <g v-else-if="name === 'mota'" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 55V24h34v31M21 24V13h6v6h10v-6h6v11M10 55h44M26 55V42a6 6 0 0 1 12 0v13" />
+      <path d="M25 29v4M39 29v4"/><path d="m32 5 2 4 4 2-4 2-2 4-2-4-4-2 4-2z" fill="currentColor" stroke-width="1" opacity=".6"/>
     </g>
     <g v-else-if="name === 'sokoban'" stroke="currentColor" stroke-width="3" stroke-linejoin="round">
       <path d="m16 18 17-8 18 8-18 9z" fill="currentColor" opacity=".3"/><path d="M16 18v25l17 10 18-10V18L33 27Z"/><path d="M33 27v26M24 15l17 9v9"/><path d="M6 32h16m-5-5 5 5-5 5" stroke-linecap="round"/>

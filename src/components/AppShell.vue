@@ -25,6 +25,7 @@ import TranslationDialog from "./TranslationDialog.vue";
 import CockpitScreensaver from "./CockpitScreensaver.vue";
 import SystemPerformanceCard from "./SystemPerformanceCard.vue";
 import SystemPerformanceDialog from "./SystemPerformanceDialog.vue";
+import RestRailCard from "./rest/RestRailCard.vue";
 import StartupSplash from "./StartupSplash.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { loadHiddenNavigationPaths, loadNavigationOrder, navigationOrderChangedEvent, orderedNavigationItems } from "../utils/navigation";
@@ -107,6 +108,7 @@ const dateText = computed(() => new Intl.DateTimeFormat("zh-CN", { year: "numeri
 const todayIso = computed(() => currentDate.value.toLocaleDateString("sv-SE"));
 const todayDay = computed(() => currentDate.value.getDate());
 const todayAlmanac = computed(() => getAlmanac(todayIso.value));
+const compactLunarDate = computed(() => todayAlmanac.value.lunarDate.replace(/^农历.*年/, "农历"));
 watch(todayIso, () => { void loadSidebarWorktime(); });
 const latestWorkSession = computed(() => [...todayWorkSessions.value].sort((left,right) => right.endTime.localeCompare(left.endTime))[0]);
 const primaryQuota = computed(() => quota.value.primary || quota.value.secondary);
@@ -744,7 +746,7 @@ onBeforeUnmount(() => {
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5a1 1 0 0 0-1 1v3M16 4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3M16 20h3a1 1 0 0 0 1-1v-3"/><circle cx="12" cy="12" r="2.25"/><path d="M12 7.5v2M12 14.5v2M7.5 12h2M14.5 12h2"/></svg>
         </button>
       </div>
-      <nav><RouterLink v-for="item in visibleNavItems" :key="item.path" :to="item.path" :title="item.label"><NavIcon :name="item.icon" /><em>{{ item.label }}</em><b v-if="item.vip" class="vip-badge">VIP</b></RouterLink></nav>
+      <nav><RouterLink v-for="item in visibleNavItems" :key="item.path" :to="item.path" :title="item.label" :class="{ 'rest-narrow-nav': item.path === '/rest' }"><NavIcon :name="item.icon" /><em>{{ item.label }}</em><b v-if="item.vip" class="vip-badge">VIP</b></RouterLink></nav>
       <div class="side-footer"><SettingsLink /></div>
     </aside>
     <header class="app-topbar" @mousedown="prepareWindowDragging" @dblclick="toggleMaximizeFromTopbar">
@@ -801,10 +803,16 @@ onBeforeUnmount(() => {
     <aside class="ai-rail work-status-rail">
       <section class="rail-almanac">
         <div class="rail-almanac-card">
-          <div class="rail-almanac-main"><b>{{ todayDay }}</b><span><span class="rail-almanac-heading"><strong>{{ todayAlmanac.duty }} · {{ todayAlmanac.luck }}</strong><small>{{ todayAlmanac.lunarDate }}</small></span><em>{{ todayAlmanac.heavenlyGod }}值日 · {{ todayAlmanac.clash }} · {{ todayAlmanac.sha }}</em></span></div>
+          <div class="rail-almanac-main">
+            <b>{{ String(todayDay).padStart(2, '0') }}</b>
+            <span><strong>{{ currentDate.getMonth() + 1 }}月 · {{ todayAlmanac.week.replace('星期', '周') }}</strong><small>{{ compactLunarDate }}</small></span>
+            <i v-if="todayAlmanac.jieQi !== '非节气日'" class="rail-almanac-season">{{ todayAlmanac.jieQi }}</i>
+            <RouterLink class="icon-button rail-almanac-link" to="/calendar" title="查看工作日历与黄历" aria-label="查看工作日历与黄历"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg></RouterLink>
+          </div>
           <div class="rail-almanac-yiji"><span><i>宜</i><em>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</em></span><span><i>忌</i><em>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</em></span></div>
         </div>
       </section>
+      <section class="rail-rest"><RestRailCard /></section>
       <section class="rail-performance">
         <SystemPerformanceCard :snapshot="systemPerformance" :history="performanceHistory" :optimization-state="memoryOptimizationState" :optimization-message="memoryOptimizationMessage" @open="performanceOpen=true" @optimize="optimizeMemory" />
       </section>
