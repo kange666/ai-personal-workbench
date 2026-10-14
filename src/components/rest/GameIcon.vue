@@ -22,6 +22,8 @@ defineProps<{ name: RestGameId }>();
     <g v-else-if="name === 'sokoban'" stroke="currentColor" stroke-width="3" stroke-linejoin="round">
       <path d="m16 18 17-8 18 8-18 9z" fill="currentColor" opacity=".3"/><path d="M16 18v25l17 10 18-10V18L33 27Z"/><path d="M33 27v26M24 15l17 9v9"/><path d="M6 32h16m-5-5 5 5-5 5" stroke-linecap="round"/>
     </g>
+    <g v-else-if="name==='archery'" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="16" cy="14" r="5"/><path d="M16 19v18m0-10 14-4M16 37l-7 17m7-17 10 17M34 9q22 20 0 40L34 9M27 29h30m-6-5 6 5-6 5"/><path d="M41 13q9 12 2 23" opacity=".3"/></g>
+    <g v-else-if="name==='defense'" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"><circle cx="32" cy="33" r="24" stroke-dasharray="3 5" opacity=".35"/><path d="m32 13 13 9-4 30H23l-4-30Z" fill="currentColor" opacity=".3"/><path d="m32 13 13 9-4 30H23l-4-30Z"/><circle cx="32" cy="31" r="6"/><path d="M32 5v7M55 33h-7M16 33H9M32 54v7" stroke-linecap="round"/></g>
     <g v-else stroke="currentColor" stroke-width="1.5"><path d="M12 12h40M12 25h40M12 38h40M12 51h40M12 12v40M25 12v40M38 12v40M51 12v40" opacity=".25"/><circle cx="25" cy="25" r="6" fill="currentColor"/><circle cx="38" cy="38" r="6" fill="currentColor"/><circle cx="25" cy="38" r="6" fill="var(--surface)"/><circle cx="38" cy="25" r="6" fill="var(--surface)"/><circle cx="51" cy="51" r="6" fill="currentColor"/></g>
   </svg>
 </template>

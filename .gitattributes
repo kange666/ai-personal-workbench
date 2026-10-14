@@ -1,0 +1,10 @@
+# 魔塔离线资源与 upstream-manifest.json 逐字节核对，禁止 Windows 自动换行转换。
+public/rest/mota50/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# 上游源码保留原有空白；自研 index.html 和 workbench*.js 继续使用常规空白检查。
+public/rest/mota50/libs/** -whitespace
+public/rest/mota50/project/** -whitespace
+public/rest/mota50/main.js -whitespace
+
+# 许可证的 Setext 标题使用七个等号，并非合并冲突标记。
+public/rest/mota50/LICENSE-priority-queue.txt conflict-marker-size=32

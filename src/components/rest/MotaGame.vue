@@ -69,7 +69,7 @@ defineExpose({ restart });
 </template>
 
 <style scoped>
-.mota-surface{position:relative;width:100%;aspect-ratio:57/41;overflow:hidden;background:#000;border-radius:8px;outline-offset:3px}
+.mota-surface{position:relative;width:100%;max-width:calc((100dvh - 250px)*1.390244);margin-inline:auto;aspect-ratio:57/41;overflow:hidden;background:#000;border-radius:8px;outline-offset:3px}
 .mota-surface :deep(.mota-player){display:block;width:100%;height:100%}
 .mota-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#ddd;margin:0;gap:12px}
 .game-help{margin:10px 0 0}

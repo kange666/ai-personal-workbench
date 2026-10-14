@@ -23,7 +23,7 @@ function reachable(board: SokobanBoard, player: number, boxes: readonly number[]
   return paths;
 }
 
-// 只在测试中运行完整搜索，避免把求解器带入游戏运行包。
+// 老关卡使用独立搜索，新关卡回放反向生成的证书，交叉验证实际移动规则。
 function solveLevel(level: number): SokobanDirection[] | null {
   const board = getSokobanBoard(level);
   const queue = [{ player: board.player, boxes: board.boxes, path: [] as SokobanDirection[] }];
@@ -50,7 +50,8 @@ function solveLevel(level: number): SokobanDirection[] | null {
 }
 
 function solveState(state: SokobanState): SokobanState {
-  const solution = solveLevel(state.level);
+  const letters: Record<string,SokobanDirection> = { U:'up', R:'right', D:'down', L:'left' };
+  const solution = state.level < 6 ? solveLevel(state.level) : [...SOKOBAN_LEVELS[state.level].solution].map(c => letters[c]);
   expect(solution, `第 ${state.level + 1} 关应该可解`).not.toBeNull();
   for (const direction of solution!) {
     state = moveSokoban(state, direction);
@@ -60,7 +61,7 @@ function solveState(state: SokobanState): SokobanState {
 }
 
 describe("休息站推箱子", () => {
-  it("六个关卡均可由求解器解出，实际操作能逐关完成且不重复加分", () => {
+  it("八十关均有实际可执行的通关路线，逐关完成且不重复加分", () => {
     let state = createSokobanState();
     let previousScore = 0;
     SOKOBAN_LEVELS.forEach((level, index) => {
@@ -83,7 +84,7 @@ describe("休息站推箱子", () => {
       }
     });
     expect(state.awards.every(award => award >= 100)).toBe(true);
-  }, 15000);
+  }, 60000);
   it("撞墙、箱后有墙和连续箱子都不移动、不增加步数", () => {
     const state = createSokobanState();
     expect(moveSokoban(state, "right")).toBe(state);
@@ -137,7 +138,7 @@ describe("休息站推箱子", () => {
   it("拒绝越界、墙内、重叠、虚假通关、伪造得分和损坏撤销记录", () => {
     const state = createSokobanState();
     const moved = moveSokoban(state, "up");
-    const invalid: unknown[] = [null, {}, { ...state, version: 2 }, { ...state, level: 6 }, { ...state, player: 0 }, { ...state, player: 1000 }, { ...state, boxes: [state.player] }, { ...state, boxes: [1, 1] }, { ...state, completed: true }, { ...state, awards: [1000, 0, 0, 0, 0, 0] }, { ...state, score: 1000 }, { ...state, moves: -1 }, { ...state, pushes: 1 }, { ...moved, history: [null] }, { ...moved, history: [{ ...moved.history[0], player: 8 }] }];
+    const invalid: unknown[] = [null, {}, { ...state, version: 2 }, { ...state, level: 80 }, { ...state, player: 0 }, { ...state, player: 1000 }, { ...state, boxes: [state.player] }, { ...state, boxes: [1, 1] }, { ...state, completed: true }, { ...state, awards: [1000, 0, 0, 0, 0, 0] }, { ...state, score: 1000 }, { ...state, moves: -1 }, { ...state, pushes: 1 }, { ...moved, history: [null] }, { ...moved, history: [{ ...moved.history[0], player: 8 }] }];
     for (const value of invalid) expect(validateSokobanState(value)).toBe(false);
     expect(validateSokobanState(JSON.parse(JSON.stringify(moved)))).toBe(true);
   });

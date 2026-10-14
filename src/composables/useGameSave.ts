@@ -22,12 +22,18 @@ function readEnvelope(id: string): { state?: unknown; best?: unknown; version?: 
 export function gameBest(id: string) { return scoreValue(readEnvelope(id)?.best); }
 
 /** 每款游戏独立存档。逐回合或最多每秒保存，避免在动画每帧写入同步存储。 */
-export function useGameSave<T>(id: string, create: () => T, validate: (value: unknown) => value is T) {
+export function useGameSave<T>(id: string, create: () => T, validate: (value: unknown) => value is T, migrate?: (value: unknown) => T | null) {
   const stored = readEnvelope(id);
   let valid = false;
-  try { valid = stored?.version === 1 && validate(stored.state); } catch { /* 损坏存档由新局替代。 */ }
+  let restored = stored?.state;
+  try {
+    if (stored?.version === 1) {
+      if (!validate(restored) && migrate) restored = migrate(restored);
+      valid = validate(restored);
+    }
+  } catch { /* 损坏存档由新局替代。 */ }
   if (stored && !valid) restStorageWarning.value = "这款游戏的进度不可用，已新开一局并保留有效最高分。";
-  const state = ref(valid ? stored!.state as T : create()) as Ref<T>;
+  const state = ref(valid ? restored as T : create()) as Ref<T>;
   const best = ref(scoreValue(stored?.best));
   const storageError = ref(false);
   function save() {

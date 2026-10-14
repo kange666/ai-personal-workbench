@@ -1,0 +1,21 @@
+经典 50 层魔塔（H5 复刻版）
+
+游戏来源：https://h5mota.com/games/51/
+作品主页：https://www.h5mota.com/tower/?name=51
+本地资源取得日期：2026-10-14。
+本作品为经典 50 层魔塔的 H5 复刻，包含入口层 MT0 和 MT1—MT50。
+地图、剧情、怪物、道具、图片及音乐保留上游内容及其原作者权利。
+
+HTML5 魔塔样板作者：ckcz123 及贡献者。
+引擎来源：https://github.com/ckcz123/mota-js
+引擎许可：BSD-3-Clause，见 LICENSE-BSD-3-Clause.txt。
+第三方库：localForage（Apache-2.0）、lz-string（MIT）、js-priority-queue（作者声明放弃权利，Public Domain / CC0）、zip.js（BSD-3-Clause）；对应许可见本目录 LICENSE-*.txt。
+
+ASTRION 的接入修改仅位于 index.html、workbench.js、workbench-clock.js：
+- 入口选择、嵌入布局、暂停/恢复、焦点和键盘联动；
+- 直接显示游戏标题界面，略过平台标识开场动画；
+- 独立本机存档命名空间，使用原生多槽位存档、读档和自动存档；
+- 仅加载本地资源，关闭云存档同步、统计及成绩上传。
+- 修复写盘失败后原生内存缓存仍保留未保存进度的问题。
+upstream-manifest.json 记录已下载上游文件的原始长度与 SHA-256。
+未经逐层实际游玩核对，不宣称与原 Flash 的模拟运行或画面 100% 一致。

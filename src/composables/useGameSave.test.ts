@@ -19,6 +19,16 @@ describe("休息站本机存档", () => {
     s = session(); expect(s.game.state.value).toEqual({ moves: 8, board: [3, 1] }); expect(s.game.best.value).toBe(120);
     s.game.recordScore(20); s.game.restart(); expect(s.game.state.value).toEqual(create()); expect(s.game.best.value).toBe(120); s.wrapper.unmount();
   });
+  it('旧数据经过迁移后重新验证，保留最高分；失败的迁移安全退回新局',()=>{
+    localStorage.setItem(gameSaveKey('migration'),JSON.stringify({version:1,state:{steps:8},best:123}));
+    let game!:ReturnType<typeof useGameSave<State>>;
+    const wrapper=mount(defineComponent({setup(){game=useGameSave('migration',create,validate,v=>({moves:(v as {steps:number}).steps,board:[2,1]}));return()=>null;}}));
+    expect(game.state.value).toEqual({moves:8,board:[2,1]});expect(game.best.value).toBe(123);wrapper.unmount();
+    expect(JSON.parse(localStorage.getItem(gameSaveKey('migration'))!).state.moves).toBe(8);
+    localStorage.setItem(gameSaveKey('broken-migration'),JSON.stringify({version:1,state:{steps:'bad'},best:55}));
+    const broken=mount(defineComponent({setup(){game=useGameSave('broken-migration',create,validate,()=>null);return()=>null;}}));
+    expect(game.state.value).toEqual(create());expect(game.best.value).toBe(55);broken.unmount();
+  });
   it("六款存档互不覆盖", () => {
     const a = session("a"), b = session("b"); a.game.state.value.moves = 9; a.game.recordScore(50); b.game.recordScore(12); a.wrapper.unmount(); b.wrapper.unmount();
     expect(JSON.parse(localStorage.getItem(gameSaveKey("a"))!).state.moves).toBe(9);

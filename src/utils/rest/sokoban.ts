@@ -1,4 +1,5 @@
-export const SOKOBAN_LEVELS = [
+import { EXTRA_SOKOBAN_LEVELS } from './sokobanLevels';
+const ORIGINAL_SOKOBAN_LEVELS = [
   { name: "初次搬运", map: ["#######", "#     #", "# . $@#", "#     #", "#######"] },
   { name: "双向泊位", map: ["#######", "#  .  #", "#  $  #", "#     #", "# @$ .#", "#     #", "#######"] },
   { name: "绕过隔舱", map: ["########", "#   #  #", "# .    #", "# $$# .#", "#  @   #", "#      #", "########"] },
@@ -6,6 +7,9 @@ export const SOKOBAN_LEVELS = [
   { name: "分区调度", map: ["########", "# . # .#", "#   #  #", "# $$   #", "#   $ .#", "#  @   #", "########"] },
   { name: "最后一班", map: ["########", "# .  . #", "# #    #", "# $$$  #", "#    # #", "#   .@ #", "########"] },
 ] as const;
+// 前六关的地图、序号保持不变，旧存档可以原样续玩。
+const ORIGINAL_SOLUTIONS = ['LL','URUDLDRR','LULUURRDDLDRRRDRU','LUUULURDRRRDDLUDDLLUURRDRUUDLU','ULUUDRRRDRUUDLLLDRR','LULUDLLURDRRUDLLURUDDRDRRUUUULLLDRDDURU'];
+export const SOKOBAN_LEVELS = [...ORIGINAL_SOKOBAN_LEVELS.map((level,index) => ({ ...level, chapter: '第 1 章', solution: ORIGINAL_SOLUTIONS[index] })), ...EXTRA_SOKOBAN_LEVELS];
 
 export type SokobanDirection = "up" | "right" | "down" | "left";
 export const SOKOBAN_DIRECTIONS: Record<SokobanDirection, { dx: number; dy: number }> = {
@@ -20,6 +24,7 @@ export interface SokobanState extends SokobanSnapshot {
   awards: number[];
   completed: boolean;
   history: SokobanSnapshot[];
+  hints?: number;
 }
 
 export function getSokobanBoard(level: number): SokobanBoard {
@@ -37,7 +42,7 @@ export function getSokobanBoard(level: number): SokobanBoard {
 
 export function createSokobanState(): SokobanState {
   const board = getSokobanBoard(0);
-  return { version: 1, level: 0, player: board.player, boxes: [...board.boxes], moves: 0, pushes: 0, score: 0, awards: SOKOBAN_LEVELS.map(() => 0), completed: false, history: [] };
+  return { version: 1, level: 0, player: board.player, boxes: [...board.boxes], moves: 0, pushes: 0, score: 0, awards: SOKOBAN_LEVELS.map(() => 0), completed: false, history: [], hints: 0 };
 }
 
 export function sokobanDestination(board: SokobanBoard, source: number, direction: SokobanDirection): number | null {
@@ -96,7 +101,7 @@ export function restartSokobanLevel(state: SokobanState): SokobanState {
   const board = getSokobanBoard(state.level);
   const awards = [...state.awards];
   awards[state.level] = 0;
-  return { ...state, player: board.player, boxes: [...board.boxes], moves: 0, pushes: 0, awards, score: awards.reduce((sum, award) => sum + award, 0), completed: false, history: [] };
+  return { ...state, player: board.player, boxes: [...board.boxes], moves: 0, pushes: 0, awards, score: awards.reduce((sum, award) => sum + award, 0), completed: false, history: [], hints: 0 };
 }
 
 export function nextSokobanLevel(state: SokobanState): SokobanState {
@@ -127,11 +132,11 @@ export function validateSokobanState(value: unknown): value is SokobanState {
   if (candidate.version !== 1 || !nonnegativeInteger(candidate.level) || candidate.level >= SOKOBAN_LEVELS.length) return false;
   const level = candidate.level;
   const board = getSokobanBoard(level);
-  if (!validSnapshot(value, board)) return false;
+  if (!validSnapshot(value, board) || (candidate.hints !== undefined && !nonnegativeInteger(candidate.hints))) return false;
   const state = value as SokobanSnapshot & Partial<SokobanState>;
   if (!nonnegativeInteger(state.score) || typeof state.completed !== "boolean"
     || !Array.isArray(state.awards) || state.awards.length !== SOKOBAN_LEVELS.length
-    || !state.awards.every((award, index) => nonnegativeInteger(award) && award <= 1000 && award % 5 === 0 && (index < level ? award >= 100 : index > level ? award === 0 : true))
+    || !state.awards.every(award => nonnegativeInteger(award) && award <= 1000 && award % 5 === 0 && (award === 0 || award >= 100))
     || state.score !== state.awards.reduce((sum, award) => sum + award, 0)
     || state.completed !== isSokobanSolved(board, state.boxes)
     || state.awards[level] !== (state.completed ? sokobanAward(state.moves, state.pushes) : 0)
@@ -148,4 +153,48 @@ export function validateSokobanState(value: unknown): value is SokobanState {
       return moved !== null && moved.player === snapshot.player && moved.moves === snapshot.moves && moved.pushes === snapshot.pushes && equalBoxes(moved.boxes, snapshot.boxes);
     });
   });
+}
+
+export function migrateSokoban(value: unknown): SokobanState | null {
+  if (!value || typeof value !== 'object') return null;
+  const old = value as SokobanState;
+  if (!Array.isArray(old.awards) || old.awards.length !== 6 || old.level > 5) return null;
+  const migrated = { ...old, awards: [...old.awards, ...Array(74).fill(0)] };
+  return validateSokobanState(migrated) ? migrated : null;
+}
+
+export function sokobanDeadlock(board: SokobanBoard, boxes: readonly number[]): boolean {
+  return boxes.some(box => !board.goals.includes(box) && (
+    (sokobanDestination(board, box, 'up') === null || sokobanDestination(board, box, 'down') === null)
+    && (sokobanDestination(board, box, 'left') === null || sokobanDestination(board, box, 'right') === null)));
+}
+
+/** 按推动次数搜索，行走路线通过连通区域合并；上限防止复杂残局长时间占用。 */
+export function solveSokoban(board: SokobanBoard, start: SokobanSnapshot, limit = 20000): SokobanDirection[] | null {
+  const dirs = Object.keys(SOKOBAN_DIRECTIONS) as SokobanDirection[];
+  const reach = (state: SokobanSnapshot) => {
+    const paths = new Map<number, SokobanDirection[]>([[state.player, []]]), queue = [state.player];
+    for (let i = 0; i < queue.length; i++) for (const d of dirs) {
+      const next = sokobanDestination(board, queue[i], d);
+      if (next !== null && !state.boxes.includes(next) && !paths.has(next)) { paths.set(next, [...paths.get(queue[i])!, d]); queue.push(next); }
+    }
+    return paths;
+  };
+  const queue = [{ state: start, path: [] as SokobanDirection[] }], seen = new Set<string>();
+  for (let cursor = 0; cursor < queue.length && cursor < limit; cursor++) {
+    const { state, path } = queue[cursor];
+    if (isSokobanSolved(board, state.boxes)) return path;
+    const paths = reach(state), key = `${[...state.boxes].sort((a,b)=>a-b)}|${Math.min(...paths.keys())}`;
+    if (seen.has(key)) continue; seen.add(key);
+    for (const box of state.boxes) for (const d of dirs) {
+      const opposite = dirs[(dirs.indexOf(d) + 2) % 4], stand = sokobanDestination(board, box, opposite);
+      const next = sokobanDestination(board, box, d);
+      if (stand === null || next === null || !paths.has(stand) || state.boxes.includes(next)) continue;
+      const boxes = state.boxes.map(b => b === box ? next : b);
+      if (sokobanDeadlock(board, boxes)) continue;
+      queue.push({ state: { player: box, boxes, moves: 0, pushes: 0 }, path: [...path, ...paths.get(stand)!, d] });
+    }
+    if (queue.length > limit * 3) return null;
+  }
+  return null;
 }

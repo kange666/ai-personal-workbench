@@ -40,7 +40,19 @@ it("魔塔播放器位于持久节点中时，Tab与Shift+Tab仍限制在游戏�
   player.focus(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", cancelable: true }));
   expect(document.activeElement).toBe(button("暂停游戏"));
   player.focus(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, cancelable: true }));
-  expect(document.activeElement).toBe(button("保存并关闭"));
-  expect(document.querySelector(".rest-dialog-mota")?.textContent).toContain("经典 21 层 · 原版内容");
+  expect(document.activeElement).toBe(button("关闭游戏"));
+  expect(document.querySelector(".rest-dialog-mota")?.textContent).toContain("经典 21 层 / 50 层");
   host.remove();
+});
+it("焦点进入同一游戏文档时保持运行，整个窗口失焦时暂停", async () => {
+  await render();
+  await wrapper.setProps({ game: "mota" });
+  const frame = document.createElement("iframe"); document.body.appendChild(frame); frame.focus();
+  const focused = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  window.dispatchEvent(new Event("blur")); await nextTick();
+  expect(document.querySelector(".rest-pause-cover")).toBeNull();
+  focused.mockReturnValue(false);
+  window.dispatchEvent(new Event("blur")); await nextTick();
+  expect(document.querySelector(".rest-pause-cover")).not.toBeNull();
+  focused.mockRestore();
 });

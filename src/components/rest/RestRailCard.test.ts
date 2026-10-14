@@ -11,7 +11,7 @@ vi.mock("./RestGameDialog.vue", () => ({ default: {
 it("无文字图标入口能逐个打开对应游戏，关闭后可以重新选择", async () => {
   const wrapper = mount(RestRailCard);
   expect(wrapper.get(".rail-rest-card").text()).toBe("");
-  expect(wrapper.findAll(".rail-rest-game")).toHaveLength(6);
+  expect(wrapper.findAll(".rail-rest-game")).toHaveLength(8);
   for (const game of restGames) {
     await wrapper.get(`[aria-label="打开${game.name}"]`).trigger("click");
     await flushPromises();

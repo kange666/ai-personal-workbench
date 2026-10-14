@@ -1,0 +1,506 @@
+{
+  "source": "https://h5mota.com/games/51/",
+  "retrieved": "2026-10-14",
+  "files": {
+    "styles.css": {
+      "bytes": 8706,
+      "sha256": "cda9654a7c9b4575a8e7f74ca21169e559ac7230a6fad36aa89e8a92b834e5a0"
+    },
+    "index.html": {
+      "bytes": 8905,
+      "sha256": "442253da2988c6761b93bf2c86ace17c9ebcf4c413a10acc01ba777bae1d826f"
+    },
+    "main.js": {
+      "bytes": 28877,
+      "sha256": "ec24521e2d5c27f42a09caa87c7070c0fc18fc88872d06b6fb78e3ef8960fa60"
+    },
+    "libs/utils.js": {
+      "bytes": 48552,
+      "sha256": "dfd0d21068dfa4c26cf328e228491058def26756ab52dcd071126466065147c7"
+    },
+    "libs/icons.js": {
+      "bytes": 2436,
+      "sha256": "ce5db458f42f898ffa360d3d4b85485091f7d03f3726445576fbcad750366b39"
+    },
+    "libs/items.js": {
+      "bytes": 13862,
+      "sha256": "21f2c5e18b6fce31a1a915dec8d7b2bde3e7dd3c54529d9130c6334ea85611d2"
+    },
+    "libs/enemys.js": {
+      "bytes": 19736,
+      "sha256": "ae142a56478adf093b8f91f63779b96c7867c4a8eabcc151faff8c20cded45b6"
+    },
+    "libs/maps.js": {
+      "bytes": 124914,
+      "sha256": "f22cedfb964c30a7aae16b942c3e5c0092d17f42b9ebabb92e85885a1db85b45"
+    },
+    "libs/data.js": {
+      "bytes": 412,
+      "sha256": "d8553dc631b578bec2e07035e651acb8ffa93cdb08238162a51f46deb265154f"
+    },
+    "libs/actions.js": {
+      "bytes": 122613,
+      "sha256": "23b42de23bfd327fd4c5b571dbe751ad9217904d5ccfc00ddfc1d89fb24a89f1"
+    },
+    "libs/events.js": {
+      "bytes": 138679,
+      "sha256": "93d524c3c5531bbe21d7dc1ca468e27a0bf98dda31a816dbf8901e94fe5b96e9"
+    },
+    "libs/ui.js": {
+      "bytes": 150508,
+      "sha256": "0b40b18ef29fab03aef9dc521dd842b8f92e77923ad3671aaa3c6fb72cc50544"
+    },
+    "libs/extensions.js": {
+      "bytes": 1471,
+      "sha256": "2a0339e82730197c396512b5a5d27853000160a9134e7d0c923d19a9efcc24ad"
+    },
+    "libs/core.js": {
+      "bytes": 21123,
+      "sha256": "7b030141980e8c70948fd6fab5d61eae309f7953b0a1f8781e27fa5e47c98433"
+    },
+    "project/data.js": {
+      "bytes": 12868,
+      "sha256": "d89224583e496124f8fe513ee6c3afb34123169af4fc80a018aa6599b35e2fe5"
+    },
+    "project/enemys.js": {
+      "bytes": 7153,
+      "sha256": "4a830bfa574d202dbc99c536627d6f74bcdca54ce603605c29516e368677a6ef"
+    },
+    "project/icons.js": {
+      "bytes": 4700,
+      "sha256": "6e3429e4395ace6d71eb7bfaa0cadc9a082e693d5017bcb54601febd27f0ed17"
+    },
+    "project/maps.js": {
+      "bytes": 13622,
+      "sha256": "0efc37a7382dc22fba2b2c24ec31358e64628994f8dde806a3330a3286732e34"
+    },
+    "project/items.js": {
+      "bytes": 26030,
+      "sha256": "4bd2872e2f8f0c2df15875739b918f5fa2743b72e837d425dfb1dfad5925910b"
+    },
+    "project/functions.js": {
+      "bytes": 66033,
+      "sha256": "1b50f43b86b19d8ea0a94faf9093d1e32a44d774091342d9ae865f8c3e0f0519"
+    },
+    "project/events.js": {
+      "bytes": 46954,
+      "sha256": "656db9ba885448abcd94c1818b99dd11c579331999fd4c1c8d09762955d3de41"
+    },
+    "libs/thirdparty/lz-string.min.js": {
+      "bytes": 4718,
+      "sha256": "4c09d32507760252ea4fd3364d4ec61639e88fd4887f02de667a44b4b90feb6e"
+    },
+    "libs/thirdparty/priority-queue.min.js": {
+      "bytes": 6065,
+      "sha256": "55b657b7820ee355bcb0ede31151f89dcb95745a00c507552ff498819543893e"
+    },
+    "libs/thirdparty/localforage.min.js": {
+      "bytes": 29518,
+      "sha256": "64c0867936a89b9ce3ab9ed91b196bab95378af838e48db130df76683ef0921d"
+    },
+    "libs/thirdparty/zip.min.js": {
+      "bytes": 31463,
+      "sha256": "455e5a2adcf55341c34c7f78dd3ef75c73f202579ac8d3ff95e8fe7b30a63efc"
+    },
+    "project/plugins.js": {
+      "bytes": 224777,
+      "sha256": "21b35d6a88ae6b76fe621ab8577a59d44da4490ff753f7b3805b9a3dfaff84e9"
+    },
+    "project/floors/MT0.js": {
+      "bytes": 2301,
+      "sha256": "6a30c78c90d5c27253a1147b55b9cfc8fc393486b96c937ee555ebcd2d709e7d"
+    },
+    "project/floors/MT1.js": {
+      "bytes": 15559,
+      "sha256": "2d27b43c9e526d7ed089d1ad49e1d0e7934e1cc95c277350c729950051ee57db"
+    },
+    "libs/loader.js": {
+      "bytes": 17712,
+      "sha256": "2e5c969b485e54133effcfbab89515a9623d913dc574b42c464334161b25f029"
+    },
+    "project/floors/MT3.js": {
+      "bytes": 10802,
+      "sha256": "776ae10a3fc4889ff52859393b910c11b5b779f00040a95fe660d5691ddcc16d"
+    },
+    "project/floors/MT2.js": {
+      "bytes": 11316,
+      "sha256": "48606d6c6c2e55306b27bb5627288c3583f4781dc5b381e1e24ac20965322630"
+    },
+    "project/floors/MT4.js": {
+      "bytes": 2749,
+      "sha256": "244b86161dff27db88ecebbb8c7c8b841e48d9a83d097f2decf6a844efefc738"
+    },
+    "project/floors/MT5.js": {
+      "bytes": 2486,
+      "sha256": "a3fee36ab19c91a8bcf7722db56d01e14fd83c9653ea2e0dae3ea3dd263ab18b"
+    },
+    "project/floors/MT6.js": {
+      "bytes": 2488,
+      "sha256": "88c535993d9bc844da218113aa54cadae18fc07c368a9ceea31ae64ea3ee63a7"
+    },
+    "project/floors/MT7.js": {
+      "bytes": 2488,
+      "sha256": "b3cc205b748fae32ab8a11e9a001e01e3db757653e0791c8b3ba44198d9d60c0"
+    },
+    "project/floors/MT9.js": {
+      "bytes": 2486,
+      "sha256": "09bd684c1d18ca18752838c9d97327c8f2b735a5a69574a88000535dc97e65bd"
+    },
+    "project/floors/MT11.js": {
+      "bytes": 3717,
+      "sha256": "24111b41029dac74e7d3d4d08e8b66b2470c8655526c1faec3935f03869a8b37"
+    },
+    "project/floors/MT8.js": {
+      "bytes": 3755,
+      "sha256": "263b3fd05b961d42f82ea5a96a04d7283d656cbc4f734699df68b848b21645cd"
+    },
+    "project/floors/MT12.js": {
+      "bytes": 6920,
+      "sha256": "ae7bbfebd4dd5408da486a5487f3ea65e761d67a97ebc2047b4093933d6fcc0b"
+    },
+    "project/floors/MT10.js": {
+      "bytes": 34248,
+      "sha256": "b270319f36ef5fba7dd977ea08f2e403994134dd2a115222c4e3e1177d497e76"
+    },
+    "project/floors/MT13.js": {
+      "bytes": 2493,
+      "sha256": "933c81f66518ade6f173a39df81729a1315fa94422e9dcd7fb9b2f9231987aac"
+    },
+    "project/floors/MT14.js": {
+      "bytes": 3445,
+      "sha256": "9a75d3dd395554c0c52794a65f0cda66ed56faf7b8ea8beaf0f3b92c7bb4ce25"
+    },
+    "project/floors/MT16.js": {
+      "bytes": 4917,
+      "sha256": "8cb5ec26e2edfdddf9165a1b7f1561352a39767e0d57af50f0f90a951ed5cba5"
+    },
+    "project/floors/MT18.js": {
+      "bytes": 2487,
+      "sha256": "d318f432ba80f6d8c047caf62766c88afebdd4e071d9811b0b52ca2ed14ee506"
+    },
+    "project/floors/MT17.js": {
+      "bytes": 7587,
+      "sha256": "cad2675aaf32a557d49c188e0b9896d12a6311044552957336e9a98fb058b4a6"
+    },
+    "project/floors/MT19.js": {
+      "bytes": 2760,
+      "sha256": "4a8012d5a701f3cc8dd92713f9727f0e9a6a48441cf5b0dfb71bf904d3765173"
+    },
+    "project/floors/MT20.js": {
+      "bytes": 11605,
+      "sha256": "dd585a10911df8e231742a892ae8fb11df8e0341b26c43bb0532f54e995d7e0e"
+    },
+    "project/floors/MT22.js": {
+      "bytes": 2489,
+      "sha256": "36e42e3f0fa137819338e0c115054f04682db604b34057e80dbc5945b3d20306"
+    },
+    "project/floors/MT21.js": {
+      "bytes": 2489,
+      "sha256": "c881d770efdf9e0566318260189607cc11c01b49c3dcd1e19489da89c151e4df"
+    },
+    "project/floors/MT24.js": {
+      "bytes": 4197,
+      "sha256": "6e93a7a099e1db96b629ab0415bb6d63f3f3714bbb73808781d0c986bfa9cec0"
+    },
+    "project/floors/MT25.js": {
+      "bytes": 3972,
+      "sha256": "aa1021fc819e13b35c26f2ee257ddb2f7740829ceafe2cdb27e77d687adb41d2"
+    },
+    "project/floors/MT23.js": {
+      "bytes": 32087,
+      "sha256": "9652495838003b3cffd656e53f882b3b3b64dd2cb10ce7c52198856caaba8926"
+    },
+    "project/floors/MT26.js": {
+      "bytes": 6020,
+      "sha256": "a88516b12a940b096207286b7ca6db15b12b3947ed381d925e11c14b0eab17d2"
+    },
+    "project/floors/MT27.js": {
+      "bytes": 2493,
+      "sha256": "0600ee804a460e40ba903d0738ff59da9113ffbec0683076abe9bdbd494bd77f"
+    },
+    "project/floors/MT28.js": {
+      "bytes": 10198,
+      "sha256": "231144b823ac8be1782ba7a079b5e97ff06227b379deba32e9de49935dd9b6e1"
+    },
+    "project/floors/MT29.js": {
+      "bytes": 6238,
+      "sha256": "b586c96755c9ef8a8494e23644b5ea4f53ef490fcdc11fed69a5ed8814c0ddac"
+    },
+    "project/floors/MT30.js": {
+      "bytes": 6327,
+      "sha256": "ed937fa357b7c2a6b26a2a8aeb9e3e195ff7410c3853cebcc6ca0a12141e70a5"
+    },
+    "project/floors/MT31.js": {
+      "bytes": 2489,
+      "sha256": "8426e3034773e855b9ef504d5a755bbd8c38f3761ffe113611bc27528a6a109f"
+    },
+    "project/floors/MT32.js": {
+      "bytes": 8330,
+      "sha256": "bd9d77a1bf13fb8131129fbe68c40c75664976bcfadad24892d550693785d0b8"
+    },
+    "project/floors/MT33.js": {
+      "bytes": 5062,
+      "sha256": "e964a7be804da4c6f3aba6899ab5c7940344f91a2559c37b067dfe0825b94959"
+    },
+    "project/floors/MT34.js": {
+      "bytes": 4618,
+      "sha256": "1f613aeaf55722da8268eed5723523bf9f7a432523f1d770035654aee3672e3e"
+    },
+    "project/floors/MT15.js": {
+      "bytes": 4109,
+      "sha256": "3f003078219a20184411d2dd728d8acce8d2c5e09d539b826069f93c2e3ee9dd"
+    },
+    "project/floors/MT35.js": {
+      "bytes": 5204,
+      "sha256": "85aeeebd4a20d8ec37052562b82f8f336fd1a4a8613104c53c851161b0169a9a"
+    },
+    "project/floors/MT36.js": {
+      "bytes": 2493,
+      "sha256": "8c584f03108880c6f086dcc59f56254eb8b754939eeaa9278ed34bd0bcca80cd"
+    },
+    "project/floors/MT37.js": {
+      "bytes": 2491,
+      "sha256": "a6bf99ee3cfbeacbd3c774e11d66b98ce9dc4f22f2cdd32a42ec8f0383bfeb8d"
+    },
+    "project/floors/MT40.js": {
+      "bytes": 10819,
+      "sha256": "01e25bbdc243fafc7f793b6456cb8f7b5c191832d6657adb00d824701898dae6"
+    },
+    "project/floors/MT41.js": {
+      "bytes": 6237,
+      "sha256": "10325739ceaa2e915e86af23da6cde0d48d43929f4c243048cace9f7bf384b07"
+    },
+    "project/floors/MT38.js": {
+      "bytes": 3715,
+      "sha256": "643a6199da4796585bd93288a5878224123d41115e3de2fd100bd63e081652d5"
+    },
+    "project/floors/MT39.js": {
+      "bytes": 3615,
+      "sha256": "f4316ced1436f36c5c6cd16c7c37c4710aac99751eaf9016723419b13dd47663"
+    },
+    "project/floors/MT42.js": {
+      "bytes": 6171,
+      "sha256": "5faedda60add14c32b9aea832a63fa1cba20c0d1aed26d22acef5733351fc01c"
+    },
+    "project/floors/MT43.js": {
+      "bytes": 7754,
+      "sha256": "5c525352be577a408d2c0c3fae8741c19d0d55bb896975319d8730eb17430bb4"
+    },
+    "project/floors/MT46.js": {
+      "bytes": 2752,
+      "sha256": "efb25dd36c0fccf1d8b96db4be42fb622996dbfe8b3bcb852368360ad8d9eb52"
+    },
+    "project/floors/MT44.js": {
+      "bytes": 3568,
+      "sha256": "0356ab74e169aaa6d2e4f9cf3c18a272343592a88f06b84d3e84ef74e065c6ab"
+    },
+    "project/floors/MT45.js": {
+      "bytes": 5020,
+      "sha256": "17e6e5eee556016603130fcc1d64b3d53f044bf781ea86643ea71b1d05ac83ff"
+    },
+    "project/floors/MT47.js": {
+      "bytes": 3310,
+      "sha256": "bd0d5a7eca729b52d9a8486432795a891cc1dfabbf621100d4dd9226594e5c2f"
+    },
+    "project/floors/MT48.js": {
+      "bytes": 2493,
+      "sha256": "3c5705cc523f810bb0e567bfb522e73dcd51b4d50042cf655f79a39eb9788113"
+    },
+    "project/floors/MT49.js": {
+      "bytes": 13720,
+      "sha256": "da283d5b1d2131b38b38fe3e79ad421354caf93e6e35e350f0b90bd178c8628c"
+    },
+    "project/floors/MT50.js": {
+      "bytes": 29372,
+      "sha256": "d5339ebc1a8f4ff17c864e465b4454c733c08c34ee6ab082b19c49fbc91ce25c"
+    },
+    "project/materials/npcs.png": {
+      "bytes": 16694,
+      "sha256": "1bdcab53ed26088413bb49fd9868f71a0273ddaaa2e33ca57090fda2c2a53855"
+    },
+    "project/materials/terrains.png": {
+      "bytes": 25518,
+      "sha256": "73cedcddd99983dfbfc93a63d605c92829c66a13e2d8eb61143d7329b8939985"
+    },
+    "project/materials/enemys.png": {
+      "bytes": 70484,
+      "sha256": "bc116a3451f297d93662cbe9ca43891cddffc9d7f3d2c8c86d414bb37dfe0963"
+    },
+    "project/materials/enemy48.png": {
+      "bytes": 9801,
+      "sha256": "b05dc42b41b74b2f959b03da81cde761144bb2da764d6643e4246beeeebd0710"
+    },
+    "project/materials/npc48.png": {
+      "bytes": 9560,
+      "sha256": "5e116fd4c5a09924f44c4d5f2af08fb651a49fc8a71a418851fc566843e5108a"
+    },
+    "project/materials/items.png": {
+      "bytes": 46676,
+      "sha256": "72b8a785523ed98d457611ee5e904904e8fe0ac7ca3358099f7305ea1d17b4ce"
+    },
+    "project/images/85.png": {
+      "bytes": 1501,
+      "sha256": "c7649fba291f083be6011864e6e65cef638dffc5467d04252bf5fc44e010c34b"
+    },
+    "project/images/bg.jpg": {
+      "bytes": 24684,
+      "sha256": "8b12ad809ed4f53f26f90b74c181d3ebf1d82765b195bfa4d61c3a602b2a8eb7"
+    },
+    "project/images/dragon.png": {
+      "bytes": 8662,
+      "sha256": "645b094695aa0a536baeccdc8b06b957cc07269cb1a986172e9e3b380a7ba845"
+    },
+    "project/images/bear.png": {
+      "bytes": 14068,
+      "sha256": "a10ff26b957c8797283b83cb4a45baf180e1329e3618ca4f37c765dd58ea1097"
+    },
+    "project/images/hero.png": {
+      "bytes": 10466,
+      "sha256": "6c8e0152ae3886231da569f67ca21c996c2268c5ce50e8cf35c849c0e13cf398"
+    },
+    "project/images/winskin.png": {
+      "bytes": 4937,
+      "sha256": "14a85abffc0f1f82be4be944459f6533431b31bb9893d9a915421f1cc5d09f1d"
+    },
+    "project/images/statusBackground.png": {
+      "bytes": 29752,
+      "sha256": "6387350bd1ad3e05c2bd7248746cc90e0949338ab1c707ee4b98d6a55a9a2508"
+    },
+    "project/materials/icons.png": {
+      "bytes": 23411,
+      "sha256": "e813e471f334e548e8597b2871350a54d904b2df580229ffa7b6daef2c4e7274"
+    },
+    "project/tilesets/magictower.png": {
+      "bytes": 83,
+      "sha256": "b0775cba09eadf2fde241b35daa28cdcd03af6d23e99e0decd32b42f13f6d220"
+    },
+    "project/images/statusBackground_vertical.png": {
+      "bytes": 16073,
+      "sha256": "d21c723965691244f2bf8a1a3d04b458d3daf48afe635eec21440ab1947783ec"
+    },
+    "project/animates/hand.animate": {
+      "bytes": 11624,
+      "sha256": "e2a9e70d0ebb4693d7ccc5a09ff087264210260ce218bb7782d02fbfa7aec0b1"
+    },
+    "project/animates/sword.animate": {
+      "bytes": 1751,
+      "sha256": "594ee0581ea755d29498e5c69735f9d0db46c604aed7e74dc616d6b834f90d18"
+    },
+    "project/animates/zone.animate": {
+      "bytes": 29250,
+      "sha256": "7757bba3655501dbfae86ffceb353e28fa44e7cf127cc308dd7581ff1beff254"
+    },
+    "project/materials/animates.png": {
+      "bytes": 32874,
+      "sha256": "74dfff8d0a7d69ca769b691957bee835a5758db8a6963824f9bcb240640fd596"
+    },
+    "project/bgms/44f.mp3": {
+      "bytes": 264721,
+      "sha256": "308b1e597adced2d14ee3de98b4dfd741dc16c84af4825aa74b718bd1cab9a0e"
+    },
+    "libs/control.js": {
+      "bytes": 144518,
+      "sha256": "190f592206aca25cdee5ee930e905ff705a5fa497f33452d68c8fd096357e2fb"
+    },
+    "project/bgms/Ending.mp3": {
+      "bytes": 1903893,
+      "sha256": "2a19564dad0bdfce08492db62e2df9cef72e4394d9841b62676272648bff7013"
+    },
+    "project/bgms/LastFight.mp3": {
+      "bytes": 1129177,
+      "sha256": "9393ee07cf76288c3182ed7162549c66bd5bcfe77f2ca7b3460bec611d569685"
+    },
+    "project/bgms/0f.mp3": {
+      "bytes": 2237977,
+      "sha256": "ccf676d6dbddca210a37b11c1488834cd356355f0924e6b25fd1a18918011b89"
+    },
+    "project/bgms/GameOver.mp3": {
+      "bytes": 2312859,
+      "sha256": "c62a1151bf52c6af325f197e63b07406d3e881e3529051986ef3dfb4c5da92c3"
+    },
+    "project/bgms/Zeno.mp3": {
+      "bytes": 1325011,
+      "sha256": "2315cc3f3cba3e72b108326577d8d81f8ceb3ff140be26cd153ff8148211d219"
+    },
+    "project/bgms/section2.mp3": {
+      "bytes": 1007260,
+      "sha256": "4441fff05f5e06a161bc6f774c6ea313d153ddb21b272abfc913aadb5d875b97"
+    },
+    "project/bgms/section3.mp3": {
+      "bytes": 1393188,
+      "sha256": "2ef99e69a1e124d68fe51b8732e8c42e0cad70ffcc4653cae767b1542279b7d0"
+    },
+    "project/sounds/floor.mp3": {
+      "bytes": 1879,
+      "sha256": "68b2d207b6db7602df7cbe90d45ef9107e960805c93df829d0f70e020d534b05"
+    },
+    "project/sounds/attack.mp3": {
+      "bytes": 5478,
+      "sha256": "3bc128c8093c2f746f73aa6bd641d30ce20a913971b574e5b603bceb1b5010f4"
+    },
+    "project/sounds/door.mp3": {
+      "bytes": 5895,
+      "sha256": "9361a10b8a209ebdb5b55d86d8b56995416c2e0f58ff5813751e339c7e632fe5"
+    },
+    "project/sounds/item.mp3": {
+      "bytes": 6314,
+      "sha256": "711b17772f2892ce9372d3e9b778dae9e4f78d8fc0b3c16172e91d78a43cb10f"
+    },
+    "project/sounds/equip.mp3": {
+      "bytes": 8508,
+      "sha256": "843d05ea4924db78b9a2c5e1bd23110ac7813d17f9a08b2423ce35f5ae673ee6"
+    },
+    "project/sounds/zone.mp3": {
+      "bytes": 5896,
+      "sha256": "ccd5e3a23d1962983ecba3ee7a6062a174ba6ef5b6c884e21184b6c2cfdbe2f3"
+    },
+    "project/sounds/jump.mp3": {
+      "bytes": 5895,
+      "sha256": "98b2141f681cb50c500964e04cb6ac7d030b039fe4f98ff76c378397aef49096"
+    },
+    "project/sounds/pickaxe.mp3": {
+      "bytes": 3180,
+      "sha256": "37b2ff08ff489f2dc293d173f028e33a5cdf7da734d23c9816551f8689af6ff6"
+    },
+    "project/sounds/bomb.mp3": {
+      "bytes": 4329,
+      "sha256": "fcc44471c527f0711a643e44168ae591dd7f79496729563d2912db37f8b02e7d"
+    },
+    "project/sounds/centerFly.mp3": {
+      "bytes": 4329,
+      "sha256": "98ecf6a49323e9a023251b7ddbd42fd476b9499c238dc9c760488c40542158da"
+    },
+    "project/sounds/3F.mp3": {
+      "bytes": 103280,
+      "sha256": "671b4ba75f413ad12eb9a37e586743c49dd81ac3729145403a7aecde1e776a89"
+    },
+    "project/sounds/10F.mp3": {
+      "bytes": 67336,
+      "sha256": "23614c715e3b1fe5dcccb895449dc32753b661f3415af2453193d2e29232e726"
+    },
+    "project/sounds/20F.mp3": {
+      "bytes": 155107,
+      "sha256": "88a8fdea1d2628aba26012bb2b5b2632255c8e31f2a3d5f12230593cea42dbd8"
+    },
+    "project/bgms/section5.mp3": {
+      "bytes": 1178137,
+      "sha256": "b604d63a4b69a9d5beeb1ac3c402232387647d18186ebeaea115688713b89b1f"
+    },
+    "project/bgms/section4.mp3": {
+      "bytes": 2062303,
+      "sha256": "9035771487d8399d88d94c0c2b6f9f134f57fb85a0aac12be5936bd2e0912333"
+    },
+    "project/bgms/section1.mp3": {
+      "bytes": 2009502,
+      "sha256": "36f86270c0d63640c110c0e1f8e5a7a307b94943ff4a02e97ac6b44d78c10df9"
+    },
+    "project/bgms/Knight.mp3": {
+      "bytes": 1157019,
+      "sha256": "c45f34b9e412c3b3bc66c58513a67502e0f24ea910f3e947453710ba351e3acf"
+    },
+    "project/bgms/Princess.mp3": {
+      "bytes": 2129503,
+      "sha256": "37ded6620e8db4bf164ce4b35829cebe3eeacf05d127ed52420b040431e12d52"
+    }
+  }
+}

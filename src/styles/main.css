@@ -345,10 +345,11 @@ button:disabled{cursor:not-allowed}
 .work-status-rail .rail-almanac-yiji>span:last-child>i{background:color-mix(in srgb,var(--danger) 12%,transparent)}
 .work-status-rail .rail-almanac-yiji>span>em{min-width:0;color:var(--muted);font-style:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .work-status-rail .rail-rest{padding:10px 0 0;border-bottom:0}
-.rail-rest-card{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));justify-items:center;gap:10px 12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+.rail-rest-card{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));justify-items:center;gap:10px 12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
 .rail-rest-card .rail-rest-game{width:42px;height:42px;min-height:0;padding:5px;border-radius:12px;color:var(--game-accent);background:color-mix(in srgb,var(--game-accent) 10%,var(--surface));border:1px solid color-mix(in srgb,var(--game-accent) 18%,var(--line));transition:background .15s,border-color .15s}
 .rail-rest-card .rail-rest-game:hover{background:color-mix(in srgb,var(--game-accent) 20%,var(--surface));border-color:var(--game-accent)}
 .rail-rest-game:focus-visible,.rail-almanac-link:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
+.rail-rest-archery{--game-accent:var(--warning)}.rail-rest-defense{--game-accent:var(--success)}
 .rail-rest-game .rest-game-icon{display:block;width:30px;height:30px}
 .rail-rest-wiring{--game-accent:#b5a0ff}.rail-rest-breakout{--game-accent:#77bafa}.rail-rest-tower{--game-accent:#edbc70}.rail-rest-mota{--game-accent:#66d1d5}.rail-rest-sokoban{--game-accent:#d5a278}.rail-rest-gomoku{--game-accent:var(--text)}
 :root[data-theme="warm"] .rail-rest-wiring{--game-accent:#7f61b9}:root[data-theme="warm"] .rail-rest-breakout{--game-accent:#3378ab}:root[data-theme="warm"] .rail-rest-tower{--game-accent:#996515}:root[data-theme="warm"] .rail-rest-mota{--game-accent:#21818b}:root[data-theme="warm"] .rail-rest-sokoban{--game-accent:#a16c42}

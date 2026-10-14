@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import type { RestGameId } from "../../utils/rest/catalog";
 import GameDialog from "./GameDialog.vue";
-import WiringGame from "./WiringGame.vue";
-import BreakoutGame from "./BreakoutGame.vue";
-import TowerGame from "./TowerGame.vue";
-import MotaGame from "./MotaGame.vue";
+import WiringGame from "./WiringAdventure.vue";
+import BreakoutGame from "./BreakoutAdventure.vue";
+import TowerGame from "./TowerAdventure.vue";
+import MotaVersions from "./MotaVersions.vue";
 import SokobanGame from "./SokobanGame.vue";
 import GomokuGame from "./GomokuGame.vue";
+import ArcheryGame from "./ArcheryGame.vue";
+import DefenseGame from "./DefenseGame.vue";
 import "../../styles/rest.css";
 
 defineProps<{ game: RestGameId }>();
 defineEmits<{ close: [] }>();
-const components = { wiring: WiringGame, breakout: BreakoutGame, tower: TowerGame, mota: MotaGame, sokoban: SokobanGame, gomoku: GomokuGame };
+const components = { wiring: WiringGame, breakout: BreakoutGame, tower: TowerGame, mota: MotaVersions, sokoban: SokobanGame, gomoku: GomokuGame, archery:ArcheryGame, defense:DefenseGame };
 </script>
 
 <template>

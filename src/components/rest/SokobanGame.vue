@@ -1,10 +1,29 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, onBeforeUnmount } from "vue";
+import CampaignToolbar from './CampaignToolbar.vue';
+import { createProgress, validProgress, finishLevel } from '../../utils/rest/progression';
 import { useGameSave } from "../../composables/useGameSave";
-import { createSokobanState, getSokobanBoard, moveSokoban, nextSokobanLevel, restartSokobanLevel, SOKOBAN_LEVELS, undoSokoban, validateSokobanState, type SokobanDirection, type SokobanState } from "../../utils/rest/sokoban";
+import { createSokobanState, getSokobanBoard, moveSokoban, nextSokobanLevel, restartSokobanLevel, SOKOBAN_LEVELS, undoSokoban, validateSokobanState, migrateSokoban, sokobanDeadlock, type SokobanDirection, type SokobanState } from "../../utils/rest/sokoban";
 
 const props = defineProps<{ paused: boolean }>();
-const { state, best, save, recordScore, restart: resetSave, storageError } = useGameSave<SokobanState>("sokoban", createSokobanState, validateSokobanState);
+const { state, best, save, recordScore, restart: resetSave, storageError } = useGameSave<SokobanState>("sokoban", createSokobanState, validateSokobanState, migrateSokoban);
+const progress = useGameSave('sokoban-progress', () => createProgress(80), value => validProgress(value, 80));
+progress.state.value.unlocked = Math.max(progress.state.value.unlocked, state.value.level);
+state.value.awards.forEach((award, index) => { if (award) { progress.state.value.stars[index] ||= 1; progress.state.value.unlocked = Math.max(progress.state.value.unlocked, Math.min(79, index + 1)); } });
+const hintMessage = ref(''), solving = ref(false);
+let worker: Worker | null = null;
+function cancelHint() { worker?.terminate(); worker = null; solving.value = false; }
+onBeforeUnmount(cancelHint);
+const deadlocked = computed(() => sokobanDeadlock(board.value, state.value.boxes));
+function hint() {
+  if (props.paused || solving.value || state.value.completed) return;
+  solving.value = true; state.value.hints = (state.value.hints || 0) + 1; save();
+  worker = new Worker(new URL('../../utils/rest/sokobanSolver.worker.ts', import.meta.url), { type: 'module' });
+  worker.onmessage = event => { if (!props.paused) hintMessage.value = event.data?.length ? `下一步：${({ up: '↑ 上', right: '→ 右', down: '↓ 下', left: '← 左' } as Record<string,string>)[event.data[0]]}` : '暂未找到路线，可以撤销最近几步或重开本关。'; cancelHint(); };
+  worker.onerror = () => { hintMessage.value = '提示暂不可用，可以继续游玩或撤销。'; cancelHint(); };
+  worker.postMessage({ board: JSON.parse(JSON.stringify(board.value)), state: JSON.parse(JSON.stringify(state.value)) });
+}
+function selectLevel(level: number) { if (!props.paused && level <= progress.state.value.unlocked) update(restartSokobanLevel({ ...state.value, level })); }
 const gameElement = ref<HTMLElement | null>(null);
 const board = computed(() => getSokobanBoard(state.value.level));
 const cells = computed(() => Array.from({ length: board.value.width * board.value.height }, (_, index) => ({ index, wall: board.value.walls.includes(index), goal: board.value.goals.includes(index), box: state.value.boxes.includes(index), player: state.value.player === index })));
@@ -17,7 +36,8 @@ const controls: { direction: SokobanDirection; arrow: string; name: string }[] =
 function update(next: SokobanState) {
   if (props.paused || next === state.value) return;
   state.value = next;
-  if (next.completed) recordScore(next.score);
+  cancelHint(); hintMessage.value = '';
+  if (next.completed) { recordScore(next.score); finishLevel(progress.state.value, next.level, next.hints ? 1 : next.moves <= Math.max(20, SOKOBAN_LEVELS[next.level].solution.length) ? 3 : 2, next.moves); progress.save(); }
   save();
   gameElement.value?.focus();
 }
@@ -40,6 +60,7 @@ defineExpose({ restart });
 
 <template>
   <div class="sokoban-game">
+    <CampaignToolbar mode="campaign" :modes="[{ id: 'campaign', name: '八章仓库' }]" :level="state.level" :levels="SOKOBAN_LEVELS" :stars="progress.state.value.stars" :unlocked="progress.state.value.unlocked" :disabled="paused" @select="selectLevel" />
     <div class="game-stats"><span>总分 <b>{{ state.score }}</b></span><span>最高 <b>{{ best }}</b></span><span>关卡 <b>{{ state.level + 1 }}/{{ SOKOBAN_LEVELS.length }}</b></span></div>
     <div class="sokoban-readout"><span>{{ SOKOBAN_LEVELS[state.level].name }} · 就位 {{ parked }}/{{ board.goals.length }}</span><span>{{ state.moves }} 步 · {{ state.pushes }} 次推动</span></div>
     <div ref="gameElement" class="game-surface sokoban-board" :style="{ gridTemplateColumns: `repeat(${board.width}, minmax(0, 1fr))` }" tabindex="0" data-game-focus aria-label="推箱子棋盘，用方向键或 WASD 移动，Z 撤销" @keydown="onKeydown">
@@ -49,10 +70,10 @@ defineExpose({ restart });
         <svg v-if="cell.player" class="sokoban-player" viewBox="0 0 40 40"><circle cx="20" cy="20" r="15" /><rect x="10" y="11" width="20" height="15" rx="7" /><path d="M15 18v2m10-2v2M16 31h8" /></svg>
       </div>
     </div>
-    <div class="sokoban-result" aria-live="polite"><template v-if="state.completed"><b>{{ state.level === SOKOBAN_LEVELS.length - 1 ? '六座货舱全部归位！' : '货物全部就位！' }} +{{ state.awards[state.level] }} 分</b></template><span v-else>把每个货箱推到圆形泊位；箱子只能推，不能拉。</span></div>
+    <div class="sokoban-result" aria-live="polite"><template v-if="state.completed"><b>{{ state.level === SOKOBAN_LEVELS.length - 1 ? '八十座货舱全部归位！' : '货物全部就位！' }} +{{ state.awards[state.level] }} 分</b></template><span v-else-if="deadlocked">有箱子卡在非目标墙角了，可撤销或重开本关。</span><span v-else>{{ hintMessage || '把每个货箱推到圆形泊位；箱子只能推，不能拉。' }}</span></div>
     <div class="sokoban-controls">
       <div class="direction-pad"><button v-for="control in controls" :key="control.direction" class="button" :class="`direction-${control.direction}`" :aria-label="control.name" :disabled="paused || state.completed" @click="move(control.direction)">{{ control.arrow }}</button></div>
-      <div class="game-actions"><button class="button" :disabled="paused || !state.history.length" @click="undo">撤销一步</button><button class="button" :disabled="paused" @click="retry">重开本关</button><button v-if="state.completed && state.level < SOKOBAN_LEVELS.length - 1" class="button primary" :disabled="paused" @click="nextLevel">下一关 →</button><button v-else-if="state.completed" class="button primary" :disabled="paused" @click="restart">重新挑战</button></div>
+      <div class="game-actions"><button class="button" :disabled="paused || solving || state.completed" @click="hint">{{ solving ? '寻找路线…' : '路线提示' }}</button><button class="button" :disabled="paused || !state.history.length" @click="undo">撤销一步</button><button class="button" :disabled="paused" @click="retry">重开本关</button><button v-if="state.completed && state.level < SOKOBAN_LEVELS.length - 1" class="button primary" :disabled="paused" @click="nextLevel">下一关 →</button><button v-else-if="state.completed" class="button primary" :disabled="paused" @click="restart">重新挑战</button></div>
     </div>
     <p class="game-help">方向键 / WASD 移动，Z 撤销（保留最近 200 步）。每关 1,000 分，每步扣 5 分，每次推动另扣 10 分，最低 100 分。重开本关会重算本关得分。</p>
     <p v-if="storageError" class="game-help" role="status">本机存档暂时不可用，当前仍可继续游玩。</p>

@@ -11,7 +11,7 @@
 .rest-local-badge { color:var(--muted); display:flex; align-items:center; gap:7px; font-size:11px; }
 .rest-local-badge i { height:6px; width:6px; border-radius:50%; background:var(--success); }
 .rest-selection { max-width:650px; margin:28px auto 0; width:100%; }
-.rest-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+.rest-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
 .rest-card { appearance:none; font:inherit; cursor:pointer; padding:23px 17px 14px; border:1px solid var(--line); border-radius:16px; background:radial-gradient(ellipse at 50% 0%,color-mix(in srgb,var(--game-accent) 8%,transparent),transparent 75%),var(--surface); color:var(--text); display:flex; align-items:center; flex-direction:column; transition:transform .16s,border-color .16s,box-shadow .16s; }
 .rest-card:hover { transform:translateY(-3px); border-color:color-mix(in srgb,var(--game-accent) 55%,var(--line)); box-shadow:var(--shadow); }
 .rest-card:focus-visible, .rest-dialog button:focus-visible, .rest-dialog [tabindex]:focus-visible { outline:2px solid var(--primary); outline-offset:3px; }
@@ -25,6 +25,7 @@
 .rest-backdrop { position:fixed; inset:0; z-index:1500; padding:20px; display:flex; align-items:center; justify-content:center; background:rgba(5,9,18,.65); backdrop-filter:blur(5px); }
 .rest-dialog { width:min(560px,100%); max-height:calc(100dvh - 40px); overflow-y:auto; overscroll-behavior:contain; color:var(--text); background:var(--surface); border:1px solid var(--line); border-radius:18px; box-shadow:0 24px 90px #0005; }
 .rest-dialog.rest-dialog-mota { width:min(760px,100%); }
+.rest-dialog.rest-dialog-wide { width:min(740px,100%); }
 .rest-dialog-header { display:flex; align-items:center; gap:9px; padding:15px 18px; border-bottom:1px solid var(--line); }
 .rest-dialog-mark { color:var(--game-accent); background:color-mix(in srgb,var(--game-accent) 10%,var(--surface)); border-radius:10px; padding:5px; }
 .rest-dialog-mark svg { width:29px; height:29px; }

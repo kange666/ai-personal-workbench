@@ -29,6 +29,8 @@ it("从右栏打开魔塔后，暂停、关闭续开和确认重置共同保持�
   const launcher = wrapper.get<HTMLButtonElement>('[aria-label="打开魔塔"]');
   launcher.element.focus();
   await launcher.trigger("click");
+  await vi.waitFor(() => { expect(document.querySelector('[aria-label="选择魔塔版本"]')).not.toBeNull(); }, { timeout: 4000 });
+  [...document.querySelectorAll<HTMLButtonElement>(".mota-version")].find(item => item.textContent?.includes("经典 21 层"))!.click();
   await vi.waitFor(async () => {
     await flushPromises();
     expect(document.querySelector('script[src*="mota21"]')).not.toBeNull();
@@ -73,6 +75,8 @@ it("从右栏打开魔塔后，暂停、关闭续开和确认重置共同保持�
   expect(document.activeElement).toBe(launcher.element);
 
   await launcher.trigger("click"); await flushPromises();
+  [...document.querySelectorAll<HTMLButtonElement>(".mota-version")].find(item => item.textContent?.includes("经典 21 层"))!.click();
+  await flushPromises();
   expect(createPlayer).toHaveBeenCalledOnce();
   expect(document.querySelector(".mota-player-host")).toBe(host);
   button("重新开始").click(); await nextTick();
