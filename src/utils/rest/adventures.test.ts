@@ -96,12 +96,12 @@ describe('孤塔守夜平衡与规则',()=>{
     for(let n=0;n<40000&&s.wave<4&&s.phase!=='lost';n++){if(s.phase==='choice')pickDefenseCard(s,s.offers[0]!);stepDefense(s,.1);}
     expect(s.wave).toBeGreaterThanOrEqual(4);expect(s.hp).toBeGreaterThan(0);
   });
-  it('选卡冻结计时、存档复现战况，奖励只结算一次；全卡满级能继续无尽',()=>{
+  it('选卡冻结计时、存档复现战况，奖励只结算一次；闯关全卡满级仍可推进',()=>{
     const s=createDefense(71);startDefense(s,createDefenseMeta());for(let i=0;i<200;i++)stepDefense(s,.05);
     const copy=JSON.parse(JSON.stringify(s));for(let i=0;i<200;i++){stepDefense(s,.05);stepDefense(copy,.05);}expect(copy).toEqual(s);
     defenseOffers(s);const before=JSON.stringify(s);stepDefense(s,.1);expect(JSON.stringify(s)).toBe(before);
     const meta=createDefenseMeta();s.phase='won';s.wave=30;settleDefense(s,meta);const shards=meta.shards;settleDefense(s,meta);expect(meta.shards).toBe(shards);s.mode='endless';s.wave=31;s.phase='lost';settleDefense(s,meta);expect(meta.shards).toBe(shards);
-    s.cards=Object.fromEntries(DEFENSE_CARDS.map(c=>[c.id,6]));defenseOffers(s);expect(s.phase).toBe('playing');expect(s.wave).toBe(32);expect(validDefense(s)).toBe(true);
+    s.mode='campaign';s.cards=Object.fromEntries(DEFENSE_CARDS.map(c=>[c.id,6]));defenseOffers(s);expect(s.phase).toBe('playing');expect(s.wave).toBe(32);expect(validDefense(s)).toBe(true);
   });
   it('四个流派的核心升级确实改变能力',()=>{
     const s=createDefense(1),base=defenseStats(s);s.cards={power:2,speed:2,multi:2,health:2,armor:2,regen:2};const stats=defenseStats(s);

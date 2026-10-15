@@ -48,6 +48,31 @@ describe('新增游戏的实际组件交互',()=>{
     const s=createDefense(17);startDefense(s,createDefenseMeta());s.phase='choice';s.offers=['power','speed','multi'];store('defense',s,500);
     wrapper=mount(DefenseGame,{props:{paused:false}});expect(wrapper.findAll('.defense-card')).toHaveLength(3);await advance(100);wrapper.unmount();wrapper=mount(DefenseGame,{props:{paused:false}});expect(read('defense').state.offers).toEqual(['power','speed','multi']);expect(wrapper.text()).toContain('500');
   });
+  it('塔防开局直接选择无尽，续存与重开均保留所选模式',async()=>{
+    wrapper=mount(DefenseGame,{props:{paused:false}});
+    await button('无尽守卫').trigger('click');
+    expect(read('defense').state.mode).toBe('endless'); expect(read('defense').state.phase).toBe('ready');
+    expect(button('无尽守卫').attributes('aria-pressed')).toBe('true');
+    await button('开始守卫').trigger('click'); await advance(35);
+    expect(wrapper.get('.defense-topline').text()).toContain('/ ∞');
+    wrapper.unmount(); const before=read('defense').state;
+    wrapper=mount(DefenseGame,{props:{paused:false}}); await advance(100);
+    expect(read('defense').state).toEqual(before); await button('继续守卫').trigger('click'); await advance(10);
+    expect(read('defense').state.mode).toBe('endless'); expect(validDefense(read('defense').state)).toBe(true);
+    (wrapper.vm as unknown as {restart:()=>void}).restart(); await nextTick();
+    expect(read('defense').state.mode).toBe('endless'); expect(read('defense').state.phase).toBe('ready');
+  });
+  it('塔防旧进度直接转无尽保留选卡，6级以上强化能购买并保存',async()=>{
+    const s=createDefense(17); s.wave=30; s.phase='choice'; s.offers=['power','speed','health']; s.cards={power:6}; s.coins=800;
+    store('defense',s,500); wrapper=mount(DefenseGame,{props:{paused:true}});
+    await button('转为无尽').trigger('click'); expect(read('defense').state.mode).toBe('campaign');
+    await wrapper.setProps({paused:false}); await button('转为无尽').trigger('click');
+    expect(read('defense').state).toEqual({...s,mode:'endless'});
+    expect(wrapper.get('.defense-card').text()).toContain('精研');
+    await wrapper.get('.defense-card').trigger('click');
+    expect(read('defense').state.cards.power).toBe(7); expect(read('defense').state.wave).toBe(31);
+    expect(validDefense(read('defense').state)).toBe(true); expect(read('defense').best).toBe(500);
+  });
 });
 
 describe('扩展玩法、旧进度和章节隔离',()=>{
