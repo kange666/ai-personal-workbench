@@ -41,11 +41,12 @@ describe('新增游戏的实际组件交互',()=>{
     wrapper=mount(DefenseGame,{props:{paused:true}});await button('开始守卫').trigger('click');await advance();expect(wrapper.text()).toContain('开始守卫');
     await wrapper.setProps({paused:false});await button('开始守卫').trigger('click');await button('攻击').trigger('click');expect(read('defense').state.upgrades.attack).toBe(1);await advance(200);expect(validDefense(read('defense').state)).toBe(true);
     await wrapper.setProps({paused:true});const before=read('defense').state.time;await advance(100);wrapper.unmount();expect(read('defense').state.time).toBe(before);
-    wrapper=mount(DefenseGame,{props:{paused:false}});expect(button('继续守卫').exists()).toBe(true);await advance(100);expect(read('defense').state.time).toBe(before);await button('继续守卫').trigger('click');await advance(400);expect(wrapper.findAll('.defense-card')).toHaveLength(3);
-    const wave=read('defense').state.wave;await wrapper.get('.defense-card').trigger('click');expect(read('defense').state.wave).toBe(wave+1);expect(Object.keys(read('defense').state.cards)).toHaveLength(1);
+    wrapper=mount(DefenseGame,{props:{paused:false}});expect(button('继续守卫').exists()).toBe(true);await advance(100);expect(read('defense').state.time).toBe(before);await button('继续守卫').trigger('click');await advance(400);expect(wrapper.findAll('.defense-card')).toHaveLength(0);
+    expect(read('defense').state.pendingUpgrades).toBeGreaterThan(0);await wrapper.get('.defense-strengthen').trigger('click');expect(wrapper.findAll('.defense-card')).toHaveLength(3);
+    const wave=read('defense').state.wave;await wrapper.get('.defense-card').trigger('click');expect(read('defense').state.wave).toBe(wave);expect(Object.keys(read('defense').state.cards)).toHaveLength(1);
   });
   it('塔防卡牌选择关闭重开保持同一组三选一，不会重新抽卡',async()=>{
-    const s=createDefense(17);startDefense(s,createDefenseMeta());s.phase='choice';s.offers=['power','speed','multi'];store('defense',s,500);
+    const s=createDefense(17);startDefense(s,createDefenseMeta());s.phase='choice';s.pendingUpgrades=1;s.choiceResume='playing';s.offers=['power','speed','multi'];store('defense',s,500);
     wrapper=mount(DefenseGame,{props:{paused:false}});expect(wrapper.findAll('.defense-card')).toHaveLength(3);await advance(100);wrapper.unmount();wrapper=mount(DefenseGame,{props:{paused:false}});expect(read('defense').state.offers).toEqual(['power','speed','multi']);expect(wrapper.text()).toContain('500');
   });
   it('塔防开局直接选择无尽，续存与重开均保留所选模式',async()=>{
@@ -63,14 +64,14 @@ describe('新增游戏的实际组件交互',()=>{
     expect(read('defense').state.mode).toBe('endless'); expect(read('defense').state.phase).toBe('ready');
   });
   it('塔防旧进度直接转无尽保留选卡，6级以上强化能购买并保存',async()=>{
-    const s=createDefense(17); s.wave=30; s.phase='choice'; s.offers=['power','speed','health']; s.cards={power:6}; s.coins=800;
+    const s=createDefense(17); s.wave=30; s.phase='choice';s.pendingUpgrades=1;s.choiceResume='playing'; s.offers=['power','speed','health']; s.cards={power:6}; s.coins=800;
     store('defense',s,500); wrapper=mount(DefenseGame,{props:{paused:true}});
     await button('转为无尽').trigger('click'); expect(read('defense').state.mode).toBe('campaign');
     await wrapper.setProps({paused:false}); await button('转为无尽').trigger('click');
     expect(read('defense').state).toEqual({...s,mode:'endless'});
     expect(wrapper.get('.defense-card').text()).toContain('精研');
     await wrapper.get('.defense-card').trigger('click');
-    expect(read('defense').state.cards.power).toBe(7); expect(read('defense').state.wave).toBe(31);
+    expect(read('defense').state.cards.power).toBe(7); expect(read('defense').state.wave).toBe(30);
     expect(validDefense(read('defense').state)).toBe(true); expect(read('defense').best).toBe(500);
   });
 });
@@ -79,10 +80,12 @@ describe('扩展玩法、旧进度和章节隔离',()=>{
   it('五子棋残局只计算实际落子，奖励与最高分一致，重开保留结果',async()=>{
     wrapper=mount(GomokuGame,{props:{paused:false}});await wrapper.get('select').setValue('puzzle');
     expect(wrapper.get('.game-stats').text()).toContain('你的步数 0');
-    const board=wrapper.get('.gomoku-board'),answer=createGomokuPuzzle(0).answer;
+    const board=wrapper.get('.gomoku-board'),solution=createGomokuPuzzle(0).solution;
     vi.spyOn(board.element,'getBoundingClientRect').mockReturnValue({left:0,top:0,width:360,height:360} as DOMRect);
-    await board.trigger('click',{clientX:19+answer%15*23,clientY:19+Math.floor(answer/15)*23});
-    expect(wrapper.get('.game-stats').text()).toContain('你的步数 1');expect(wrapper.get('.game-stats').text()).toContain('本局得分 300');expect(read('gomoku').best).toBe(300);
+    await board.trigger('click',{clientX:19+solution[0]!%15*23,clientY:19+Math.floor(solution[0]!/15)*23});
+    expect(wrapper.get('.game-stats').text()).toContain('你的步数 1');expect(read('gomoku').state.done).toBe(false);
+    for(let i=2;i<solution.length;i+=2){await advance(10);const cell=solution[i]!;await board.trigger('click',{clientX:19+cell%15*23,clientY:19+Math.floor(cell/15)*23});}
+    expect(wrapper.get('.game-stats').text()).toContain('你的步数 3');expect(wrapper.get('.game-stats').text()).toContain('本局得分 300');expect(read('gomoku').best).toBe(300);
     wrapper.unmount();wrapper=mount(GomokuGame,{props:{paused:false}});expect(wrapper.get('.game-stats').text()).toContain('本局得分 300');expect(wrapper.text()).toContain('解题成功');
   });
   it('叠塔响应空格，Vue 状态可复制回退，暂停禁止道具和落下',async()=>{

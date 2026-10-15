@@ -971,6 +971,7 @@ pub fn run() {
             ai::save_deepseek_key,
             ai::clear_deepseek_key,
             ai::test_deepseek,
+            ai::gomoku_deepseek_move,
             ai::translate_text,
             ai::translate_error,
             ai::refine_report_with_ai,

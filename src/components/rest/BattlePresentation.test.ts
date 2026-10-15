@@ -91,14 +91,28 @@ describe('轻量战斗画面和输入', () => {
     expect(read('defense').state).not.toHaveProperty('effects');
     expect(validDefense(read('defense').state)).toBe(true);
   });
-  it('选卡时原地暂停，升级反馈可结束，选择后只推进一波', async () => {
-    const s = createDefense(17); s.phase = 'choice'; s.offers = ['power','speed','multi'];
+  it('选卡时原地暂停，升级反馈可结束，选择后恢复同一波战斗', async () => {
+    const s = createDefense(17); s.phase = 'choice';s.pendingUpgrades=1;s.choiceResume='playing'; s.offers = ['power','speed','multi'];
     store('defense', s); wrapper = mount(DefenseGame, { props: { paused: false } });
     expect(loop.paused()).toBe(true); expect(wrapper.findAll('.defense-card')).toHaveLength(3);
     await wrapper.get('.defense-upgrades button').trigger('click'); await advance(20);
     expect(loop.paused()).toBe(true); expect(read('defense').state.phase).toBe('choice');
     await wrapper.get('.defense-card').trigger('click');
-    expect(read('defense').state.wave).toBe(2); expect(read('defense').state.cards.power).toBe(1);
+    expect(read('defense').state.wave).toBe(1); expect(read('defense').state.cards.power).toBe(1);expect(read('defense').state.pendingUpgrades).toBe(0);
+  });
+  it('主动打开强化、免费刷新、暂存再打开与选卡消费均可实际点击', async () => {
+    const s=createDefense(17);startDefense(s,createDefenseMeta());s.pendingUpgrades=4;
+    store('defense',s);wrapper=mount(DefenseGame,{props:{paused:false}});
+    await button('继续守卫').trigger('click');await wrapper.get('.defense-strengthen').trigger('click');
+    expect(wrapper.findAll('.defense-card')).toHaveLength(3);expect(loop.paused()).toBe(true);
+    const coins=read('defense').state.coins;
+    for(let n=0;n<12;n++)await button('刷新三选一').trigger('click');
+    expect(read('defense').state.coins).toBe(coins);expect(read('defense').state.pendingUpgrades).toBe(4);
+    expect(wrapper.get('.defense-card span').text().length).toBeGreaterThan(25);
+    const offers=read('defense').state.offers;await button('暂不选择').trigger('click');expect(read('defense').state.phase).toBe('playing');
+    await wrapper.get('.defense-strengthen').trigger('click');expect(read('defense').state.offers).toEqual(offers);
+    await wrapper.get('.defense-card').trigger('click');expect(read('defense').state.pendingUpgrades).toBe(3);
+    expect(read('defense').state.phase).toBe('playing');expect(read('defense').state.wave).toBe(s.wave);
   });
 });
 

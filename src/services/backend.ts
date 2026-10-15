@@ -1,6 +1,6 @@
 import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { WorkTask } from "../types/workbench";
-import { invoke } from "./backendRequest";
+import { backgroundRequest, invoke } from "./backendRequest";
 export { backgroundRequest } from "./backendRequest";
 
 export interface DatabaseHealth {
@@ -2086,6 +2086,11 @@ export async function clearDeepSeekKey(): Promise<void> {
 
 export async function testDeepSeek(): Promise<string> {
   return invoke<string>("test_deepseek");
+}
+
+export interface GomokuAiMove { index: number | null; model: string; notice?: string | null }
+export async function getGomokuDeepSeekMove(board: number[], player: 1 | 2): Promise<GomokuAiMove> {
+  return backgroundRequest(() => invoke<GomokuAiMove>("gomoku_deepseek_move", { board, player }));
 }
 
 export async function translateText(text: string, direction: TranslationDirection): Promise<TranslationCandidate[]> {

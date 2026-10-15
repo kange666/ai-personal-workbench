@@ -2,6 +2,9 @@
 (function () {
     "use strict";
     var channel = "astrion-mota50-v1", ready = false, paused = true;
+    // 上游入口末尾开启了线上压缩包和远程音乐；离线包只包含逐文件脚本和本地音乐。
+    main.useCompress = false;
+    main.bgmRemote = false;
     function send(type, extra) {
         parent.postMessage(Object.assign({ channel: channel, type: type }, extra || {}), location.origin);
     }
@@ -47,6 +50,7 @@
     window.addEventListener("error", function (event) {
         var target = event.target;
         if (target && (target.tagName === "SCRIPT" || target.tagName === "IMG")) send("error", { message: "本地游戏资源加载失败，请重新加载。" });
+        if (!ready && event.message) send("error", { message: "初始化异常：" + event.message });
     }, true);
 
     var loadJs = main.loadJs;

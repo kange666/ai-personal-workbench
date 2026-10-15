@@ -70,6 +70,7 @@ describe('孤塔守夜平衡与规则',()=>{
     const s=createDefense(seed),meta=createDefenseMeta();startDefense(s,meta);
     const purchases=['attack','rate','attack','range','health','rate','regen','income'] as const;let buy=0;
     for(let n=0;n<220000&&!['won','lost'].includes(s.phase);n++){
+      if(s.pendingUpgrades>0&&s.phase==='playing')defenseOffers(s);
       if(s.phase==='choice'){
         const preferred=s.offers.find(id=>DEFENSE_CARDS.find(c=>c.id===id)?.family===family)||s.offers.find(id=>['power','speed','multi','blast','chain','health'].includes(id))||s.offers[0]!;
         pickDefenseCard(s,preferred);
@@ -82,7 +83,7 @@ describe('孤塔守夜平衡与规则',()=>{
   };
   it('36 张强化无重复，三选一不会出现缺少基础能力的空效果卡',()=>{
     expect(new Set(DEFENSE_CARDS.map(c=>c.id)).size).toBe(36);
-    const s=createDefense(5);s.wave=5;defenseOffers(s);expect(s.offers.some(id=>['radius','links','inferno','freeze','storm'].includes(id))).toBe(false);
+    const s=createDefense(5);s.wave=5;s.phase='playing';s.pendingUpgrades=1;defenseOffers(s);expect(s.offers.some(id=>['radius','links','inferno','freeze','storm'].includes(id))).toBe(false);
     const before=JSON.stringify(s);expect(pickDefenseCard(s,'invalid')).toBe(false);expect(JSON.stringify(s)).toBe(before);
     const clone=JSON.parse(before);expect(pickDefenseCard(s,s.offers[0]!)).toBe(true);pickDefenseCard(clone,clone.offers[0]);expect(clone).toEqual(s);
   });
@@ -93,24 +94,24 @@ describe('孤塔守夜平衡与规则',()=>{
   },30000);
   it('不升级也能度过前三波，后期需要选择强化与升级',()=>{
     const s=createDefense(11);startDefense(s,createDefenseMeta());
-    for(let n=0;n<40000&&s.wave<4&&s.phase!=='lost';n++){if(s.phase==='choice')pickDefenseCard(s,s.offers[0]!);stepDefense(s,.1);}
+    for(let n=0;n<40000&&s.wave<4&&s.phase!=='lost';n++){if(s.pendingUpgrades&&s.phase==='playing')defenseOffers(s);if(s.phase==='choice')pickDefenseCard(s,s.offers[0]!);stepDefense(s,.1);}
     expect(s.wave).toBeGreaterThanOrEqual(4);expect(s.hp).toBeGreaterThan(0);
   });
   it('选卡冻结计时、存档复现战况，奖励只结算一次；闯关全卡满级仍可推进',()=>{
     const s=createDefense(71);startDefense(s,createDefenseMeta());for(let i=0;i<200;i++)stepDefense(s,.05);
     const copy=JSON.parse(JSON.stringify(s));for(let i=0;i<200;i++){stepDefense(s,.05);stepDefense(copy,.05);}expect(copy).toEqual(s);
-    defenseOffers(s);const before=JSON.stringify(s);stepDefense(s,.1);expect(JSON.stringify(s)).toBe(before);
+    s.pendingUpgrades=1;defenseOffers(s);const before=JSON.stringify(s);stepDefense(s,.1);expect(JSON.stringify(s)).toBe(before);
     const meta=createDefenseMeta();s.phase='won';s.wave=30;settleDefense(s,meta);const shards=meta.shards;settleDefense(s,meta);expect(meta.shards).toBe(shards);s.mode='endless';s.wave=31;s.phase='lost';settleDefense(s,meta);expect(meta.shards).toBe(shards);
-    s.mode='campaign';s.cards=Object.fromEntries(DEFENSE_CARDS.map(c=>[c.id,6]));defenseOffers(s);expect(s.phase).toBe('playing');expect(s.wave).toBe(32);expect(validDefense(s)).toBe(true);
+    s.mode='campaign';s.phase='playing';delete s.choiceResume;s.pendingUpgrades=1;s.cards=Object.fromEntries(DEFENSE_CARDS.map(c=>[c.id,6]));defenseOffers(s);expect(s.phase).toBe('playing');expect(s.wave).toBe(31);expect(s.pendingUpgrades).toBe(0);expect(validDefense(s)).toBe(true);
   });
   it('四个流派的核心升级确实改变能力',()=>{
     const s=createDefense(1),base=defenseStats(s);s.cards={power:2,speed:2,multi:2,health:2,armor:2,regen:2};const stats=defenseStats(s);
     expect(stats.damage).toBeGreaterThan(base.damage);expect(stats.rate).toBeGreaterThan(base.rate);expect(stats.multi).toBe(3);expect(stats.maxHP).toBeGreaterThan(base.maxHP);expect(stats.armor).toBeGreaterThan(0);expect(stats.regen).toBeGreaterThan(base.regen);
   });
-  it('守住当前波进入选卡后立即记录该波，未守住的下一波不提前计算',()=>{
-    const s=createDefense(81),meta=createDefenseMeta();s.phase='choice';s.wave=1;settleDefense(s,meta);expect(meta.bestWave).toBe(1);
-    s.phase='playing';s.wave=2;settleDefense(s,meta);expect(meta.bestWave).toBe(1);
-    s.phase='choice';settleDefense(s,meta);expect(meta.bestWave).toBe(2);
+  it('自动推进下一波与主动选卡都只记录已经守住的波数',()=>{
+    const s=createDefense(81),meta=createDefenseMeta();s.phase='playing';s.wave=1;settleDefense(s,meta);expect(meta.bestWave).toBe(0);
+    s.wave=2;s.pendingUpgrades=1;settleDefense(s,meta);expect(meta.bestWave).toBe(1);
+    defenseOffers(s);settleDefense(s,meta);expect(meta.bestWave).toBe(1);
   });
 });
 
@@ -176,14 +177,14 @@ describe('五子棋降低默认强度与三十道练习',()=>{
     expect(createGomokuSession().difficulty).toBe('relaxed');const s=createGomoku();placeGomoku(s,112,1);const migrated=migrateGomoku(s)!;expect(migrated.run).toEqual(s);expect(validGomokuSession(migrated)).toBe(true);
     const white=createGomoku(2);expect(placeGomoku(white,112,1)).toBe(true);expect(placeGomoku(white,113,2)).toBe(true);expect(isGomokuState(white)).toBe(true);
   });
-  it('每道练习初始棋局合法且答案满足进攻、防守或双四目标',()=>{
+  it('每道残局棋局合法，必须完成整段杀法才能连成五子',()=>{
     const unique=new Set<string>();expect(GOMOKU_PUZZLES).toHaveLength(30);
-    for(let i=0;i<30;i++){const {run,answer}=createGomokuPuzzle(i);unique.add(run.board.join(''));expect(isGomokuState(run),`第 ${i+1} 题`).toBe(true);expect(run.status).toBe('playing');expect(correctGomokuPuzzle(i,run,answer)).toBe(true);
-      if(i<10){placeGomoku(run,answer,1);expect(run.status).toBe('won');}else if(i<20){const board=[...run.board];board[answer]=2;expect(winningLine(board,answer).length).toBe(5);}else{placeGomoku(run,answer,1);let wins=0;for(let cell=0;cell<225;cell++)if(!run.board[cell]){run.board[cell]=1;if(winningLine(run.board,cell).length)wins++;run.board[cell]=0;}expect(wins).toBeGreaterThanOrEqual(2);}
+    for(let i=0;i<30;i++){const {run,answer,solution}=createGomokuPuzzle(i);unique.add(run.board.join(''));expect(isGomokuState(run),`第 ${i+1} 题`).toBe(true);expect(run.status).toBe('playing');expect(correctGomokuPuzzle(i,run,answer)).toBe(true);
+      expect(solution.length).toBeGreaterThanOrEqual(5);for(const cell of solution)expect(placeGomoku(run,cell,(run.moves.length%2+1) as 1|2)).toBe(true);expect(run.status).toBe('won');expect(isGomokuState(run)).toBe(true);
     }expect(unique.size).toBe(30);
   });
   it('入门会留下明显防守机会，困难会封堵唯一成五口',()=>{
-    const {run,answer}=createGomokuPuzzle(0);run.board[answer-5]=2;const rng=seeded(14);let misses=0;
+    const run=createGomoku(),answer=109;for(const cell of [105,106,107,108])run.board[cell]=1;const rng=seeded(14);let misses=0;
     for(let i=0;i<100;i++)if(chooseGomokuMove([...run.board],'relaxed',rng)!==answer)misses++;
     expect(misses).toBeGreaterThan(20);expect(chooseGomokuMove(run.board,'hard',rng)).toBe(answer);
   });

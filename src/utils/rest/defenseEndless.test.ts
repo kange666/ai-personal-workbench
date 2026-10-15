@@ -7,7 +7,8 @@ describe('无尽守卫', () => {
     expect(s.mode).toBe('endless'); expect(s.wave).toBe(1);
     s.wave = 30; s.spawnLeft = 0; s.enemies = [];
     stepDefense(s, .1);
-    expect(s.phase).toBe('choice'); expect(s.offers).toHaveLength(3);
+    expect(s.phase).toBe('playing'); expect(s.wave).toBe(31); expect(s.pendingUpgrades).toBe(1);
+    defenseOffers(s); expect(s.offers).toHaveLength(3);
     expect(pickDefenseCard(s, s.offers[0]!)).toBe(true);
     expect(s.wave).toBe(31); expect(s.phase).toBe('playing');
     stepDefense(s, .2); expect(s.enemies.length).toBeGreaterThan(0);
@@ -21,7 +22,7 @@ describe('无尽守卫', () => {
     for (const phase of ['playing', 'choice'] as const) {
       const s = createDefense(91); startDefense(s, createDefenseMeta());
       for (let i = 0; i < 80; i++) stepDefense(s, .1);
-      s.phase = phase; if (phase === 'choice') s.offers = ['power', 'blast', 'speed'];
+      s.phase = phase; if (phase === 'choice') {s.offers = ['power', 'blast', 'speed'];s.pendingUpgrades=1;s.choiceResume='playing';}
       const before = structuredClone(s);
       expect(enterDefenseEndless(s)).toBe(true);
       expect(s).toEqual({ ...before, mode: 'endless' });
@@ -64,7 +65,7 @@ describe('无尽守卫', () => {
   });
 
   it('所有强化牌6级后仍可选择，每次精研继续增伤且存档有效', () => {
-    const s = createDefense(5, 'endless'); s.wave = 50;
+    const s = createDefense(5, 'endless'); s.wave = 50; s.phase='playing';s.pendingUpgrades=81;
     s.cards = Object.fromEntries(DEFENSE_CARDS.map(c => [c.id, 6]));
     const before = defenseStats(s).damage;
     defenseOffers(s);
@@ -85,8 +86,8 @@ describe('无尽守卫', () => {
     const restored = JSON.parse(JSON.stringify(s));
     for (let i = 0; i < 20; i++) { stepDefense(s, .1); stepDefense(restored, .1); }
     expect(restored).toEqual(s); expect(validDefense(restored)).toBe(true);
-    const meta = createDefenseMeta(); s.phase = 'choice'; settleDefense(s, meta);
-    expect(meta.bestWave).toBe(100001); expect(validDefenseMeta(meta)).toBe(true);
+    const meta = createDefenseMeta(); s.pendingUpgrades=1;defenseOffers(s); settleDefense(s, meta);
+    expect(meta.bestWave).toBe(100000); expect(validDefenseMeta(meta)).toBe(true);
     expect(validDefense({ ...s, wave: Infinity })).toBe(false);
     expect(validDefense({ ...s, upgrades: { ...s.upgrades, attack: 1.5 } })).toBe(false);
   });

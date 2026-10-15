@@ -24,6 +24,44 @@ function bridge() {
   vm.runInContext(readFileSync("public/rest/mota50/workbench.js","utf8"),context);
   return {run:code=>vm.runInContext(code,context)};
 }
+it("覆盖上游线上开关后，真实加载器只请求随包脚本并使用本地音乐", () => {
+  const context = vm.createContext({ URL });
+  vm.runInContext(`
+    var window=globalThis, requested=[];
+    var location={origin:'https://test.invalid',href:'https://test.invalid/rest/mota50/index.html'};
+    var parent={postMessage:function(){}};
+    window.addEventListener=function(){};
+    var document={
+      body:{appendChild:function(script){requested.push(script.src)}},
+      getElementById:function(){return {getContext:function(){return {}}}},
+      getElementsByClassName:function(){return []},
+      createElement:function(){return {}},addEventListener:function(){}
+    };
+  `, context);
+  vm.runInContext(readFileSync("public/rest/mota50/main.js","utf8"), context);
+  expect(vm.runInContext("main.useCompress && main.bgmRemote", context)).toBe(true);
+  vm.runInContext(`
+    main.init=function(){
+      main.loadJs('project',main.pureData,function(){});
+      main.loadJs('libs',main.loadList,function(){});
+    };
+    main.listen=function(){};
+  `, context);
+  vm.runInContext(readFileSync("public/rest/mota50/workbench.js","utf8"), context);
+  expect(vm.runInContext("main.bgmRemote", context)).toBe(false);
+  const requested = Array.from(vm.runInContext("requested", context));
+  expect(requested).toHaveLength(21);
+  for (const url of requested) {
+    expect(url).not.toContain(".min.js");
+    expect(readFileSync(`public/rest/mota50/${url.split('?')[0]}`).length, url).toBeGreaterThan(0);
+  }
+});
+it("初始化脚本异常会立即显示错误，避免只停在加载画面等待超时", () => {
+  const b=bridge();
+  b.run("handlers.error({message:'bootstrap failed'});");
+  expect(b.run("notices[0].type")).toBe("error");
+  expect(b.run("notices[0].message")).toBe("初始化异常：bootstrap failed");
+});
 it("只接收同来源父窗口指令，准备好前不运行；恢复、存读档和暂停通知生效", () => {
   const b=bridge();
   b.run("handlers.message({source:parent,origin:location.origin,data:{channel:'astrion-mota50-v1',type:'save'}})");

@@ -161,9 +161,18 @@ pub(crate) async fn complete_with_limit(
     user: &str,
     max_tokens: usize,
 ) -> Result<String, String> {
+    complete_with_timeout(system, user, max_tokens, Duration::from_secs(120)).await
+}
+
+async fn complete_with_timeout(
+    system: &str,
+    user: &str,
+    max_tokens: usize,
+    timeout: Duration,
+) -> Result<String, String> {
     let (key, _) = api_key()?;
     let client = Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(timeout)
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -364,6 +373,140 @@ pub async fn test_deepseek() -> Result<String, String> {
     complete("你只需要确认连接状态。", "请只回复：连接成功").await
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct GomokuAiMove {
+    index: Option<usize>,
+    model: String,
+    notice: Option<String>,
+}
+
+fn validate_gomoku_board(board: &[u8], player: u8) -> Result<(), String> {
+    if board.len() != 225 || board.iter().any(|&stone| stone > 2) || ![1, 2].contains(&player) {
+        return Err("棋盘格式不正确。".to_string());
+    }
+    let black = board.iter().filter(|&&stone| stone == 1).count();
+    let white = board.iter().filter(|&&stone| stone == 2).count();
+    if !((player == 1 && black == white) || (player == 2 && black == white + 1)) {
+        return Err("当前不是 DeepSeek 的回合。".to_string());
+    }
+    for (index, &stone) in board.iter().enumerate().filter(|(_, stone)| **stone != 0) {
+        for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+            let (x, y) = ((index % 15) as i32, (index / 15) as i32);
+            if (0..5).all(|step| {
+                let (nx, ny) = (x + dx * step, y + dy * step);
+                (0..15).contains(&nx)
+                    && (0..15).contains(&ny)
+                    && board[ny as usize * 15 + nx as usize] == stone
+            }) {
+                return Err("棋局已经结束。".to_string());
+            }
+        }
+    }
+    if !board.contains(&0) {
+        return Err("棋盘已满。".to_string());
+    }
+    Ok(())
+}
+
+fn gomoku_prompt(board: &[u8], player: u8) -> String {
+    // 只发送数字棋盘和当前执子，不读取对话、报告或其他工作台数据。
+    let coordinates = |empty: bool| {
+        board
+            .iter()
+            .enumerate()
+            .filter(|(_, stone)| (**stone == 0) == empty)
+            .map(|(index, _)| [index / 15 + 1, index % 15 + 1])
+            .collect::<Vec<_>>()
+    };
+    let occupied = coordinates(false);
+    let empty = coordinates(true);
+    let constraint = if occupied.len() < empty.len() {
+        format!(
+            "以下[行,列]已占用，禁止选择：{}。",
+            serde_json::to_string(&occupied).unwrap()
+        )
+    } else {
+        format!(
+            "仅能选择以下空位[行,列]之一：{}。",
+            serde_json::to_string(&empty).unwrap()
+        )
+    };
+    format!(
+        "15×15无禁手五子棋，先连成五子获胜。你执{player}（1黑、2白），现在轮到你。棋盘按行从上到下、列从左到右排列，0为空、1为黑、2为白：{}。行列坐标均为1到15。{constraint}认真检查所有方向：优先完成自己的五连，其次堵对手的一步成五，再争取活四、双四、四三和双三；兼顾对手威胁和后续进攻。必须选择空位。只输出JSON，例如{{\"row\":8,\"column\":8}}，示例不是推荐落点，不要解释或Markdown。",
+        serde_json::to_string(&board.chunks(15).collect::<Vec<_>>()).unwrap()
+    )
+}
+
+fn parse_gomoku_move(content: &str, board: &[u8]) -> Result<usize, String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Move {
+        row: usize,
+        column: usize,
+    }
+    let text = content.trim();
+    let text = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))
+        .unwrap_or(text)
+        .trim();
+    let text = text.strip_suffix("```").unwrap_or(text).trim();
+    let choice = serde_json::from_str::<Move>(text)
+        .map_err(|_| "DeepSeek 返回的落点格式无效。".to_string())?;
+    if !(1..=15).contains(&choice.row) || !(1..=15).contains(&choice.column) {
+        return Err("DeepSeek 返回的落点超出棋盘。".to_string());
+    }
+    let index = (choice.row - 1) * 15 + choice.column - 1;
+    if board.get(index) != Some(&0) {
+        return Err("DeepSeek 返回的落点已有棋子。".to_string());
+    }
+    Ok(index)
+}
+
+#[tauri::command]
+pub async fn gomoku_deepseek_move(board: Vec<u8>, player: u8) -> Result<GomokuAiMove, String> {
+    validate_gomoku_board(&board, player)?;
+    let mut prompt = gomoku_prompt(&board, player);
+    // 无效落点最多纠正一次；网络失败交给玩家重试，避免自动循环消耗额度。
+    for attempt in 0..2 {
+        let content = complete_with_timeout(
+            "你是五子棋对手。只根据提供的棋盘决定一个合法落点，输出指定JSON。",
+            &prompt,
+            256,
+            Duration::from_secs(30),
+        )
+        .await
+        .map_err(|error| {
+            if error.contains("尚未配置 DeepSeek") {
+                error
+            } else {
+                "DeepSeek 请求失败或超时，请在设置中检查连接后重试。".to_string()
+            }
+        })?;
+        match parse_gomoku_move(&content, &board) {
+            Ok(index) => {
+                return Ok(GomokuAiMove {
+                    index: Some(index),
+                    model: DEEPSEEK_MODEL.to_string(),
+                    notice: None,
+                })
+            }
+            Err(error) if attempt == 0 => prompt.push_str(&format!(
+                "\n上次返回为：{}。该建议无效：{error}不要重复该坐标，请重新检查空位，只返回JSON。",
+                content.chars().take(512).collect::<String>()
+            )),
+            Err(_) => {
+                return Ok(GomokuAiMove {
+                    index: None,
+                    model: DEEPSEEK_MODEL.to_string(),
+                    notice: Some("DeepSeek 未给出合法建议，本步由最高档搜索修正。".to_string()),
+                })
+            }
+        }
+    }
+    unreachable!()
+}
+
 #[tauri::command]
 pub async fn translate_text(
     text: String,
@@ -524,6 +667,79 @@ pub async fn ask_knowledge(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gomoku_checks_board_turns_and_finished_games_before_network() {
+        let mut board = vec![0; 225];
+        assert!(super::validate_gomoku_board(&board, 1).is_ok());
+        assert!(super::validate_gomoku_board(&board, 2).is_err());
+        for invalid in [vec![0; 224], vec![3; 225]] {
+            assert!(super::validate_gomoku_board(&invalid, 1).is_err());
+        }
+        board[112] = 1;
+        assert!(super::validate_gomoku_board(&board, 2).is_ok());
+        assert!(super::validate_gomoku_board(&board, 1).is_err());
+        for i in 0..5 {
+            board[i] = 1;
+        }
+        for i in 15..20 {
+            board[i] = 2;
+        }
+        assert!(super::validate_gomoku_board(&board, 2)
+            .unwrap_err()
+            .contains("结束"));
+        let error =
+            tauri::async_runtime::block_on(super::gomoku_deepseek_move(vec![], 2)).unwrap_err();
+        assert!(error.contains("格式"));
+    }
+
+    #[test]
+    fn gomoku_accepts_only_legal_integer_json_coordinates() {
+        let mut board = vec![0; 225];
+        board[112] = 1;
+        assert_eq!(
+            super::parse_gomoku_move(r#"{"row":1,"column":15}"#, &board).unwrap(),
+            14
+        );
+        assert_eq!(
+            super::parse_gomoku_move("```json\n{\"row\":15,\"column\":1}\n```", &board).unwrap(),
+            210
+        );
+        for content in [
+            r#"{"row":8,"column":8}"#,
+            r#"{"row":0,"column":8}"#,
+            r#"{"row":16,"column":8}"#,
+            r#"{"row":8.5,"column":8}"#,
+            r#"{"row":-1,"column":8}"#,
+            r#"{"row":"8","column":8}"#,
+            r#"{"row":8,"column":9,"extra":"ignore"}"#,
+            "8,9",
+            "",
+            "请下在8,9",
+        ] {
+            assert!(
+                super::parse_gomoku_move(content, &board).is_err(),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn gomoku_prompt_sends_only_numeric_board_and_side() {
+        let mut board = vec![0; 225];
+        board[112] = 1;
+        let prompt = super::gomoku_prompt(&board, 2);
+        assert!(prompt.contains("你执2"));
+        assert!(
+            prompt.contains(&serde_json::to_string(&board.chunks(15).collect::<Vec<_>>()).unwrap())
+        );
+        assert!(prompt.contains("必须选择空位"));
+        assert!(prompt.contains("已占用，禁止选择：[[8,8]]"));
+        let mut dense = vec![1; 225];
+        dense[14] = 0;
+        assert!(super::gomoku_prompt(&dense, 2).contains("仅能选择以下空位[行,列]之一：[[1,15]]"));
+        assert!(!prompt.contains("API Key"));
+        assert!(!prompt.contains("workbench.sqlite3"));
+    }
     use super::{
         error_translation_prompt, knowledge_relevance, normalize_report_summary,
         parse_error_translation, parse_translation_candidates, translate_error, translation_prompt,

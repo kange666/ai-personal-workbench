@@ -1,3 +1,4 @@
+import { searchGomokuExpert } from './gomokuExpert';
 export const GOMOKU_SIZE = 15;
 export type Stone = 0 | 1 | 2;
 export type GomokuStatus = "playing" | "won" | "lost" | "draw";
@@ -83,11 +84,12 @@ function lineValue(board: Stone[], index: number, player: 1 | 2): number {
   return total;
 }
 
-export type GomokuDifficulty = "relaxed" | "normal" | "hard" | "expert";
-export const GOMOKU_DIFFICULTIES = [{id:"relaxed",name:"入门 · 轻松下"},{id:"normal",name:"普通"},{id:"hard",name:"困难"},{id:"expert",name:"高手"}] as const;
-export function chooseGomokuMove(board: Stone[], difficulty: GomokuDifficulty = "hard", random: () => number = Math.random, player: 1 | 2 = 2): number | null {
+export type GomokuDifficulty = "relaxed" | "normal" | "hard" | "expert" | "deepseek";
+export const GOMOKU_DIFFICULTIES = [{id:"relaxed",name:"入门 · 轻松下"},{id:"normal",name:"普通"},{id:"hard",name:"困难"},{id:"expert",name:"高手"},{id:"deepseek",name:"DeepSeek · 最高"}] as const;
+export function chooseGomokuMove(board: Stone[], difficulty: Exclude<GomokuDifficulty, 'deepseek'> = "hard", random: () => number = Math.random, player: 1 | 2 = 2): number | null {
   if (board.length !== 225 || board.every(cell => cell !== 0)) return null;
   if (board.every(cell => cell === 0)) return 112;
+  if (difficulty === 'expert') return searchGomokuExpert(board, player, { timeMs: 300 }).index;
   const candidates: number[] = [];
   board.forEach((stone, index) => {
     if (stone) return;
@@ -120,17 +122,5 @@ export function chooseGomokuMove(board: Stone[], difficulty: GomokuDifficulty = 
   ranked.sort((a,b)=>b.value-a.value);
   if (difficulty === "relaxed") return ranked[Math.min(ranked.length-1,Math.floor(random()*Math.min(9,ranked.length)))]?.index ?? best;
   if (difficulty === "normal" && random() < .25) return ranked[Math.min(2,ranked.length-1)]?.index ?? best;
-  if (difficulty === "expert") {
-    // 对前八个候选预判对手回应；只看邻近空位，避免小窗口下长时间阻塞。
-    let optimum=-Infinity;
-    for (const candidate of ranked.slice(0,8)) {
-      board[candidate.index]=player;
-      let reply=0;
-      for (const index of candidates) if (!board[index]) reply=Math.max(reply,lineValue(board,index,opponent));
-      board[candidate.index]=0;
-      const value=candidate.value-reply*1.1;
-      if (value>optimum) {optimum=value;best=candidate.index;}
-    }
-  }
   return best;
 }

@@ -10,7 +10,8 @@ export function archerPosition(level:number,side:ArcherSide){return {x:side==="p
 export function obstacleAt(obstacle:ArcherObstacle,time:number){return {...obstacle,y:obstacle.y+(obstacle.kind==="moving"?Math.sin(time*1.25)*28:0)};}
 export function createArchery(level=0,seed=Date.now()>>>0):ArcheryState {
   level=clamp(Math.floor(level),0,29);
-  const s:ArcheryState={version:1,mode:'campaign',level,seed,phase:"aim",playerHP:130,enemyHP:80+Math.floor(level/10)*10,enemyMax:80+Math.floor(level/10)*10,wind:0,time:0,aiTime:0,turn:0,angle:48,power:350,kind:"normal",ammo:{normal:999,heavy:3,blast:2,bounce:3},obstacles:[],shot:null,last:"你先手。先试试瞄准辅助，再拉弓。",hits:0,headshots:0,shots:0,score:0,assist:true};
+  const enemyMax=100+Math.floor(level/5)*8;
+  const s:ArcheryState={version:1,mode:'campaign',level,seed,phase:"aim",playerHP:130,enemyHP:enemyMax,enemyMax,wind:0,time:0,aiTime:0,turn:0,angle:48,power:350,kind:"normal",ammo:{normal:999,heavy:3,blast:2,bounce:3},obstacles:[],shot:null,last:"你先手。对手会逐章提高准度，瞄准头部或使用特殊箭更有效。",hits:0,headshots:0,shots:0,score:0,assist:true};
   if(level%5!==0&&level>0)s.obstacles.push({x:290+(level%3)*14,y:238-level%4*12,width:22,height:105+level%4*12,kind:level%5===3?"wood":"stone",hp:2});
   if(level>=10&&level%3===0)s.obstacles.push({x:385,y:230,width:20,height:65,kind:"wood",hp:2});
   if(level>=20){s.obstacles.push({x:215,y:level%2?240:275,width:level%2?14:65,height:level%2?65:12,kind:level%2?"moving":"reflect",hp:2});}
@@ -72,15 +73,16 @@ export function stepArchery(s:ArcheryState,dt:number){
   if(s.phase==="ai"){
     s.aiTime+=dt;if(s.aiTime<.85)return;s.aiTime=0;
     const aim=suggestArcheryAim(s,"enemy");
-    const uncertainty=s.level<10?6:s.level<20?4.5:3.2;
-    shootArchery(s,clamp(aim.angle+(random(s)-.5)*uncertainty*2,15,80),clamp(aim.power+(random(s)-.5)*35,180,450),"enemy","normal");return;
+    // 保留可见误差，但让中后期失误有代价；双方仍使用相同的障碍与风力规则。
+    const uncertainty=s.level<10?3:s.level<20?2:1.4,powerError=s.level<10?18:s.level<20?14:10;
+    shootArchery(s,clamp(aim.angle+(random(s)-.5)*uncertainty*2,15,80),clamp(aim.power+(random(s)-.5)*powerError,180,450),"enemy","normal");return;
   }
   if(s.phase!=="flight"||!s.shot)return;
   const shot=s.shot;const result=travel(s,shot,dt,true);shot.trail.push({x:shot.x,y:shot.y});shot.trail=shot.trail.slice(-50);
   if(!result)return;
   let damage=0;
   if(result.kind==="head"||result.kind==="body"){
-    const head=result.kind==="head";damage=shot.owner==="player"?(head?64:36)+(shot.kind==="heavy"?10:0):(head?31:22);
+    const head=result.kind==="head";damage=shot.owner==="player"?(head?64:36)+(shot.kind==="heavy"?10:0):(head?40+Math.floor(s.level/10)*4:29+Math.floor(s.level/10)*3);
     if(shot.owner==="player"){s.hits++;if(head)s.headshots++;}s.last=head?"漂亮，命中头部！":"命中！";
   }else s.last=result.kind==="wall"?"箭被障碍挡住，试试更高的弧线。":"差一点，再修正角度试试。";
   if(shot.kind==="blast"){

@@ -1,30 +1,54 @@
-import { createGomoku, isGomokuState, placeGomoku, winningLine, type GomokuDifficulty, type GomokuState } from "./gomoku";
-import { createProgress, object, validProgress, type GameProgress } from "./progression";
-export const GOMOKU_PUZZLES = Array.from({length:30},(_,i)=>({name:["一步连五","封住唯一缺口","制造双四"][Math.floor(i/10)]!+` ${i%10+1}`,chapter:["进攻","防守","双重威胁"][Math.floor(i/10)]!}));
+import { createGomoku, isGomokuState, placeGomoku, winningLine, type GomokuDifficulty, type GomokuState } from './gomoku';
+import { GOMOKU_POSITIONS } from './gomokuPuzzles';
+import { createProgress, object, validProgress, type GameProgress } from './progression';
+
+export const GOMOKU_PUZZLES = GOMOKU_POSITIONS.map(position => ({
+  name: position.name, chapter: position.chapter,
+  turns: Math.ceil(position.solution.length / 2),
+  human: (position.moves.length % 2 + 1) as 1 | 2,
+}));
 export function createGomokuPuzzle(index: number) {
-  const i=index%10, kind=Math.floor(index/10), x=3+i%4, y=3+Math.floor(i/4)*3;
-  let black:number[],white:number[],answer:number;
-  if(kind<2) {
-    const line=Array.from({length:4},(_,n)=>y*15+x+n);
-    answer=y*15+x+4;
-    if(kind===0) {black=line;white=[180,182,184,186];}
-    else {white=line;black=[y*15+x-1,0,2,4];}
-  } else {
-    const cx=6+i%3,cy=6+Math.floor(i/3); answer=cy*15+cx;
-    black=[1,2,3].flatMap(n=>[cy*15+cx-n,(cy-n)*15+cx]);white=[195,197,199,201,203,205];
-  }
-  const run=createGomoku();
-  black.forEach((cell,i)=>{placeGomoku(run,cell,1);placeGomoku(run,white[i]!,2);});
-  return {run,answer};
+  const puzzle = GOMOKU_POSITIONS[index] || GOMOKU_POSITIONS[0]!;
+  const run = createGomoku((puzzle.moves.length % 2 + 1) as 1 | 2);
+  for (const cell of puzzle.moves) placeGomoku(run, cell, (run.moves.length % 2 + 1) as 1 | 2);
+  return { run, answer: puzzle.solution[0], solution: [...puzzle.solution] };
 }
-export function correctGomokuPuzzle(index:number, before:GomokuState, move:number) {
-  const {answer}=createGomokuPuzzle(index);
-  if(index>=10) return move===answer;
-  const board=[...before.board];board[move]=1;return winningLine(board,move).length>=5;
+
+/** 提示/电脑参考题解；偏离参考杀法后仍正常对弈，只有实际连五才判通关。 */
+export function gomokuPuzzleContinuation(index: number, run: GomokuState): number | null {
+  const puzzle = GOMOKU_POSITIONS[index];
+  if (!puzzle || run.moves.length < puzzle.moves.length) return null;
+  const reference: readonly number[] = [...puzzle.moves, ...puzzle.solution];
+  if (!run.moves.every((move, i) => reference[i] === move.index)) return null;
+  return reference[run.moves.length] ?? null;
 }
-export interface GomokuSession {version:2;run:GomokuState;difficulty:GomokuDifficulty;mode:"endless"|"puzzle";level:number;done:boolean;hintUsed?:boolean;progress:GameProgress}
-export function createGomokuSession():GomokuSession{return {version:2,run:createGomoku(),difficulty:"relaxed",mode:"endless",level:0,done:false,hintUsed:false,progress:createProgress(30)};}
+export function gomokuPuzzleTurns(index: number, run: GomokuState) {
+  const initial = GOMOKU_POSITIONS[index]?.moves.length || 0;
+  return run.moves.slice(initial).filter(move => move.player === (run.human || 1)).length;
+}
+// 保留给题库检查使用；界面不再以“一步等于预设答案”代替完整解题过程。
+export function correctGomokuPuzzle(index: number, before: GomokuState, move: number) {
+  if (before.board[move] !== 0) return false;
+  if (gomokuPuzzleContinuation(index, before) === move) return true;
+  const board = [...before.board]; board[move] = before.human || 1;
+  return winningLine(board, move).length >= 5;
+}
+
+export interface GomokuSession { version:3; run:GomokuState; difficulty:GomokuDifficulty; mode:'endless'|'puzzle'; level:number; done:boolean; hintUsed?:boolean; progress:GameProgress }
+export function createGomokuSession(): GomokuSession {
+  return { version:3, run:createGomoku(), difficulty:'relaxed', mode:'endless', level:0, done:false, hintUsed:false, progress:createProgress(30) };
+}
 export function validGomokuSession(v:unknown):v is GomokuSession {
-  return object(v)&&v.version===2&&isGomokuState(v.run)&&["relaxed","normal","hard","expert"].includes(v.difficulty as string)&&["endless","puzzle"].includes(v.mode as string)&&Number.isInteger(v.level)&&Number(v.level)>=0&&Number(v.level)<30&&typeof v.done==="boolean"&&(v.hintUsed===undefined||typeof v.hintUsed==="boolean")&&validProgress(v.progress,30);
+  return object(v) && v.version===3 && isGomokuState(v.run) && ['relaxed','normal','hard','expert','deepseek'].includes(v.difficulty as string)
+    && ['endless','puzzle'].includes(v.mode as string) && Number.isInteger(v.level) && Number(v.level)>=0 && Number(v.level)<30
+    && typeof v.done==='boolean' && (v.hintUsed===undefined||typeof v.hintUsed==='boolean') && validProgress(v.progress,30);
 }
-export function migrateGomoku(v:unknown):GomokuSession|null{return isGomokuState(v)?{...createGomokuSession(),run:v}:null;}
+export function migrateGomoku(v:unknown): GomokuSession|null {
+  if (isGomokuState(v)) return { ...createGomokuSession(), run:v };
+  if (!object(v) || v.version!==2 || !validGomokuSession({...v,version:3})) return null;
+  const next = {...v,version:3} as GomokuSession;
+  // 新题库的题目/目标已变更，旧题星级不能冒充新题已解；自由对弈和外层最高分保留。
+  next.progress=createProgress(30); next.level=0; next.done=false; next.hintUsed=false;
+  if (next.mode==='puzzle') next.run=createGomokuPuzzle(0).run;
+  return next;
+}

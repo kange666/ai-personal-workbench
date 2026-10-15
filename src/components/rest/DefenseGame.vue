@@ -2,12 +2,13 @@
 import { computed, nextTick, ref } from 'vue';
 import { useGameSave } from '../../composables/useGameSave';
 import { useGameLoop } from '../../composables/useGameLoop';
-import { createDefense, createDefenseMeta, DEFENSE_CARDS, DEFENSE_UPGRADES, defenseStats, defenseUpgradeCost, enterDefenseEndless, pickDefenseCard, settleDefense, startDefense, stepDefense, upgradeDefense, validDefense, validDefenseMeta, type DefenseEnemy, type DefenseState } from '../../utils/rest/defense';
+import { closeDefenseOffers, createDefense, createDefenseMeta, DEFENSE_CARDS, DEFENSE_UPGRADES, defenseOffers, defenseStats, defenseUpgradeCost, enterDefenseEndless, migrateDefense, pickDefenseCard, settleDefense, startDefense, stepDefense, upgradeDefense, validDefense, validDefenseMeta, type DefenseEnemy, type DefenseState } from '../../utils/rest/defense';
+import { defenseCardDetails } from '../../utils/rest/defenseCardDetails';
 import { addBattleEffect, effectProgress, stepBattleEffects, type BattleEffect } from '../../utils/rest/battleEffects';
 import DefenseSprites from './DefenseSprites.vue';
 
 const props = defineProps<{ paused: boolean }>();
-const { state, best, save, recordScore } = useGameSave('defense', createDefense, validDefense);
+const { state, best, save, recordScore } = useGameSave('defense', createDefense, validDefense, migrateDefense);
 const { state: meta, save: saveMeta } = useGameSave('defense-meta', createDefenseMeta, validDefenseMeta);
 const stats = computed(() => defenseStats(state.value));
 const waiting = ref(state.value.phase === 'playing'), surface = ref<HTMLElement>();
@@ -25,7 +26,7 @@ useGameLoop(() => props.paused || waiting.value || (state.value.phase !== 'playi
   effects.value = stepBattleEffects(effects.value, dt);
   recoil.value = Math.max(0, recoil.value - dt * 7);
   towerHurt.value = Math.max(0, towerHurt.value - dt * 5);
-  const s = state.value, phase = s.phase, traces = s.traces.slice(), hp = s.hp + s.shield, time = s.time;
+  const s = state.value, phase = s.phase, wave = s.wave, traces = s.traces.slice(), hp = s.hp + s.shield, time = s.time;
   const previous = new Map(s.enemies.map(e => [e.id, { hp: e.hp, shield: e.shield, x: e.x, y: e.y }]));
   stepDefense(s, dt);
   const fresh = s.traces.filter(t => !traces.some(old => old.x === t.x && old.y === t.y && old.color === t.color && old.life >= t.life));
@@ -51,9 +52,9 @@ useGameLoop(() => props.paused || waiting.value || (state.value.phase !== 'playi
   for (const old of previous.values()) effect('coin', old.x, old.y);
   if (s.hp + s.shield < hp - .1) towerHurt.value = 1;
   if (s.cards.nova && Math.floor(time / 5) !== Math.floor(s.time / 5)) effect('burst', 300, 200, '', undefined, '#c8b6ef');
-  if (phase !== s.phase) { settleDefense(s, meta.value); saveMeta(); recordScore(s.score); }
+  if (phase !== s.phase || wave !== s.wave) { settleDefense(s, meta.value); saveMeta(); recordScore(s.score); }
   elapsed += dt;
-  if (elapsed >= 1 || phase !== s.phase) { save(); elapsed = 0; }
+  if (elapsed >= 1 || phase !== s.phase || wave !== s.wave) { save(); elapsed = 0; }
 });
 const focusSurface = () => nextTick(() => surface.value?.focus());
 function clearEffects() { effects.value = []; recoil.value = 0; towerHurt.value = 0; }
@@ -72,6 +73,14 @@ function begin() {
 function pick(id: string) {
   if (props.paused || !pickDefenseCard(state.value, id)) return;
   effect('upgrade', 300, 200, card(id).name); save(); void focusSurface();
+}
+function openUpgrades(refresh=false) {
+  if (props.paused || waiting.value) return;
+  defenseOffers(state.value, refresh); save();
+}
+function deferUpgrades() {
+  if (props.paused) return;
+  closeDefenseOffers(state.value); save(); void focusSurface();
 }
 function improve(id: typeof DEFENSE_UPGRADES[number]['id']) {
   if (props.paused || waiting.value || !upgradeDefense(state.value, id)) return;
@@ -102,7 +111,7 @@ defineExpose({ restart });
 </script>
 <template>
   <div class="defense-game battle-game" :class="{ 'battle-paused': paused || waiting }">
-    <div class="defense-topline"><span>{{ state.mode==='endless'?'无尽 · ':'' }}第 <b>{{ state.wave }}</b> / {{ state.mode==='campaign'?'30':'∞' }} 波 <small>{{ state.phase==='choice'?'· 本波已守住':state.wave%10===0?'· 首领波':'' }}</small><button v-if="state.mode==='campaign'&&(state.phase==='playing'||state.phase==='choice')" class="button defense-endless-link" :disabled="paused" title="保留当前血量、金币和强化，转为无尽模式" @click="endless">转为无尽</button></span><span class="defense-coins">◈ {{ Math.floor(state.coins) }}</span><span>最高 {{ best }} <small>· 历史 {{ meta.bestWave }} 波</small></span></div>
+    <div class="defense-topline"><span>{{ state.mode==='endless'?'无尽 · ':'' }}第 <b>{{ state.wave }}</b> / {{ state.mode==='campaign'?'30':'∞' }} 波 <small>{{ state.wave%10===0?'· 首领波':'' }}</small><button v-if="state.mode==='campaign'&&(state.phase==='playing'||state.phase==='choice')" class="button defense-endless-link" :disabled="paused" title="保留当前血量、金币和强化，转为无尽模式" @click="endless">转为无尽</button></span><button class="button defense-strengthen" :class="{primary:state.pendingUpgrades>0}" :disabled="paused||waiting||state.pendingUpgrades===0||!['playing','won'].includes(state.phase)" @click="openUpgrades()">强化 <b>{{ state.pendingUpgrades }}</b> 次</button><span class="defense-coins">◈ {{ Math.floor(state.coins) }}</span><span>最高 {{ best }} <small>· 历史 {{ meta.bestWave }} 波</small></span></div>
     <div ref="surface" class="defense-stage" tabindex="0" data-game-focus aria-label="单塔守卫战场，塔自动攻击，可用下方按钮升级">
       <svg viewBox="-100 -35 800 450" aria-hidden="true" class="defense-surface">
         <DefenseSprites v-once />
@@ -157,17 +166,18 @@ defineExpose({ restart });
         <button v-else-if="waiting" class="button primary" :disabled="paused" @click="waiting=false;focusSurface()">继续守卫</button>
         <template v-else><p>第 {{ state.wave }} 波 · {{ state.score }} 分 · 研究碎片 {{ meta.shards }}</p><button v-if="state.phase==='won'" class="button primary" :disabled="paused" @click="endless">继续无尽挑战</button><button v-else class="button primary" :disabled="paused" @click="restart">再试一种组合</button></template>
       </div>
-      <div v-if="state.phase==='choice'" class="defense-choice-overlay"><h3>第 {{ state.wave }} 波守住了，选一项强化</h3><p>战场已暂停，选择后进入下一波</p><div class="defense-choices" aria-label="选择本波强化"><button v-for="id in state.offers" :key="id" class="defense-card" :disabled="paused" @click="pick(id)"><small>{{ card(id).family }} · 等级 {{ (state.cards[id]||0)+1 }}</small><strong>{{ card(id).name }}</strong><span>{{ card(id).description }}</span><small v-if="state.mode==='endless'&&(state.cards[id]||0)>=6">精研：额外伤害 +4%</small></button></div></div>
+      <div v-if="state.phase==='choice'" class="defense-choice-overlay"><h3>选择强化 · 剩余 {{ state.pendingUpgrades }} 次</h3><p>战斗已暂停。刷新免费且不限次数；也可以留待以后选择。</p><div class="game-actions"><button class="button" :disabled="paused" @click="openUpgrades(true)">刷新三选一</button><button class="button" :disabled="paused" @click="deferUpgrades">暂不选择，继续战斗</button></div><div class="defense-choices" aria-label="选择强化"><button v-for="id in state.offers" :key="id" class="defense-card" :disabled="paused" @click="pick(id)"><small>{{ card(id).family }} · {{ state.cards[id]||0 }} → {{ (state.cards[id]||0)+1 }} 级</small><strong>{{ card(id).name }}</strong><span>{{ defenseCardDetails(state,id).description }}</span><small v-if="state.mode==='endless'&&(state.cards[id]||0)>=6">精研：全局伤害加成再加4个百分点</small></button></div><p class="defense-card-context">{{ defenseCardDetails(state,state.offers[0]||'power').context }}</p></div>
     </div>
     <div class="defense-upgrades"><button v-for="(upgrade,i) in DEFENSE_UPGRADES" :key="upgrade.id" class="button" :disabled="paused||waiting||state.coins<defenseUpgradeCost(state,upgrade.id)||['won','lost'].includes(state.phase)" :title="upgrade.text" @click="improve(upgrade.id)"><svg viewBox="0 0 24 24" aria-hidden="true"><path :d="upgradeIcons[i]" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>{{ upgrade.name }} <small>{{ state.upgrades[upgrade.id] }}级</small><b>{{ defenseUpgradeCost(state,upgrade.id) }} ◈</b></span></button></div>
     <details v-if="Object.keys(state.cards).length||state.mode==='endless'" class="defense-build"><summary>{{ state.mode==='endless'?'无尽规则 · ':'' }}当前强化 {{ Object.keys(state.cards).length }} 项 · 攻击 {{ Math.round(stats.damage) }} · 攻速 {{ stats.rate.toFixed(1) }} · 范围 {{ Math.round(stats.range) }}</summary><p v-if="state.mode==='endless'">波数、局内升级与强化牌等级不封顶。攻速、射程超出上限的部分转为伤害；强化牌6级后每级额外增伤4%。</p><div><span v-for="(count,id) in state.cards" :key="id" :title="card(String(id)).description">{{ card(String(id)).name }} ×{{ count }}</span></div></details>
     <div v-if="state.phase==='ready'||state.phase==='lost'||state.phase==='won'" class="defense-research"><span>研究碎片 {{ meta.shards }} · 天赋永久解锁</span><button v-for="id in ['power','guard','wealth'] as const" :key="id" class="button" :disabled="paused||meta.talents[id]>=5||meta.shards<3+meta.talents[id]*3" @click="talent(id)">{{ {power:'火力',guard:'守护',wealth:'补给'}[id] }} {{ meta.talents[id] }}/5 · {{ 3+meta.talents[id]*3 }}碎片</button></div>
-    <p class="game-help defense-help" role="status">{{ state.last }} <span>自动攻击 · 选卡暂停 · 随时续玩</span></p>
+    <p class="game-help defense-help" role="status">{{ state.last }} <span>波次自动继续 · 强化可累计 · 选卡暂停</span></p>
   </div>
 </template>
 <style scoped>
 .defense-topline{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px;font-size:11px;color:var(--muted)}.defense-topline b{color:var(--text)}.defense-topline small{font-size:10px}.defense-coins{color:var(--warning);font-weight:600}
 .defense-topline .defense-endless-link{margin-left:8px;padding:3px 7px;font-size:10px}.defense-build p{line-height:1.7;margin:5px 0}.defense-overlay .button:not(.primary){color:var(--text)}
+.defense-strengthen{padding:5px 9px;font-size:11px;white-space:nowrap}.defense-stage>.defense-choice-overlay{z-index:2;overflow-y:auto;justify-content:safe center}.defense-choice-overlay .button{color:var(--text)}.defense-choice-overlay .defense-card-context{font-size:10px}.defense-choice-overlay .defense-card{gap:8px;padding:14px 12px;white-space:normal;overflow-wrap:anywhere}.defense-choice-overlay .defense-card span{line-height:1.7}
 .defense-stage{--defense-ground:#91af98;--defense-edge:#769d87;--defense-path:#c1c5a0;--defense-tree:#3d7467;--defense-grass:#6c9b77;--defense-stone:#b4bda1;--defense-range:#d9e4c4;position:relative;border:1px solid var(--line);border-radius:12px;overflow:hidden;outline-offset:3px}.defense-surface{display:block;width:100%;aspect-ratio:16/9}
 .defense-hud{position:absolute;inset:10px 12px auto;display:flex;align-items:flex-start;gap:9px;pointer-events:none;font-size:10px;color:#f2f5ec}.defense-hud>div{background:#28464add;padding:6px 9px;border-radius:7px;min-width:120px}.defense-hud span{font-variant-numeric:tabular-nums}.defense-hud i{display:block;height:4px;background:#193d42;border-radius:5px;margin-top:4px;overflow:hidden}.defense-hud em{display:block;height:100%;background:#86d4a5;transition:width .15s}.defense-shield em{background:#94d7e4}.defense-boss-tag{margin-left:auto;background:#7c4e59dc;border:1px solid #e7a3a2;padding:6px 9px;border-radius:7px}.defense-wave-detail{position:absolute;left:12px;bottom:9px;color:#e1ebd9;font-size:10px;border-radius:5px;background:#304f4abf;padding:4px 7px;pointer-events:none}
 .defense-overlay,.defense-choice-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:20px;text-align:center;background:#1b3139cc;color:#f2f3e9}.defense-overlay h3,.defense-choice-overlay h3{font-size:21px;margin:0}.defense-overlay p,.defense-choice-overlay p{font-size:12px;color:#d0dcd5;margin:0}.defense-stage .game-actions{margin-top:0}.defense-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;width:min(650px,100%);margin-top:8px}.defense-card{display:flex;flex-direction:column;gap:12px;text-align:left;color:var(--text);background:var(--surface);border:1px solid var(--primary);border-radius:12px;padding:18px 14px;cursor:pointer;min-width:0;min-height:140px;transition:transform .15s,border-color .15s}.defense-card:hover{transform:translateY(-3px);border-color:var(--text)}.defense-card small,.defense-card span{font-size:11px;color:var(--muted);line-height:1.6}.defense-card strong{font-size:15px;color:var(--primary)}

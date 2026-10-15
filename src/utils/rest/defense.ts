@@ -10,11 +10,11 @@ export const DEFENSE_ENEMY_NAMES:Record<EnemyKind,string>={normal:"游荡者",sw
 export const DEFENSE_UPGRADES=[{id:"attack",name:"攻击",text:"伤害 +24%"},{id:"rate",name:"攻速",text:"攻速 +13%"},{id:"health",name:"塔身",text:"生命上限 +25"},{id:"range",name:"射程",text:"射程 +8"},{id:"regen",name:"维修",text:"每秒恢复 +0.6"},{id:"income",name:"收益",text:"金币收益 +10%"}] as const;
 type UpgradeId=typeof DEFENSE_UPGRADES[number]["id"];
 export interface DefenseEnemy {id:number;kind:EnemyKind;x:number;y:number;hp:number;maxHP:number;speed:number;damage:number;shield:number;cooldown:number;burn:number;burnTime:number;slow:number;freeze:number}
-export interface DefenseState {version:1;seed:number;phase:"ready"|"playing"|"choice"|"won"|"lost";wave:number;mode:"campaign"|"endless";hp:number;shield:number;coins:number;score:number;kills:number;upgrades:Record<UpgradeId,number>;cards:Record<string,number>;offers:string[];enemies:DefenseEnemy[];spawnLeft:number;spawnTime:number;shotTime:number;time:number;waveTime:number;nextId:number;traces:{x:number;y:number;life:number;color:string}[];perk:"power"|"guard"|"wealth";settled:boolean;last:string}
+export interface DefenseState {version:2;seed:number;phase:"ready"|"playing"|"choice"|"won"|"lost";wave:number;mode:"campaign"|"endless";hp:number;shield:number;coins:number;score:number;kills:number;upgrades:Record<UpgradeId,number>;cards:Record<string,number>;offers:string[];pendingUpgrades:number;choiceResume?:"playing"|"won";enemies:DefenseEnemy[];spawnLeft:number;spawnTime:number;shotTime:number;time:number;waveTime:number;nextId:number;traces:{x:number;y:number;life:number;color:string}[];perk:"power"|"guard"|"wealth";settled:boolean;last:string}
 export interface DefenseMeta {version:1;bestWave:number;wins:number;shards:number;talents:{power:number;guard:number;wealth:number}}
 export function createDefenseMeta():DefenseMeta{return{version:1,bestWave:0,wins:0,shards:0,talents:{power:0,guard:0,wealth:0}};}
 export function validDefenseMeta(v:unknown):v is DefenseMeta{return object(v)&&v.version===1&&[v.bestWave,v.wins,v.shards].every(n=>integer(n,0,Number.MAX_SAFE_INTEGER))&&object(v.talents)&&[v.talents.power,v.talents.guard,v.talents.wealth].every(n=>integer(n,0,5));}
-export function createDefense(seed=Date.now()>>>0,mode:DefenseState['mode']='campaign'):DefenseState{return{version:1,seed,phase:"ready",wave:1,mode,hp:180,shield:45,coins:45,score:0,kills:0,upgrades:{attack:0,rate:0,health:0,range:0,regen:0,income:0},cards:{},offers:[],enemies:[],spawnLeft:0,spawnTime:0,shotTime:0,time:0,waveTime:0,nextId:1,traces:[],perk:"guard",settled:false,last:"先选起始天赋。前几波留有成长空间，优先升级攻击与攻速。"};}
+export function createDefense(seed=Date.now()>>>0,mode:DefenseState['mode']='campaign'):DefenseState{return{version:2,seed,phase:"ready",wave:1,mode,hp:180,shield:45,coins:45,score:0,kills:0,upgrades:{attack:0,rate:0,health:0,range:0,regen:0,income:0},cards:{},offers:[],pendingUpgrades:0,enemies:[],spawnLeft:0,spawnTime:0,shotTime:0,time:0,waveTime:0,nextId:1,traces:[],perk:"guard",settled:false,last:"先选起始天赋。强化次数逐波累计，点击强化时才暂停选卡。"};}
 // 无尽没有玩法等级上限；只保留 JavaScript 可精确保存的数值边界。
 const defenseValueLimit=(s:DefenseState)=>s.mode==='endless'?Number.MAX_SAFE_INTEGER:1e9;
 export function defenseStats(s:DefenseState){
@@ -35,7 +35,7 @@ export function defenseUpgradeCost(s:DefenseState,id:UpgradeId){
 }
 export function upgradeDefense(s:DefenseState,id:UpgradeId){if(!["ready","playing","choice"].includes(s.phase)||!DEFENSE_UPGRADES.some(x=>x.id===id))return false;const cost=defenseUpgradeCost(s,id);if(s.coins<cost||(s.mode==='campaign'&&s.upgrades[id]>=100)||!Number.isSafeInteger(s.upgrades[id]+1))return false;s.coins-=cost;s.upgrades[id]++;if(id==="health")s.hp=Math.min(defenseStats(s).maxHP,s.hp+25);return true;}
 export function startDefenseWave(s:DefenseState){
-  s.phase="playing";s.spawnLeft=Math.min(36,5+Math.ceil(s.wave*1.1));s.spawnTime=.2;s.waveTime=0;s.enemies=[];s.offers=[];
+  s.phase="playing";s.spawnLeft=Math.min(36,5+Math.ceil(s.wave*1.2));s.spawnTime=.2;s.waveTime=0;s.enemies=[];
   s.last=s.wave%10===0?`首领波 ${s.wave}：先检查塔身和攻击升级。`:`第 ${s.wave} 波来袭`;
 }
 export function startDefense(s:DefenseState,meta:DefenseMeta){if(s.phase!=="ready")return;const level=meta.talents[s.perk];if(s.perk==="power")s.upgrades.attack+=level;if(s.perk==="guard")s.upgrades.health+=level;if(s.perk==="wealth")s.coins+=25+level*8;s.hp=defenseStats(s).maxHP;startDefenseWave(s);}
@@ -44,31 +44,41 @@ export function enterDefenseEndless(s:DefenseState){
   if(s.mode==='endless'||s.phase==='lost')return false;
   s.mode='endless';
   if(s.phase==='won'){s.wave++;startDefenseWave(s);}
+  else if(s.phase==='choice'&&s.choiceResume==='won'){s.wave++;s.choiceResume='playing';s.spawnLeft=Math.min(36,5+Math.ceil(s.wave*1.2));s.spawnTime=.2;s.waveTime=0;s.enemies=[];}
   return true;
 }
 function spawnEnemy(s:DefenseState,kind?:EnemyKind,x?:number,y?:number){
   const pool:EnemyKind[]=["normal","swarm",...(s.wave>=3?["runner" as const]:[]),...(s.wave>=5?["armored" as const]:[]),...(s.wave>=8?["shielded" as const]:[]),...(s.wave>=12?["splitter" as const,"shooter" as const]:[]),...(s.wave>=16?["healer" as const]:[])];
   kind=kind||pool[Math.floor(random(s)*pool.length)]!;const a=random(s)*Math.PI*2;
-  const base=Math.min(s.mode==='endless'?defenseValueLimit(s)/8:1e8,18+s.wave*2.3+s.wave*s.wave*.24);
+  // 第6波起平滑增加压力，第25波后额外生命加成维持20%，避免突然跳难度。
+  const pressure=1+Math.min(.2,Math.max(0,s.wave-5)*.01);
+  const base=Math.min(s.mode==='endless'?defenseValueLimit(s)/8:1e8,(21+s.wave*2.6+s.wave*s.wave*.27)*pressure);
   const hp=base*(kind==="boss"?8:kind==="swarm"?.5:kind==="runner"?.7:kind==="armored"?1.4:1);
   if(s.enemies.length>=65)return;
-  s.enemies.push({id:s.nextId++,kind,x:x??300+Math.cos(a)*280,y:y??200+Math.sin(a)*180,hp,maxHP:hp,speed:kind==="boss"?5:kind==="runner"?21:kind==="swarm"?16:kind==="armored"?7:10,damage:kind==="boss"?15+s.wave*.25:3.5+s.wave*.12,shield:kind==="shielded"?base*.35:0,cooldown:0,burn:0,burnTime:0,slow:0,freeze:0});
+  s.enemies.push({id:s.nextId++,kind,x:x??300+Math.cos(a)*280,y:y??200+Math.sin(a)*180,hp,maxHP:hp,speed:(kind==="boss"?6.5:kind==="runner"?21:kind==="swarm"?16:kind==="armored"?7:10)*(1.06+Math.min(.14,s.wave*.004)),damage:kind==="boss"?17+s.wave*.28:4+s.wave*.14,shield:kind==="shielded"?base*.35:0,cooldown:0,burn:0,burnTime:0,slow:0,freeze:0});
 }
-export function defenseOffers(s:DefenseState){
+export function defenseOffers(s:DefenseState,refresh=false){
+  if(s.pendingUpgrades<1||!['playing','won','choice'].includes(s.phase))return false;
+  if(s.phase!=='choice'){s.choiceResume=s.phase as 'playing'|'won';s.phase='choice';}
   const dependencies:Record<string,string[]>={radius:['blast'],links:['chain'],inferno:['burn'],freeze:['slow'],storm:['chain','freeze']};
   const available=(id:string)=>s.mode==='endless'?Number.isSafeInteger((s.cards[id]||0)+1):(s.cards[id]||0)<6;
   const pool=DEFENSE_CARDS.filter(c=>available(c.id)&&(!dependencies[c.id]||dependencies[c.id]!.every(id=>s.cards[id])));
-  const offers:string[]=[];
-  if(s.wave<=4){const starter=["power","speed","multi","blast"][s.wave-1]!;if(available(starter))offers.push(starter);}
-  while(offers.length<3&&offers.length<pool.length){const card=pool[Math.floor(random(s)*pool.length)]!.id;if(!offers.includes(card))offers.push(card);}
-  if(!pool.length){s.coins=Math.min(defenseValueLimit(s),s.coins+100);s.hp=defenseStats(s).maxHP;s.wave++;startDefenseWave(s);return;}
-  s.offers=offers;s.phase="choice";
+  if(!refresh&&s.offers.length&&s.offers.every(id=>pool.some(card=>card.id===id)))return true;
+  const offers:string[]=[],previous=new Set(s.offers);
+  if(!refresh&&s.wave<=5){const starter=["power","speed","multi","blast"][Math.max(0,s.wave-2)]!;if(starter&&available(starter))offers.push(starter);}
+  // 洗牌抽取，优先给出上一组以外的牌；刷新不消耗金币或强化次数。
+  const shuffled=[...pool];for(let i=shuffled.length-1;i>0;i--){const j=Math.floor(random(s)*(i+1));[shuffled[i],shuffled[j]]=[shuffled[j]!,shuffled[i]!];}
+  shuffled.sort((a,b)=>Number(previous.has(a.id))-Number(previous.has(b.id)));
+  for(const card of shuffled)if(offers.length<3&&!offers.includes(card.id))offers.push(card.id);
+  if(!pool.length){s.coins=Math.min(defenseValueLimit(s),s.coins+100);s.hp=defenseStats(s).maxHP;s.pendingUpgrades--;s.offers=[];closeDefenseOffers(s);s.last='强化已全部满级，本次兑换100金币并修复塔身。';return false;}
+  s.offers=offers;return true;
 }
+export function closeDefenseOffers(s:DefenseState){if(s.phase!=='choice')return false;s.phase=s.choiceResume||'playing';delete s.choiceResume;return true;}
 export function pickDefenseCard(s:DefenseState,id:string){
-  if(s.phase!=="choice"||!s.offers.includes(id)||(s.mode==='campaign'&&(s.cards[id]||0)>=6)||!Number.isSafeInteger((s.cards[id]||0)+1))return false;
+  if(s.phase!=="choice"||s.pendingUpgrades<1||!s.offers.includes(id)||(s.mode==='campaign'&&(s.cards[id]||0)>=6)||!Number.isSafeInteger((s.cards[id]||0)+1))return false;
   s.cards[id]=(s.cards[id]||0)+1;
   const stats=defenseStats(s);if(id==="health")s.hp=Math.min(stats.maxHP,s.hp+40);if(id==="shield")s.shield=stats.maxShield;
-  s.wave++;startDefenseWave(s);return true;
+  s.pendingUpgrades--;s.offers=[];closeDefenseOffers(s);s.last=`已获得强化，剩余 ${s.pendingUpgrades} 次可随时选择。`;return true;
 }
 function incoming(s:DefenseState,damage:number){const stats=defenseStats(s);damage*=1-stats.armor;const shield=Math.min(s.shield,damage);s.shield-=shield;s.hp=Math.max(0,s.hp-(damage-shield));}
 function strike(s:DefenseState,e:DefenseEnemy,damage:number,critical=false){
@@ -93,8 +103,7 @@ function fireDefense(s:DefenseState){
   }
 }
 export function settleDefense(s:DefenseState,meta:DefenseMeta){
-  // 选卡界面代表本波已经守住；下一波进行中或失败时才减去当前波。
-  meta.bestWave=Math.max(meta.bestWave,s.phase==="won"||s.phase==="choice"?s.wave:s.wave-1);
+  meta.bestWave=Math.max(meta.bestWave,s.phase==="won"||s.choiceResume==='won'?s.wave:s.wave-1);
   if(!s.settled&&(s.phase==="won"||s.phase==="lost")){meta.shards=Math.min(Number.MAX_SAFE_INTEGER,meta.shards+Math.floor((s.wave-1)/3));if(s.phase==="won"){meta.wins=Math.min(Number.MAX_SAFE_INTEGER,meta.wins+1);meta.shards=Math.min(Number.MAX_SAFE_INTEGER,meta.shards+5);}s.settled=true;}
 }
 export function stepDefense(s:DefenseState,dt:number){
@@ -103,14 +112,15 @@ export function stepDefense(s:DefenseState,dt:number){
   s.hp=Math.min(stats.maxHP,s.hp+stats.regen*dt);s.shield=Math.min(stats.maxShield,s.shield+stats.shieldRegen*dt);
   if(s.cards.reserve&&s.hp<stats.maxHP*.3&&Math.floor(s.time/8)!==Math.floor((s.time-dt)/8))s.shield=Math.min(stats.maxShield,s.shield+15*s.cards.reserve);
   // 满屏时保留待入场敌人，等有空位再出怪，不丢弃波次，也不增加同屏负担。
-  if(s.spawnLeft>0){s.spawnTime=Math.max(0,s.spawnTime-dt);if(s.spawnTime<=0&&s.enemies.length<65){const boss=s.wave%10===0&&s.spawnLeft===Math.min(36,5+Math.ceil(s.wave*1.1));spawnEnemy(s,boss?"boss":undefined);s.spawnLeft--;s.spawnTime=Math.max(.3,.8-s.wave*.01);}}
+  if(s.spawnLeft>0){s.spawnTime=Math.max(0,s.spawnTime-dt);if(s.spawnTime<=0&&s.enemies.length<65){const boss=s.wave%10===0&&s.spawnLeft===Math.min(36,5+Math.ceil(s.wave*1.2));spawnEnemy(s,boss?"boss":undefined);s.spawnLeft--;s.spawnTime=Math.max(.3,.76-s.wave*.01);}}
   if(s.shotTime>=1/stats.rate){s.shotTime=0;fireDefense(s);}
   if(s.cards.nova&&Math.floor(s.time/5)!==Math.floor((s.time-dt)/5))for(const e of s.enemies)if(Math.hypot(e.x-300,e.y-200)<115){strike(s,e,stats.damage*(1+s.cards.nova*.5));const a=Math.atan2(e.y-200,e.x-300);e.x+=Math.cos(a)*18;e.y+=Math.sin(a)*18;}
   for(const e of [...s.enemies]){
     if(e.hp<=0)continue;
     e.cooldown-=dt;e.slow=Math.max(0,e.slow-dt);e.freeze=Math.max(0,e.freeze-dt);
     if(e.burnTime>0){e.hp-=e.burn*dt;e.burnTime=Math.max(0,e.burnTime-dt);}if(e.hp<=0)continue;
-    const distance=Math.hypot(e.x-300,e.y-200),reach=e.kind==="shooter"?90:24;
+    // 远射者在塔的基础射程外施压，升级射程或选远程瞄具可以应对。
+    const distance=Math.hypot(e.x-300,e.y-200),reach=e.kind==="shooter"?185+Math.min(40,Math.max(0,s.wave-12)*2):24;
     if(e.freeze<=0&&distance>reach){const speed=e.speed*(e.slow>0?Math.max(.35,1-(s.cards.slow||0)*.12):1);e.x+=(300-e.x)/distance*speed*dt;e.y+=(200-e.y)/distance*speed*dt;}
     else if(e.freeze<=0&&e.cooldown<=0){incoming(s,e.damage);if(s.cards.thorns&&distance<35)strike(s,e,e.damage*s.cards.thorns*.8);e.cooldown=e.kind==="shooter"?2.5:1.3;}
     if(e.kind==="healer"&&e.cooldown<=0){for(const near of s.enemies)if(Math.hypot(near.x-e.x,near.y-e.y)<65)near.hp=Math.min(near.maxHP,near.hp+near.maxHP*.05);e.cooldown=3;}
@@ -123,16 +133,25 @@ export function stepDefense(s:DefenseState,dt:number){
   s.traces=s.traces.map(t=>({...t,life:t.life-dt})).filter(t=>t.life>0).slice(-70);
   if(s.hp<=0){s.phase="lost";s.last="这次走得很远了。带上新的天赋，再试一种组合。";return;}
   if(s.spawnLeft===0&&s.enemies.length===0){
-    s.hp=Math.min(stats.maxHP,s.hp+stats.maxHP*.09+(s.cards.supply||0)*8);s.shield=Math.min(stats.maxShield,s.shield+8);
+    s.hp=Math.min(stats.maxHP,s.hp+stats.maxHP*.07+(s.cards.supply||0)*8);s.shield=Math.min(stats.maxShield,s.shield+8);
     s.coins=Math.min(defenseValueLimit(s),s.coins+12+s.wave*2+(s.cards.supply||0)*5+Math.min(75,Math.floor(s.coins*.025*(s.cards.interest||0))));
-    if(s.wave===30&&s.mode==="campaign"){s.phase="won";s.score+=1000;s.last="三十波守住了！可以继续挑战无尽。";}else{defenseOffers(s);s.last=`第 ${s.wave} 波已守住，选一项强化！`;}
+    s.pendingUpgrades=Math.min(Number.MAX_SAFE_INTEGER,s.pendingUpgrades+1);
+    if(s.wave===30&&s.mode==="campaign"){s.phase="won";s.score+=1000;s.last="三十波守住了！可以继续挑战无尽。";}else{const cleared=s.wave;s.wave++;startDefenseWave(s);s.last=`第 ${cleared} 波已守住，强化已累计 ${s.pendingUpgrades} 次。`;}
   }
 }
 export function validDefense(v:unknown):v is DefenseState {
-  if(!object(v)||v.version!==1||!integer(v.seed,0,4294967295)||!integer(v.wave,1,v.mode==='endless'?Number.MAX_SAFE_INTEGER:100000)||!["ready","playing","choice","won","lost"].includes(v.phase as string)||!["campaign","endless"].includes(v.mode as string)||!["power","guard","wealth"].includes(v.perk as string))return false;
+  if(!object(v)||v.version!==2||!integer(v.pendingUpgrades,0,Number.MAX_SAFE_INTEGER)||(v.choiceResume!==undefined&&!['playing','won'].includes(v.choiceResume as string))||(v.phase==='choice'&&(Number(v.pendingUpgrades)<1||v.choiceResume===undefined))||!integer(v.seed,0,4294967295)||!integer(v.wave,1,v.mode==='endless'?Number.MAX_SAFE_INTEGER:100000)||!["ready","playing","choice","won","lost"].includes(v.phase as string)||!["campaign","endless"].includes(v.mode as string)||!["power","guard","wealth"].includes(v.perk as string))return false;
   const limit=v.mode==='endless'?Number.MAX_SAFE_INTEGER:1e12;
   if(![v.hp,v.shield,v.coins,v.score,v.kills,v.spawnLeft,v.spawnTime,v.shotTime,v.time,v.waveTime,v.nextId].every(n=>finite(n,-1,limit))||typeof v.settled!=="boolean"||typeof v.last!=="string"||!object(v.upgrades)||!DEFENSE_UPGRADES.every(u=>integer((v.upgrades as Record<string,unknown>)[u.id],0,v.mode==='endless'?Number.MAX_SAFE_INTEGER:100))||!object(v.cards)||!Object.entries(v.cards).every(([id,n])=>DEFENSE_CARDS.some(c=>c.id===id)&&integer(n,0,v.mode==='endless'?Number.MAX_SAFE_INTEGER:6)))return false;
   if(!Array.isArray(v.offers)||v.offers.length>3||new Set(v.offers).size!==v.offers.length||!v.offers.every(id=>DEFENSE_CARDS.some(c=>c.id===id))||!Array.isArray(v.enemies)||v.enemies.length>65)return false;
   if(!v.enemies.every(e=>object(e)&&integer(e.id,0,v.mode==='endless'?Number.MAX_SAFE_INTEGER:1e9)&&Object.hasOwn(DEFENSE_ENEMY_NAMES,String(e.kind))&&[e.x,e.y,e.hp,e.maxHP,e.speed,e.damage,e.shield,e.cooldown,e.burn,e.burnTime,e.slow,e.freeze].every(n=>finite(n,-1e9,v.mode==='endless'?Number.MAX_SAFE_INTEGER:1e9))))return false;
   return Array.isArray(v.traces)&&v.traces.length<=70&&v.traces.every(t=>object(t)&&finite(t.x,-1000,1000)&&finite(t.y,-1000,1000)&&finite(t.life,0,1)&&typeof t.color==="string");
+}
+/** 旧版被强制停在波末的选卡改为待领一次，战斗从下一波继续，原抽牌和全部数值保留。 */
+export function migrateDefense(v:unknown):DefenseState|null{
+  if(!object(v)||v.version!==1)return null;
+  const next={...v,version:2,pendingUpgrades:v.phase==='choice'?1:0,choiceResume:v.phase==='choice'?'playing':undefined} as DefenseState;
+  if(!validDefense(next))return null;
+  if(next.phase==='choice'){const offers=next.offers;next.wave++;startDefenseWave(next);next.offers=offers;delete next.choiceResume;}
+  return next;
 }
