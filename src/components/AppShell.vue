@@ -83,6 +83,7 @@ const repositoryAssets = ref<RepositoryAsset[]>([]);
 const todayWorkSessions = ref<WorkSession[]>([]);
 const todayWorkSummary = ref<WorkSummary>({ startDate:"", endDate:"", totalMinutes:0, estimatedMinutes:0, manualMinutes:0, hasManualCorrections:false, byProject:[], byType:[], daily:[] });
 const railNow = ref(Date.now());
+const almanacExpanded = ref(false);
 const systemPerformance = ref<SystemPerformanceSnapshot>(emptySystemPerformanceSnapshot());
 const performanceHistory = ref<SystemPerformanceHistoryPoint[]>([]);
 const memoryOptimizationState = ref<"idle" | "loading" | "done" | "error">("idle");
@@ -807,22 +808,13 @@ onBeforeUnmount(() => {
             <b>{{ String(todayDay).padStart(2, '0') }}</b>
             <span><strong>{{ currentDate.getMonth() + 1 }}月 · {{ todayAlmanac.week.replace('星期', '周') }}</strong><small>{{ compactLunarDate }}</small></span>
             <i v-if="todayAlmanac.jieQi !== '非节气日'" class="rail-almanac-season">{{ todayAlmanac.jieQi }}</i>
-            <RouterLink class="icon-button rail-almanac-link" to="/calendar" title="查看工作日历与黄历" aria-label="查看工作日历与黄历"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg></RouterLink>
+            <button type="button" class="icon-button rail-almanac-link" :title="almanacExpanded ? '收起宜忌' : '展开宜忌'" :aria-label="almanacExpanded ? '收起宜忌' : '展开宜忌'" :aria-expanded="almanacExpanded" aria-controls="rail-almanac-yiji" @click="almanacExpanded=!almanacExpanded"><svg viewBox="0 0 16 16" aria-hidden="true"><path :d="almanacExpanded ? 'm4 10 4-4 4 4' : 'm4 6 4 4 4-4'" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
           </div>
-          <div class="rail-almanac-yiji"><span><i>宜</i><em>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</em></span><span><i>忌</i><em>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</em></span></div>
+          <div v-show="almanacExpanded" id="rail-almanac-yiji" class="rail-almanac-yiji"><span><i>宜</i><em>{{ todayAlmanac.yi.slice(0,3).join(' · ') || '诸事不宜' }}</em></span><span><i>忌</i><em>{{ todayAlmanac.ji.slice(0,3).join(' · ') || '诸事不忌' }}</em></span></div>
         </div>
       </section>
-      <section class="rail-rest"><RestRailCard /></section>
       <section class="rail-performance">
         <SystemPerformanceCard :snapshot="systemPerformance" :history="performanceHistory" :optimization-state="memoryOptimizationState" :optimization-message="memoryOptimizationMessage" @open="performanceOpen=true" @optimize="optimizeMemory" />
-      </section>
-      <section class="rail-work-session">
-        <header class="rail-section-header rail-section-header-success"><span><i></i><b>当前工作</b></span><em>{{ latestWorkSession ? 1 : 0 }}</em></header>
-        <div class="rail-work-card">
-          <div v-if="latestWorkSession" class="rail-work-session-main"><b>{{ latestWorkSession.project }}</b><span>{{ latestWorkSession.startTime }}—{{ latestWorkSession.endTime }}</span><small>{{ latestWorkSession.source === 'manual' ? '手工记录' : '估算中' }}</small></div>
-          <div v-else class="rail-work-session-main empty"><b>{{ runningProjects[0]?.projectName || '尚未识别到工作区间' }}</b><span>有本地活动后自动估算</span></div>
-          <div class="rail-work-session-metrics"><span><small>今日工时</small><b>{{ formatRailMinutes(todayWorkSummary.totalMinutes) }}</b></span><span><small>当前区间</small><b>{{ latestWorkSession ? formatRailMinutes(latestWorkSession.durationMinutes) : '—' }}</b></span><RouterLink class="rail-inline-link" to="/work-records">修正 ›</RouterLink></div>
-        </div>
       </section>
       <section v-if="runningProjects.length" class="rail-projects">
         <header class="rail-section-header rail-section-header-success"><span><i></i><b>项目运行</b></span><em>{{ runningProjects.length }}</em></header>
@@ -839,6 +831,15 @@ onBeforeUnmount(() => {
           <span class="rail-running-progress" :class="{ determinate:item.progressPercent !== undefined }" :role="item.progressPercent !== undefined ? 'progressbar' : undefined" :aria-valuenow="item.progressPercent" aria-valuemin="0" aria-valuemax="100"><i :style="item.progressPercent !== undefined ? { width:`${item.progressPercent}%` } : undefined"></i></span>
           <span v-if="item.progressPercent !== undefined || item.etaText" class="rail-running-estimate"><b v-if="item.progressPercent !== undefined">{{ item.progressPercent }}%</b><em>{{ item.etaText }}</em></span>
         </RouterLink>
+      </section>
+      <section class="rail-rest"><RestRailCard /></section>
+      <section class="rail-work-session">
+        <header class="rail-section-header rail-section-header-success"><span><i></i><b>当前工作</b></span><em>{{ latestWorkSession ? 1 : 0 }}</em></header>
+        <div class="rail-work-card">
+          <div v-if="latestWorkSession" class="rail-work-session-main"><b>{{ latestWorkSession.project }}</b><span>{{ latestWorkSession.startTime }}—{{ latestWorkSession.endTime }}</span><small>{{ latestWorkSession.source === 'manual' ? '手工记录' : '估算中' }}</small></div>
+          <div v-else class="rail-work-session-main empty"><b>{{ runningProjects[0]?.projectName || '尚未识别到工作区间' }}</b><span>有本地活动后自动估算</span></div>
+          <div class="rail-work-session-metrics"><span><small>今日工时</small><b>{{ formatRailMinutes(todayWorkSummary.totalMinutes) }}</b></span><span><small>当前区间</small><b>{{ latestWorkSession ? formatRailMinutes(latestWorkSession.durationMinutes) : '—' }}</b></span><RouterLink class="rail-inline-link" to="/work-records">修正 ›</RouterLink></div>
+        </div>
       </section>
       <section v-if="railIssues.length" class="rail-issues">
         <header class="rail-section-header"><span><i></i><b>异常状态</b></span><em>{{ railIssues.length }}</em></header>

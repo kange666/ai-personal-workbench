@@ -434,7 +434,7 @@ fn list_projects(state: &DatabaseState) -> Result<Vec<TapdProjectConfig>, String
     let mut statement = connection
         .prepare(
             "SELECT p.workspace_id,p.workspace_name,p.owner,p.enabled,p.sort_order,p.repository_path,p.auto_enabled,p.auto_execute,p.trigger_statuses,p.completion_status,p.last_synced_at,p.last_error,
-                    (SELECT COUNT(*) FROM tapd_work_items i WHERE i.workspace_id=p.workspace_id AND i.item_type='bug')
+                    (SELECT COUNT(*) FROM tapd_work_items i WHERE i.workspace_id=p.workspace_id AND i.item_type='bug' AND i.synced_at=p.last_synced_at)
              FROM tapd_projects p ORDER BY p.sort_order ASC,p.workspace_name ASC,p.workspace_id ASC",
         )
         .map_err(|error| error.to_string())?;
@@ -1795,34 +1795,40 @@ fn preview_project_automation_for_state(
     let connection = state.connect()?;
     let total_items = connection
         .query_row(
-            "SELECT COUNT(*) FROM tapd_work_items WHERE workspace_id=?1 AND item_type='bug'",
-            [settings.workspace_id.trim()],
+            "SELECT COUNT(*) FROM tapd_work_items WHERE workspace_id=?1 AND item_type='bug' AND synced_at=?2",
+            params![settings.workspace_id.trim(), project.last_synced_at.as_deref().unwrap_or("")],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|error| error.to_string())? as usize;
     let mut statement = connection
         .prepare(
             "SELECT item_key,id,title,status,status_label,priority,due_date,modified_at,created_at,owner,automation_version
-             FROM tapd_work_items WHERE workspace_id=?1 AND item_type='bug'
+             FROM tapd_work_items WHERE workspace_id=?1 AND item_type='bug' AND synced_at=?2
              ORDER BY modified_at DESC,created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([settings.workspace_id.trim()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-            ))
-        })
+        .query_map(
+            params![
+                settings.workspace_id.trim(),
+                project.last_synced_at.as_deref().unwrap_or("")
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            },
+        )
         .map_err(|error| error.to_string())?;
     let mut matched_count = 0usize;
     let mut pending_count = 0usize;
@@ -2154,14 +2160,12 @@ pub async fn sync_tapd_items(
     })
 }
 
-#[tauri::command]
-pub fn list_tapd_items(
-    state: tauri::State<'_, DatabaseState>,
-    workspace_id: Option<String>,
+fn list_tapd_items_for_state(
+    state: &DatabaseState,
+    workspace_id: &str,
 ) -> Result<Vec<TapdWorkItem>, String> {
     let connection = state.connect()?;
-    let mut statement = connection.prepare("SELECT item_key,id,workspace_id,item_type,title,description,status,status_label,priority,owner,creator,iteration_id,begin_date,due_date,created_at,modified_at,source_url,synced_at FROM tapd_work_items WHERE item_type='bug' AND (?1='' OR workspace_id=?1) AND workspace_id IN (SELECT workspace_id FROM tapd_projects) ORDER BY modified_at DESC,created_at DESC").map_err(|error| error.to_string())?;
-    let workspace_id = workspace_id.unwrap_or_default();
+    let mut statement = connection.prepare("SELECT i.item_key,i.id,i.workspace_id,i.item_type,i.title,i.description,i.status,i.status_label,i.priority,i.owner,i.creator,i.iteration_id,i.begin_date,i.due_date,i.created_at,i.modified_at,i.source_url,i.synced_at FROM tapd_work_items i JOIN tapd_projects p ON p.workspace_id=i.workspace_id WHERE i.item_type='bug' AND i.synced_at=p.last_synced_at AND (?1='' OR i.workspace_id=?1) ORDER BY i.modified_at DESC,i.created_at DESC").map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([workspace_id], |row| {
             Ok(TapdWorkItem {
@@ -2188,6 +2192,14 @@ pub fn list_tapd_items(
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_tapd_items(
+    state: tauri::State<'_, DatabaseState>,
+    workspace_id: Option<String>,
+) -> Result<Vec<TapdWorkItem>, String> {
+    list_tapd_items_for_state(&state, workspace_id.as_deref().unwrap_or(""))
 }
 
 #[tauri::command]
@@ -2572,6 +2584,17 @@ mod tests {
             .unwrap();
     }
 
+    fn set_project_synced_at(state: &DatabaseState, workspace_id: &str, synced_at: &str) {
+        state
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE tapd_projects SET last_synced_at=?2 WHERE workspace_id=?1",
+                params![workspace_id, synced_at],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn credential_supports_personal_token_and_legacy_basic_json() {
         let token: TapdCredential = serde_json::from_str(
@@ -2700,6 +2723,7 @@ mod tests {
         let project = project_by_id(&state, WORKSPACE_ID).unwrap();
         let item = test_item(WORKSPACE_ID, "preview-1", "new");
         save_items(&state, &project, &[item.clone()], false).unwrap();
+        set_project_synced_at(&state, WORKSPACE_ID, &item.synced_at);
         let preview = preview_project_automation_for_state(
             &state,
             &TapdProjectAutomationInput {
@@ -2716,6 +2740,45 @@ mod tests {
         assert_eq!(preview.matched_count, 1);
         assert_eq!(preview.pending_count, 1);
         assert_eq!(preview.items[0].item_key, item.item_key);
+        drop(state);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn current_list_hides_items_missing_from_the_latest_owner_sync_but_keeps_history() {
+        let directory = std::env::temp_dir().join(format!("tapd-current-owner-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_database(directory.join("workbench.sqlite3"));
+        let project = project_by_id(&state, WORKSPACE_ID).unwrap();
+        let previous_item = test_item(WORKSPACE_ID, "no-longer-mine", "new");
+        save_items(&state, &project, &[previous_item.clone()], false).unwrap();
+        set_project_synced_at(&state, WORKSPACE_ID, &previous_item.synced_at);
+        assert_eq!(list_tapd_items_for_state(&state, "").unwrap().len(), 1);
+
+        let mut current_item = test_item(WORKSPACE_ID, "still-mine", "new");
+        current_item.synced_at = "2026-08-21T12:01:00Z".into();
+        current_item.modified_at = "2026-08-21T12:00:00Z".into();
+        save_items(&state, &project, &[current_item.clone()], false).unwrap();
+        set_project_synced_at(&state, WORKSPACE_ID, &current_item.synced_at);
+
+        let current = list_tapd_items_for_state(&state, "").unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].item_key, current_item.item_key);
+        assert_eq!(project_by_id(&state, WORKSPACE_ID).unwrap().item_count, 1);
+        let stored_count: i64 = state
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM tapd_work_items WHERE workspace_id=?1",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_count, 2);
+        assert_eq!(
+            read_item(&state, &previous_item.item_key).unwrap().title,
+            previous_item.title
+        );
         drop(state);
         let _ = std::fs::remove_dir_all(directory);
     }
