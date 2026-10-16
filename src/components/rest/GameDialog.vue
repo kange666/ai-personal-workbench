@@ -22,6 +22,8 @@ async function restart() { resetting.value = false; paused.value = false; await 
 const pause = () => { paused.value = true; };
 // 焦点进入游戏 iframe 时主窗口会触发 blur，整个文档仍有焦点时继续运行。
 const windowBlur = () => {
+  // 塔防自动战斗允许切换到其他窗口，仍可通过暂停按钮主动暂停。
+  if (props.game === "defense") return;
   if (props.game === "mota" && document.activeElement instanceof HTMLIFrameElement && document.hasFocus()) return;
   pause();
 };

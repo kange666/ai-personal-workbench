@@ -3,7 +3,7 @@ import { defineComponent, nextTick, ref } from "vue";
 import { afterEach, expect, it, vi } from "vitest";
 import { useGameLoop } from "./useGameLoop";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 it("帧时间受限，暂停和失焦停止调度，恢复不补算时间，卸载释放循环", async () => {
   const callbacks = new Map<number, FrameRequestCallback>(); let sequence = 0;
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callbacks.set(++sequence, callback); return sequence; });
@@ -17,4 +17,25 @@ it("帧时间受限，暂停和失焦停止调度，恢复不补算时间，卸�
   paused.value = false; await nextTick(); tick.mockClear(); frame(9000); expect(tick).not.toHaveBeenCalled(); frame(9020); expect(tick).toHaveBeenLastCalledWith(.02);
   window.dispatchEvent(new Event("blur")); expect(callbacks.size).toBe(0); window.dispatchEvent(new Event("focus")); expect(callbacks.size).toBe(1);
   wrapper.unmount(); expect(callbacks.size).toBe(0); window.dispatchEvent(new Event("focus")); expect(callbacks.size).toBe(0);
+});
+it("关闭失焦暂停后切换窗口持续运行，手动暂停和隐藏仍停止，恢复不补算时间", async () => {
+  const callbacks = new Map<number, FrameRequestCallback>(); let sequence = 0;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callbacks.set(++sequence, callback); return sequence; });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => callbacks.delete(id));
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const paused = ref(false), tick = vi.fn();
+  const wrapper = mount(defineComponent({ setup() { useGameLoop(() => paused.value, tick, { pauseOnBlur: false }); return () => null; } }));
+  function frame(time: number) { const pending = [...callbacks.values()]; callbacks.clear(); pending.forEach(fn => fn(time)); }
+  frame(100); frame(116); tick.mockClear();
+  window.dispatchEvent(new Event("blur")); expect(callbacks.size).toBe(1);
+  frame(132); frame(148); expect(tick).toHaveBeenCalledTimes(2); expect(tick).toHaveBeenLastCalledWith(.016);
+  window.dispatchEvent(new Event("focus")); frame(164); expect(tick).toHaveBeenCalledTimes(3);
+  paused.value = true; await nextTick();
+  window.dispatchEvent(new Event("blur")); window.dispatchEvent(new Event("focus")); expect(callbacks.size).toBe(0);
+  paused.value = false; await nextTick(); frame(180);
+  hidden.mockReturnValue(true); document.dispatchEvent(new Event("visibilitychange")); expect(callbacks.size).toBe(0);
+  hidden.mockReturnValue(false); document.dispatchEvent(new Event("visibilitychange")); tick.mockClear();
+  frame(9000); expect(tick).not.toHaveBeenCalled(); frame(9020); expect(tick).toHaveBeenLastCalledWith(.02);
+  wrapper.unmount(); expect(callbacks.size).toBe(0);
+  document.dispatchEvent(new Event("visibilitychange")); expect(callbacks.size).toBe(0);
 });

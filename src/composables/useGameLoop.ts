@@ -1,7 +1,9 @@
 import { onBeforeUnmount, onMounted, watch } from "vue";
 
 /** 暂停、隐藏和卸载时取消帧循环，恢复时不补算离开期间的时间。 */
-export function useGameLoop(paused: () => boolean, tick: (seconds: number) => void) {
+export function useGameLoop(paused: () => boolean, tick: (seconds: number) => void, options: { pauseOnBlur?: boolean } = {}) {
+  // 默认失焦暂停；放置类游戏可继续运行，隐藏窗口和手动暂停仍停止循环。
+  const pauseOnBlur = options.pauseOnBlur !== false;
   let frame = 0;
   let lastTime = 0;
   let mounted = false;
@@ -23,15 +25,19 @@ export function useGameLoop(paused: () => boolean, tick: (seconds: number) => vo
   watch(paused, sync);
   onMounted(() => {
     mounted = true;
-    window.addEventListener("blur", blur);
-    window.addEventListener("focus", focus);
+    if (pauseOnBlur) {
+      window.addEventListener("blur", blur);
+      window.addEventListener("focus", focus);
+    }
     document.addEventListener("visibilitychange", sync);
     sync();
   });
   onBeforeUnmount(() => {
     mounted = false; stop();
-    window.removeEventListener("blur", blur);
-    window.removeEventListener("focus", focus);
+    if (pauseOnBlur) {
+      window.removeEventListener("blur", blur);
+      window.removeEventListener("focus", focus);
+    }
     document.removeEventListener("visibilitychange", sync);
   });
 }

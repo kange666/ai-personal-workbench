@@ -55,7 +55,7 @@ useGameLoop(() => props.paused || waiting.value || (state.value.phase !== 'playi
   if (phase !== s.phase || wave !== s.wave) { settleDefense(s, meta.value); saveMeta(); recordScore(s.score); }
   elapsed += dt;
   if (elapsed >= 1 || phase !== s.phase || wave !== s.wave) { save(); elapsed = 0; }
-});
+}, { pauseOnBlur: false });
 const focusSurface = () => nextTick(() => surface.value?.focus());
 function clearEffects() { effects.value = []; recoil.value = 0; towerHurt.value = 0; }
 function restart() {
