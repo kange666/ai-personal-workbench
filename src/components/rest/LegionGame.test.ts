@@ -1,0 +1,18 @@
+import { mount, type VueWrapper } from '@vue/test-utils';
+import { afterEach,beforeEach,expect,it,vi } from 'vitest';
+import { nextTick } from 'vue';
+import LegionGame from './LegionGame.vue';
+import { disposeLegionSession,useLegionSession } from '../../composables/useLegionSession';
+import { createLegion,validLegion } from '../../utils/rest/legion';
+import { gameSaveKey } from '../../composables/useGameSave';
+let wrapper:VueWrapper|undefined;
+const read=()=>JSON.parse(localStorage.getItem(gameSaveKey('legion'))!).state;
+const click=async(text:string)=>{await wrapper!.findAll('button').find(b=>b.text().includes(text))!.trigger('click');};
+beforeEach(()=>{vi.useFakeTimers();localStorage.clear();});
+afterEach(()=>{wrapper?.unmount();wrapper=undefined;disposeLegionSession();vi.useRealTimers();});
+it('打开后自动运行，收起卸载后仍继续，重开可查看相同军团',async()=>{wrapper=mount(LegionGame,{props:{paused:false}});expect(wrapper.findAll('.legion-unit-card')).toHaveLength(6);vi.advanceTimersByTime(5000);await nextTick();expect(read().elapsed).toBeGreaterThan(3);const before=read().elapsed;wrapper.unmount();wrapper=undefined;vi.advanceTimersByTime(5000);expect(read().elapsed).toBeGreaterThan(before);wrapper=mount(LegionGame,{props:{paused:false}});expect(wrapper.text()).toContain('收起后继续挂机');expect(validLegion(read())).toBe(true);});
+it('手动暂停跨收起生效，恢复按钮继续挂机',async()=>{wrapper=mount(LegionGame,{props:{paused:false}});await click('暂停远征');const time=read().elapsed;vi.advanceTimersByTime(4000);expect(read().elapsed).toBe(time);await click('继续远征');vi.advanceTimersByTime(4000);expect(read().elapsed).toBeGreaterThan(time);await wrapper.setProps({paused:true});const paused=read().elapsed;vi.advanceTimersByTime(3000);expect(read().elapsed).toBe(paused);});
+it('策略、速度和开关可保存；详情和24种说明都可打开',async()=>{wrapper=mount(LegionGame,{props:{paused:false}});await wrapper.get('#legion-strategy').setValue('elements');await wrapper.get('[aria-label="远征速度"]').setValue('2');expect(read().strategy).toBe('elements');expect(read().speed).toBe(2);await wrapper.findAll('input')[1]!.setValue(false);expect(read().options.strengthen).toBe(false);await click('军团配置');expect(wrapper.findAll('.legion-skill')).toHaveLength(24);expect(wrapper.text()).toContain('最大生命');await click('玩法说明');expect(wrapper.text()).toContain('不补算离线收益');});
+it('强化次数可连续使用，选完不收起配置面板',async()=>{const s=createLegion(11);s.pending=3;s.options.strengthen=false;localStorage.setItem(gameSaveKey('legion'),JSON.stringify({version:1,state:s,best:0}));wrapper=mount(LegionGame,{props:{paused:false}});await click('军团配置');await wrapper.get('.legion-skill').trigger('click');await wrapper.get('.legion-skill').trigger('click');expect(read().pending).toBe(1);expect(wrapper.findAll('.legion-skill')).toHaveLength(24);});
+it('刷新重新加载同一存档不补算退出时间，其他游戏数据保留',async()=>{localStorage.setItem(gameSaveKey('defense'),'untouched');wrapper=mount(LegionGame,{props:{paused:false}});vi.advanceTimersByTime(4000);wrapper.unmount();wrapper=undefined;disposeLegionSession();const previous=read();vi.advanceTimersByTime(60000);const current=useLegionSession().state.value;expect(current.elapsed).toBe(previous.elapsed);expect(current.wave).toBe(previous.wave);expect(localStorage.getItem(gameSaveKey('defense'))).toBe('untouched');});
+it('战场子组件持续更新位置与单位，不能只有计时文字变化',async()=>{wrapper=mount(LegionGame,{props:{paused:false}});const first=wrapper.get('[data-legion-unit]').attributes('transform');vi.advanceTimersByTime(4000);await nextTick();expect(wrapper.get('[data-legion-unit]').attributes('transform')).not.toBe(first);expect(wrapper.findAll('[data-side="enemy"]').length).toBeGreaterThan(0);});

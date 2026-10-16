@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { createArchery, archeryTrajectory, suggestArcheryAim, shootArchery, stepArchery, validArchery } from './archery';
 import { createDefense, createDefenseMeta, defenseOffers, DEFENSE_CARDS, defenseStats, pickDefenseCard, settleDefense, startDefense, startDefenseWave, stepDefense, upgradeDefense, validDefense } from './defense';
 import { createCircuit, circuitStatus, turnCircuit, hintCircuit, undoCircuit, validCircuit } from './wiringCampaign';
 import { createTowerAdventure, dropTowerAdventure, stepTowerAdventure, towerTool, validTowerAdventure, TOWER_LEVELS } from './towerCampaign';
@@ -27,43 +26,6 @@ describe('电路六十关',()=>{
   });
 });
 
-describe('弧线对决平衡与存档',()=>{
-  it('重箭辅助越墙在不同帧率下与预览一致',()=>{
-    for(const dt of [1/144,1/60,.033,.05,.1]){
-      const s=createArchery(1,17);s.kind='heavy';const aim=suggestArcheryAim(s,'player','heavy');
-      expect(archeryTrajectory(s,aim.angle,aim.power).result?.kind).toMatch(/head|body/);
-      shootArchery(s,aim.angle,aim.power);
-      for(let i=0;i<1000&&s.phase==='flight';i++)stepArchery(s,dt);
-      expect(s.enemyHP,`帧间隔 ${dt}`).toBeLessThan(s.enemyMax);expect(s.ammo.heavy).toBe(2);
-    }
-  });
-  it('三十关各自有普通箭可行弹道，辅助遵守障碍碰撞',()=>{
-    for(let level=0;level<30;level++)for(const seed of [7,191,902]){
-      const s=createArchery(level,seed),aim=suggestArcheryAim(s);
-      expect(archeryTrajectory(s,aim.angle,aim.power).result?.kind,`关 ${level+1} 种子 ${seed}`).toMatch(/head|body/);
-      expect(validArchery(s)).toBe(true);
-    }
-  });
-  it('三十关按辅助修正弹道可赢；电脑仍能造成伤害，双方不会穿墙',()=>{
-    let damage=0;
-    for(let level=0;level<30;level++){
-      const s=createArchery(level,level+109);
-      for(let frame=0;frame<12000&&!['won','lost'].includes(s.phase);frame++){
-        if(s.phase==='aim'){const aim=suggestArcheryAim(s);shootArchery(s,aim.angle,aim.power);}
-        stepArchery(s,.05);
-        if(frame%60===0)expect(validArchery(JSON.parse(JSON.stringify(s)))).toBe(true);
-      }
-      expect(s.phase,`关 ${level+1}, shots=${s.shots}, hp=${s.playerHP}`).toBe('won');expect(s.shots).toBeLessThanOrEqual(8);damage+=130-s.playerHP;
-    }
-    expect(damage).toBeGreaterThan(0);
-  },30000);
-  it('飞行中完整续存、特殊箭消耗一次、无效时间不推进',()=>{
-    const a=createArchery(23,42);a.kind='blast';expect(shootArchery(a)).toBe(true);expect(a.ammo.blast).toBe(1);expect(shootArchery(a)).toBe(false);
-    stepArchery(a,.05);const b=JSON.parse(JSON.stringify(a));expect(validArchery(b)).toBe(true);
-    for(let i=0;i<60;i++){stepArchery(a,.05);stepArchery(b,.05);}expect(b).toEqual(a);
-    const before=JSON.stringify(a);stepArchery(a,0);stepArchery(a,NaN);expect(JSON.stringify(a)).toBe(before);
-  });
-});
 
 describe('孤塔守夜平衡与规则',()=>{
   const simulate=(seed:number,family:string)=>{
@@ -97,12 +59,12 @@ describe('孤塔守夜平衡与规则',()=>{
     for(let n=0;n<40000&&s.wave<4&&s.phase!=='lost';n++){if(s.pendingUpgrades&&s.phase==='playing')defenseOffers(s);if(s.phase==='choice')pickDefenseCard(s,s.offers[0]!);stepDefense(s,.1);}
     expect(s.wave).toBeGreaterThanOrEqual(4);expect(s.hp).toBeGreaterThan(0);
   });
-  it('选卡冻结计时、存档复现战况，奖励只结算一次；闯关全卡满级仍可推进',()=>{
+  it('选卡冻结计时、存档复现战况，奖励只结算一次；闯关全卡6级后仍可强化',()=>{
     const s=createDefense(71);startDefense(s,createDefenseMeta());for(let i=0;i<200;i++)stepDefense(s,.05);
     const copy=JSON.parse(JSON.stringify(s));for(let i=0;i<200;i++){stepDefense(s,.05);stepDefense(copy,.05);}expect(copy).toEqual(s);
     s.pendingUpgrades=1;defenseOffers(s);const before=JSON.stringify(s);stepDefense(s,.1);expect(JSON.stringify(s)).toBe(before);
     const meta=createDefenseMeta();s.phase='won';s.wave=30;settleDefense(s,meta);const shards=meta.shards;settleDefense(s,meta);expect(meta.shards).toBe(shards);s.mode='endless';s.wave=31;s.phase='lost';settleDefense(s,meta);expect(meta.shards).toBe(shards);
-    s.mode='campaign';s.phase='playing';delete s.choiceResume;s.pendingUpgrades=1;s.cards=Object.fromEntries(DEFENSE_CARDS.map(c=>[c.id,6]));defenseOffers(s);expect(s.phase).toBe('playing');expect(s.wave).toBe(31);expect(s.pendingUpgrades).toBe(0);expect(validDefense(s)).toBe(true);
+    s.mode='campaign';s.phase='playing';delete s.choiceResume;s.pendingUpgrades=1;s.cards=Object.fromEntries(DEFENSE_CARDS.map(c=>[c.id,6]));defenseOffers(s);expect(s.phase).toBe('choice');expect(s.wave).toBe(31);expect(s.pendingUpgrades).toBe(1);expect(validDefense(s)).toBe(true);
   });
   it('四个流派的核心升级确实改变能力',()=>{
     const s=createDefense(1),base=defenseStats(s);s.cards={power:2,speed:2,multi:2,health:2,armor:2,regen:2};const stats=defenseStats(s);

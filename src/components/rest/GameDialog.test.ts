@@ -36,6 +36,9 @@ it("塔防切换窗口不自动暂停，手动暂停和隐藏暂停仍有效", a
   expect(wrapper.findComponent(FakeGame).props("paused")).toBe(true);
   expect(document.querySelector(".rest-pause-cover")!.textContent).toContain("游戏已暂停");
 });
+it("军团切换窗口和隐藏都继续挂机，主动暂停仍有效",async()=>{
+  await render('legion');window.dispatchEvent(new Event('blur'));vi.spyOn(document,'hidden','get').mockReturnValue(true);document.dispatchEvent(new Event('visibilitychange'));await nextTick();expect(wrapper.findComponent(FakeGame).props('paused')).toBe(false);button('暂停游戏').click();await nextTick();expect(wrapper.findComponent(FakeGame).props('paused')).toBe(true);
+});
 it("Esc先取消重开，再关闭；Tab不会跳入背景", async () => {
   await render(); button("重新开始").click(); await nextTick(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); await nextTick(); expect(wrapper.emitted("close")).toBeUndefined();
   const gameButton = document.querySelector<HTMLButtonElement>("[data-game-focus] button")!; gameButton.focus(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", cancelable: true })); expect(document.activeElement).toBe(button("暂停游戏"));

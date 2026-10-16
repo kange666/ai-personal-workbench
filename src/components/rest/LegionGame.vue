@@ -1,0 +1,65 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useLegionSession } from '../../composables/useLegionSession';
+import { legionCardLevel, legionChapter, legionPower, legionRegion, legionStats, legionTrainingCost, legionUnlocked, strengthenLegion, trainLegion } from '../../utils/rest/legion';
+import { LEGION_CARDS, LEGION_STRATEGIES, LEGION_UNITS, type LegionStrategy, type LegionUnitKind } from '../../utils/rest/legionContent';
+import LegionBattlefield from './LegionBattlefield.vue';
+import LegionFigure from './LegionFigure.vue';
+const props = defineProps<{ paused: boolean }>();
+const emit = defineEmits<{ 'pause-change': [paused: boolean] }>();
+const session = useLegionSession(), state = session.state, detach = session.attach();
+onBeforeUnmount(detach);
+if(props.paused) session.mutate(s=>{s.paused=true;});
+onMounted(()=>emit('pause-change',state.value.paused));
+watch(() => props.paused, value => session.mutate(s => { s.paused = value; }));
+const panel = ref<'army'|'log'|'rules'|null>(null), selected = ref<LegionUnitKind>('guard');
+const selectedUnit = computed(() => LEGION_UNITS.find(u => u.id === selected.value)!);
+const selectedStats = computed(() => legionStats(state.value, selected.value));
+const format = (n: number) => n >= 1e8 ? `${(n/1e8).toFixed(1)}亿` : n >= 10000 ? `${(n/10000).toFixed(1)}万` : Math.floor(n).toLocaleString('zh-CN');
+const duration = computed(() => `${Math.floor(state.value.elapsed/60)}:${String(Math.floor(state.value.elapsed%60)).padStart(2,'0')}`);
+const settings = [ ['summon','自动召唤','只召唤尚未入场的新编队名额，本关阵亡的兵不会补回'], ['strengthen','自动强化','按当前流派自动选择随机强化，关闭后次数可累积'], ['retry','失败续战','失败后自动整备并继续远征'], ['train','自动训练','自动花金币培养兵种，永久保留'] ] as const;
+function togglePanel(value: typeof panel.value) { panel.value = panel.value === value ? null : value; }
+function chooseUnit(id: LegionUnitKind) { selected.value = id; panel.value = 'army'; }
+function togglePause() { session.mutate(s=>{s.paused=!s.paused;});emit('pause-change',state.value.paused); }
+defineExpose({ restart: session.restart });
+</script>
+<template>
+  <div class="legion-game" tabindex="0" data-game-focus aria-label="召唤军团，全自动挂机远征">
+    <div class="legion-topline"><strong>{{legionRegion(state).name}} · {{legionChapter(state)}}</strong><span class="legion-running">{{state.paused?'远征暂停':'全自动远征'}}</span><label class="legion-speed">速度 <select aria-label="远征速度" :value="state.speed" @change="session.mutate(s=>s.speed=Number(($event.target as HTMLSelectElement).value) as 1|2)"><option :value="1">1倍</option><option :value="2">2倍</option></select></label></div>
+    <div class="legion-resources"><span>金币 <b>{{format(state.coins)}}</b></span><span>召唤精华 <b>{{format(state.essence)}}</b></span><span>军团战力 <b>{{format(legionPower(state))}}</b></span><span>远征 <b>{{duration}}</b></span></div>
+    <div class="legion-layout">
+      <LegionBattlefield :state="state"/>
+      <aside class="legion-strategy" aria-label="挂机策略">
+        <label for="legion-strategy"><strong>挂机策略</strong></label><select id="legion-strategy" :value="state.strategy" @change="session.mutate(s=>s.strategy=($event.target as HTMLSelectElement).value as LegionStrategy)"><option v-for="strategy in LEGION_STRATEGIES" :key="strategy.id" :value="strategy.id">{{strategy.name}}</option></select>
+        <p class="legion-strategy-desc">{{LEGION_STRATEGIES.find(x=>x.id===state.strategy)?.detail}}</p>
+        <label v-for="[key,name,detail] in settings" :key="key" class="legion-toggle" :title="detail"><input type="checkbox" :checked="state.options[key]" @change="session.mutate(s=>s.options[key]=($event.target as HTMLInputElement).checked)"><span>{{name}}</span></label>
+        <p class="legion-strategy-desc">本关阵亡不补兵<br>进入下一关时统一满血复活</p>
+        <div class="legion-combos"><strong>当前组合 · {{state.rank}}级</strong><p v-if="!Object.keys(state.cards).length">战斗获得经验后自动强化</p><span v-for="card in LEGION_CARDS.filter(c=>legionCardLevel(state,c.id)>0).slice(0,6)" :key="card.id" :title="card.detail">{{card.name}} <b>{{legionCardLevel(state,card.id)}}</b></span></div>
+        <button v-if="state.pending" class="button legion-pending" @click="session.mutate(s=>{strengthenLegion(s)})">使用强化（{{state.pending}}）</button>
+      </aside>
+    </div>
+    <div class="legion-roster" aria-label="六兵种军团">
+      <button v-for="u in LEGION_UNITS" :key="u.id" class="legion-unit-card" :class="{locked:!legionUnlocked(state,u.id),selected:panel==='army'&&selected===u.id}" :aria-label="`查看${u.name}详情`" @click="chooseUnit(u.id)">
+        <svg viewBox="-35 -72 78 82" aria-hidden="true"><LegionFigure :kind="u.id" :tier="1+Math.floor(state.training[u.id]/5)"/></svg><span><strong>{{u.name}}</strong><small>{{legionUnlocked(state,u.id)?`训练 Lv.${state.training[u.id]}`:`第 ${u.unlock} 关解锁`}}</small><em>{{state.allies.filter(a=>a.kind===u.id).length}}/{{state.formation[u.id]}} 人 · {{u.role}}</em></span>
+      </button>
+    </div>
+    <footer class="legion-footer"><span class="legion-running">{{state.paused?'已暂停':state.phase==='recover'&&!state.options.retry?'等待开启失败续战':'军团正在自动作战'}} · 收起后继续挂机</span><div><button class="button" :aria-expanded="panel==='army'" @click="togglePanel('army')">军团配置</button><button class="button" :aria-expanded="panel==='log'" @click="togglePanel('log')">成长记录</button><button class="button" :aria-expanded="panel==='rules'" @click="togglePanel('rules')">玩法说明</button><button class="button" @click="togglePause">{{state.paused?'继续远征':'暂停远征'}}</button></div></footer>
+    <section v-if="panel" class="legion-detail" :aria-label="panel==='army'?'军团详细配置':panel==='log'?'成长记录':'玩法说明'">
+      <div class="legion-detail-heading"><strong>{{panel==='army'?`${selectedUnit.name} · ${selectedUnit.role}`:panel==='log'?'成长记录':'全自动远征说明'}}</strong><button class="button" @click="panel=null">收起详情</button></div>
+      <template v-if="panel==='army'">
+        <p>{{selectedUnit.detail}}</p><div class="legion-stat-grid"><span>最大生命 <b>{{format(selectedStats.hp)}}</b></span><span>单次攻击 / 治疗 <b>{{format(selectedStats.damage)}}</b></span><span>攻击 / 治疗频率 <b>{{selectedStats.rate.toFixed(2)}} 次/秒</b></span><span>攻击射程 <b>{{format(selectedStats.range)}}</b></span><span>护甲减伤 <b>{{(selectedStats.armor/(1+selectedStats.armor)*100).toFixed(1)}}%</b></span><span>训练等级 <b>{{state.training[selected]}} / 300</b></span></div>
+        <button class="button" :disabled="!legionUnlocked(state,selected)||state.coins<legionTrainingCost(state,selected)||state.training[selected]>=300" @click="session.mutate(s=>{trainLegion(s,selected)})">训练一级 · {{format(legionTrainingCost(state,selected))}} 金币</button>
+        <p>训练永久保留；同一兵种共享训练属性。点击下方强化可查看并使用暂存次数，手动选择不暂停战斗。</p>
+        <div class="legion-card-list"><button v-for="card in LEGION_CARDS" :key="card.id" class="legion-skill" :disabled="!state.pending||(card.family==='elements'&&!legionUnlocked(state,'mage'))||(card.id==='heal'&&!legionUnlocked(state,'priest'))||(card.id==='stomp'&&!legionUnlocked(state,'giant'))" @click="session.mutate(s=>{strengthenLegion(s,card.id)})"><strong>{{card.name}} · {{legionCardLevel(state,card.id)}}级</strong><span>{{card.detail}}</span></button></div>
+      </template>
+      <template v-else-if="panel==='log'"><div class="legion-stat-grid"><span>最高到达 <b>第{{state.bestWave}}关</b></span><span>累计胜利 <b>{{state.wins}}</b></span><span>累计击杀 <b>{{format(state.kills)}}</b></span><span>远征结算 <b>{{state.defeats}}次</b></span><span>累计有效伤害 <b>{{format(state.damage)}}</b></span><span>累计有效治疗 <b>{{format(state.healing)}}</b></span></div><ol><li v-for="(line,i) in state.log" :key="i">{{line}}</li></ol></template>
+      <template v-else><p>默认无需操作：军团自动召兵、攻击、拾取、强化、训练和挑战下一关。每5关有精英，每10关有首领，森林、荒原、寒霜与熔火区域轮换。</p><p>本关阵亡的兵不会在战斗中补回；进入下一关时，阵亡编队统一满血复活，存活单位恢复30%生命。自动召唤只扩充尚未入场的新名额，不会重复使用本关阵亡名额。旧存档中的自动补兵开关不再影响此规则。</p><p>金币用于永久训练；精华用于本轮召兵，战斗中自动恢复；经验用于本轮随机强化。强化按均衡、箭雨、雷火或钢铁策略选择，关闭自动强化后次数会累积，可在军团配置连续选择。</p><p>失败或同一关超过120秒时自动结算，保留金币、训练和兵种解锁，本轮随机强化重新生成。回退约25%的关卡重新积累，连续失败进一步回退；整备4秒并补齐已解锁编队后续战，可关闭失败续战。</p><p>收起窗口、切换页面或切到其他软件仍继续挂机；点暂停才停止。退出工作台后保存，下次打开游戏继续，不补算离线收益。支持1倍与2倍速度。</p><p>同屏友军最多24人、双方合计最多56人，编队随兵种解锁扩充。攻击频率最多每秒12次，训练最高300级。强化可重复成长，箭矢穿透与闪电只作用于实际存在且位于范围内的敌人。护甲按递减收益结算，多个盾卫的保护光环不重复叠加。</p></template>
+    </section>
+    <p class="legion-save-note">本机自动保存 · 最高第 {{state.bestWave}} 关 · 重新远征保留金币和永久训练</p>
+  </div>
+</template>
+<style scoped>
+.legion-game{outline:none;min-width:0}.legion-topline,.legion-resources,.legion-footer,.legion-detail-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.legion-topline{font-size:13px;margin-bottom:9px}.legion-running{color:var(--success);font-size:11px;overflow-wrap:anywhere}.legion-speed{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:11px}.legion-game select{max-width:100%;min-width:0;padding:6px 8px;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:7px;font:inherit}.legion-resources{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));padding:9px 12px;border:1px solid var(--line);border-radius:9px;margin-bottom:10px;font-size:11px;color:var(--muted)}.legion-resources span{min-width:0;overflow-wrap:anywhere}.legion-resources b{color:var(--text);margin-left:5px;font-variant-numeric:tabular-nums}.legion-layout{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:10px}.legion-strategy{min-width:0;padding:13px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft,var(--surface));font-size:12px;overflow-wrap:anywhere}.legion-strategy>select{display:block;width:100%;margin-top:9px}.legion-strategy-desc{font-size:11px;line-height:1.6;color:var(--muted);margin:9px 0}.legion-toggle{display:flex;gap:8px;align-items:center;margin:9px 0;cursor:pointer}.legion-toggle input{width:16px;height:16px;accent-color:var(--success);flex:none}.legion-combos{margin-top:13px;padding-top:11px;border-top:1px solid var(--line);line-height:1.65}.legion-combos>strong{display:block;font-size:12px;margin-bottom:6px}.legion-combos>span{display:inline-block;padding:3px 6px;margin:3px 4px 0 0;border:1px solid var(--line);border-radius:6px;font-size:10px}.legion-combos p{font-size:11px;color:var(--muted);margin:6px 0}.legion-pending{width:100%;margin-top:10px;white-space:normal}.legion-roster{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:10px}.legion-unit-card{appearance:none;display:flex;align-items:center;gap:5px;min-width:0;padding:8px 5px;border:1px solid var(--line);border-radius:10px;color:var(--text);background:var(--surface);font:inherit;text-align:left;cursor:pointer}.legion-unit-card>svg{width:40px;height:52px;flex:none}.legion-unit-card>span{min-width:0;overflow-wrap:anywhere}.legion-unit-card strong,.legion-unit-card small,.legion-unit-card em{display:block;font-style:normal}.legion-unit-card strong{font-size:12px}.legion-unit-card small{font-size:10px;color:var(--muted);margin:4px 0}.legion-unit-card em{font-size:9px;color:var(--muted);line-height:1.4}.legion-unit-card.locked{opacity:.6}.legion-unit-card.selected{border-color:var(--primary);background:var(--primary-soft)}.legion-footer{margin-top:12px}.legion-footer>div{display:flex;flex-wrap:wrap;gap:6px}.legion-game .button{font-size:11px;min-height:30px;padding:6px 9px;white-space:normal;overflow-wrap:anywhere;line-height:1.5}.legion-detail{margin-top:12px;padding:13px;border:1px solid var(--line);border-radius:10px;overflow-wrap:anywhere;font-size:12px;line-height:1.8}.legion-detail p{color:var(--muted);margin:9px 0}.legion-stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin:12px 0;font-size:11px}.legion-stat-grid span{min-width:0;padding:8px;background:var(--primary-soft);border-radius:7px;overflow-wrap:anywhere}.legion-stat-grid b{display:block;font-weight:600}.legion-card-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.legion-skill{appearance:none;min-width:0;padding:10px;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:8px;font:inherit;text-align:left;cursor:pointer;white-space:normal;overflow-wrap:anywhere}.legion-skill strong{display:block;font-size:12px}.legion-skill span{display:block;font-size:11px;line-height:1.7;margin-top:5px;color:var(--muted)}.legion-skill:disabled{cursor:default;opacity:.72}.legion-detail ol{padding-left:22px}.legion-save-note{margin:8px 0 0;font-size:10px;color:var(--muted);text-align:center;overflow-wrap:anywhere}
+@media(max-width:1100px){.legion-layout{grid-template-columns:minmax(0,1fr) 180px}.legion-strategy{padding:10px}.legion-unit-card>svg{width:30px}.legion-unit-card{gap:3px}.legion-unit-card em{display:none}}
+@media(max-width:820px){.legion-layout{grid-template-columns:minmax(0,1fr)}.legion-strategy{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 12px}.legion-strategy>select{margin:0}.legion-strategy-desc,.legion-combos{grid-column:1/-1}.legion-toggle{margin:3px 0}.legion-roster{grid-template-columns:repeat(3,minmax(0,1fr))}.legion-stat-grid,.legion-card-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>

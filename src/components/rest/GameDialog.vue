@@ -23,11 +23,11 @@ const pause = () => { paused.value = true; };
 // 焦点进入游戏 iframe 时主窗口会触发 blur，整个文档仍有焦点时继续运行。
 const windowBlur = () => {
   // 塔防自动战斗允许切换到其他窗口，仍可通过暂停按钮主动暂停。
-  if (props.game === "defense") return;
+  if (props.game === "defense" || props.game === "legion") return;
   if (props.game === "mota" && document.activeElement instanceof HTMLIFrameElement && document.hasFocus()) return;
   pause();
 };
-const visibility = () => { if (document.hidden) pause(); };
+const visibility = () => { if (document.hidden && props.game !== "legion") pause(); };
 function keydown(event: KeyboardEvent) {
   // 游戏弹框内不让工作台全局快捷键打开背景弹层。
   if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === "k" || (event.shiftKey && event.code === "Space"))) {
@@ -68,19 +68,19 @@ onBeforeUnmount(() => {
 <template>
   <Teleport to="body">
     <div class="rest-backdrop" @click.self="emit('close')">
-      <section ref="panel" class="rest-dialog" :class="{ 'rest-dialog-mota': game === 'mota', 'rest-dialog-wide': game==='archery'||game==='defense' }" role="dialog" aria-modal="true" :aria-labelledby="`rest-title-${game}`">
+      <section ref="panel" class="rest-dialog" :class="{ 'rest-dialog-mota': game === 'mota', 'rest-dialog-wide': game==='defense', 'rest-dialog-legion': game==='legion' }" role="dialog" aria-modal="true" :aria-labelledby="`rest-title-${game}`">
         <header class="rest-dialog-header">
           <span class="rest-dialog-mark" :class="`rest-color-${info.color}`"><GameIcon :name="game" /></span>
           <div><h2 :id="`rest-title-${game}`">{{ info.name }}</h2><small>{{ game === 'mota' ? '经典 21 层 / 50 层 · 离线冒险' : '进度自动保存 · 随时回来' }}</small></div>
           <button class="icon-button" :title="paused ? '继续游戏' : '暂停游戏'" :aria-label="paused ? '继续游戏' : '暂停游戏'" :disabled="resetting" @click="paused ? resume() : pause()">{{ paused ? '▷' : 'Ⅱ' }}</button>
           <button class="icon-button" title="重新开始" aria-label="重新开始" @click="requestRestart">↻</button>
-          <button class="icon-button" :title="game === 'mota' ? '关闭游戏（Esc）' : '保存并关闭（Esc）'" :aria-label="game === 'mota' ? '关闭游戏' : '保存并关闭'" @click="emit('close')">×</button>
+          <button class="icon-button" :title="game === 'mota' ? '关闭游戏（Esc）' : game === 'legion' ? '收起并继续挂机（Esc）' : '保存并关闭（Esc）'" :aria-label="game === 'mota' ? '关闭游戏' : game === 'legion' ? '收起并继续挂机' : '保存并关闭'" @click="emit('close')">×</button>
         </header>
         <p v-if="restStorageWarning" class="rest-storage-warning" role="status">{{ restStorageWarning }}</p>
         <div class="rest-game-body">
-          <div :inert="paused ? true : undefined"><component :is="component" ref="instance" :paused="paused" /></div>
+          <div :inert="paused ? true : undefined"><component :is="component" ref="instance" :paused="paused" @pause-change="paused = $event" /></div>
           <div v-if="paused" class="rest-pause-cover">
-            <template v-if="resetting"><span class="rest-pause-symbol">↻</span><h3>重新开始这一轮？</h3><p>{{ game === 'mota' ? '当前魔塔进度会重置。' : '当前进度会重置，最高分保留。' }}</p><div class="game-actions"><button class="button" @click="cancelRestart">继续当前进度</button><button class="button primary" @click="restart">确认重新开始</button></div></template>
+            <template v-if="resetting"><span class="rest-pause-symbol">↻</span><h3>重新开始这一轮？</h3><p>{{ game === 'mota' ? '当前魔塔进度会重置。' : game === 'legion' ? '本轮军团和随机强化重置，金币、永久训练和最高关卡保留。' : '当前进度会重置，最高分保留。' }}</p><div class="game-actions"><button class="button" @click="cancelRestart">继续当前进度</button><button class="button primary" @click="restart">确认重新开始</button></div></template>
             <template v-else><span class="rest-pause-symbol">Ⅱ</span><h3>休息一下也没关系</h3><p>游戏已暂停，进度留在这里。</p><button class="button primary" @click="resume">继续游戏</button></template>
           </div>
         </div>

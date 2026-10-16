@@ -34,21 +34,22 @@ describe('无尽守卫', () => {
     won.phase = 'lost'; expect(enterDefenseEndless(won)).toBe(false);
   });
 
-  it('六类基础升级均可超过100级，攻速和射程达到画面上限后仍能增伤', () => {
+  it('六类基础升级均可超过100级，攻速和射程继续提高且不再被截断', () => {
     const s = createDefense(7, 'endless'); s.coins = 1e8;
     for (const u of DEFENSE_UPGRADES) s.upgrades[u.id] = 100;
     const before = defenseStats(s);
     for (const u of DEFENSE_UPGRADES) {
-      const damage = defenseStats(s).damage;
+      const stats = defenseStats(s);
       expect(upgradeDefense(s, u.id)).toBe(true); expect(s.upgrades[u.id]).toBe(101);
-      if (u.id === 'rate' || u.id === 'range') expect(defenseStats(s).damage).toBeGreaterThan(damage);
+      if (u.id === 'rate') expect(defenseStats(s).rate).toBeGreaterThan(stats.rate);
+      if (u.id === 'range') expect(defenseStats(s).range).toBeGreaterThan(stats.range);
     }
     const after = defenseStats(s);
-    expect(after.rate).toBe(18); expect(after.range).toBe(300);
+    expect(after.rate).toBeGreaterThan(18); expect(after.range).toBeGreaterThan(300);
     expect(after.maxHP).toBeGreaterThan(before.maxHP);
     expect(after.regen).toBeGreaterThan(before.regen); expect(after.coinBoost).toBeGreaterThan(before.coinBoost);
     expect(validDefense(JSON.parse(JSON.stringify(s)))).toBe(true);
-    s.mode = 'campaign'; expect(upgradeDefense(s, 'attack')).toBe(false);
+    s.mode = 'campaign'; expect(upgradeDefense(s, 'attack')).toBe(true);
   });
 
   it('无尽后期价格持续增长但不再指数失控，前20级与闯关相同', () => {
@@ -70,7 +71,7 @@ describe('无尽守卫', () => {
     const before = defenseStats(s).damage;
     defenseOffers(s);
     expect(s.phase).toBe('choice'); expect(s.wave).toBe(50); expect(s.offers).toHaveLength(3);
-    const id = s.offers[0]!; expect(pickDefenseCard(s, id)).toBe(true);
+    const id = s.offers.find(id=>!id.startsWith('evo:'))!; expect(pickDefenseCard(s, id)).toBe(true);
     expect(s.cards[id]).toBe(7); expect(defenseStats(s).damage).toBeGreaterThan(before);
     expect(validDefense(s)).toBe(true);
     for (let i = 0; i < 80; i++) { defenseOffers(s); expect(pickDefenseCard(s, s.offers[0]!)).toBe(true); }

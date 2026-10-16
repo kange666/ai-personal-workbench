@@ -40,6 +40,11 @@
       <use href="#defense-eyes"/><path d="m10-7 7-4 6 4-1 13-6 5-6-5Z" fill="#527f9b" stroke="#c1ebeb" stroke-width="1.5"/>
       <path d="M16-5V5m-3-5h6" stroke="#c1ebeb" stroke-width="1.5"/>
     </g>
+    <g id="defense-charger"><ellipse cy="10" rx="15" ry="4" fill="#1d3541" opacity=".15"/><path d="M-15 3-11-10 1-16 14-6 15 5 5 10-8 9Z" fill="#bd7653" stroke="#6b483d" stroke-width="1.6"/><path d="m-10-9-7-7 2 12m19-2 8-7-3 13" fill="#e6c596" stroke="#78564a"/><path d="M-10 7-13 13m22-7 5 7" stroke="#6b483d" stroke-width="4"/><use href="#defense-eyes"/></g>
+    <g id="defense-warder"><path d="M-13-10 0-19 14-9 11 9 0 14-12 7Z" fill="#658fba" stroke="#405978" stroke-width="1.7"/><path d="M-15-5 0-12 15-5 10 11 0 17-11 10Z" fill="none" stroke="#b7e1ee" stroke-width="2"/><use href="#defense-eyes"/><path d="M-6 7H6m-6-6v12" stroke="#a9d9e6" stroke-width="2"/></g>
+    <g id="defense-hexer"><path d="M-13 9-10-12 0-21 10-12 13 9 5 14-4 11Z" fill="#758859" stroke="#465747" stroke-width="1.5"/><use href="#defense-eyes"/><path d="M12 11 18-19" stroke="#7e705c" stroke-width="2.5"/><path d="m17-25 7 6-7 6-6-6Z" fill="#c6df8a" stroke="#637e58"/><circle cx="17" cy="-19" r="2" fill="#ecf4be"/></g>
+    <g id="defense-brood"><ellipse cy="1" rx="19" ry="15" fill="#9977a8" stroke="#604e74" stroke-width="1.6"/><path d="M-14 8-18 14m10-3-2 5M14 8l4 6m-10-3 2 5" stroke="#604e74" stroke-width="3"/><ellipse cx="-7" cy="2" rx="4" ry="6" fill="#c7abd2"/><ellipse cx="5" cy="4" rx="5" ry="6" fill="#bda2cd"/><use href="#defense-eyes" transform="translate(0 -8)"/></g>
+    <g id="defense-leech"><path d="M-15 6Q-19-6-8-14 4-20 15-7L12 7 2 13-9 11Z" fill="#b86b7d" stroke="#723e5a" stroke-width="1.6"/><path d="M-14-4-20-9m32 5 8-5" stroke="#deb5b8" stroke-width="2"/><use href="#defense-eyes"/><path d="M-5 4 0 9 5 4" fill="none" stroke="#f0d4c5" stroke-width="2"/></g>
     <g id="defense-boss">
       <ellipse cy="18" rx="26" ry="5" fill="#1c333b" opacity=".2"/>
       <path d="M-13 5-17 17-7 19-3 9M5 8 10 18 21 16 15 3" fill="#505b68" stroke="#323e4b" stroke-width="2"/>

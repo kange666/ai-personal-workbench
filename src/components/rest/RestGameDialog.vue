@@ -7,13 +7,13 @@ import TowerGame from "./TowerAdventure.vue";
 import MotaVersions from "./MotaVersions.vue";
 import SokobanGame from "./SokobanGame.vue";
 import GomokuGame from "./GomokuGame.vue";
-import ArcheryGame from "./ArcheryGame.vue";
+import LegionGame from "./LegionGame.vue";
 import DefenseGame from "./DefenseGame.vue";
 import "../../styles/rest.css";
 
 defineProps<{ game: RestGameId }>();
 defineEmits<{ close: [] }>();
-const components = { wiring: WiringGame, breakout: BreakoutGame, tower: TowerGame, mota: MotaVersions, sokoban: SokobanGame, gomoku: GomokuGame, archery:ArcheryGame, defense:DefenseGame };
+const components = { wiring: WiringGame, breakout: BreakoutGame, tower: TowerGame, mota: MotaVersions, sokoban: SokobanGame, gomoku: GomokuGame, legion:LegionGame, defense:DefenseGame };
 </script>
 
 <template>

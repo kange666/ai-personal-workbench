@@ -13,6 +13,8 @@ export default defineConfig({
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],
   test: {
+    // 仅测试正式源码，避免 output 中的历史备份被重复收集。
+    include: ["src/**/*.{test,spec}.{ts,tsx,js,jsx}"],
     environment: "jsdom",
     clearMocks: true,
     pool: "threads",

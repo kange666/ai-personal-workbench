@@ -25,7 +25,7 @@ describe('可累计的强化奖励', () => {
     }
     const offers=[...s.offers],seed=s.seed;expect(closeDefenseOffers(s)).toBe(true);expect(s.pendingUpgrades).toBe(3);
     expect(defenseOffers(s)).toBe(true);expect(s.offers).toEqual(offers);expect(s.seed).toBe(seed);
-    expect(pickDefenseCard(s,offers[0]!)).toBe(true);expect(s.phase).toBe('playing');expect(s.pendingUpgrades).toBe(2);
+    expect(pickDefenseCard(s,offers[0]!)).toBe(true);expect(s.phase).toBe('choice');expect(s.pendingUpgrades).toBe(2);
     expect(s.wave).toBe(wave);expect(s.enemies).toEqual(enemies);expect(s.time).toBe(time);expect(validDefense(s)).toBe(true);
     expect(pickDefenseCard(s,offers[0]!)).toBe(false);expect(s.pendingUpgrades).toBe(2);
   });

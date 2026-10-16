@@ -2,13 +2,11 @@ import { mount, type VueWrapper } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTick } from 'vue';
 import { gameSaveKey } from '../../composables/useGameSave';
-import ArcheryGame from './ArcheryGame.vue';
 import DefenseGame from './DefenseGame.vue';
 import TowerAdventure from './TowerAdventure.vue';
 import BreakoutAdventure from './BreakoutAdventure.vue';
 import WiringAdventure from './WiringAdventure.vue';
 import GomokuGame from './GomokuGame.vue';
-import { createArchery, shootArchery, suggestArcheryAim, validArchery } from '../../utils/rest/archery';
 import { createDefense, createDefenseMeta, startDefense, validDefense } from '../../utils/rest/defense';
 import { createTowerAdventure } from '../../utils/rest/towerCampaign';
 import { createBreakoutAdventure, startBreakoutAdventure } from '../../utils/rest/breakoutCampaign';
@@ -26,17 +24,6 @@ beforeEach(()=>{localStorage.clear();loop.tick=()=>{};loop.paused=()=>true;});
 afterEach(()=>{wrapper?.unmount();wrapper=undefined;vi.restoreAllMocks();});
 
 describe('新增游戏的实际组件交互',()=>{
-  it('射箭辅助可使用，暂停不放箭，飞行中关闭后先等待继续',async()=>{
-    wrapper=mount(ArcheryGame,{props:{paused:true}});await button('放箭').trigger('click');expect(read('archery')).toBeNull();
-    await wrapper.setProps({paused:false});await button('瞄准辅助').trigger('click');const aimed=read('archery').state;expect(aimed.angle).toBeGreaterThan(0);
-    await button('放箭').trigger('click');expect(read('archery').state.phase).toBe('flight');expect(read('archery').state.shots).toBe(1);
-    await wrapper.setProps({paused:true});const before=JSON.stringify(read('archery').state);await advance(100);expect(JSON.stringify(read('archery').state)).toBe(before);
-    wrapper.unmount();wrapper=mount(ArcheryGame,{props:{paused:false}});expect(wrapper.text()).toContain('继续对决');expect(loop.paused()).toBe(true);await button('继续对决').trigger('click');await advance(120);expect(validArchery(read('archery').state)).toBe(true);expect(read('archery').state.shots).toBe(1);
-  });
-  it('随机射箭胜利不会解锁章节，读档保留玩法',async()=>{
-    const s=createArchery(18,91);s.mode='endless';s.enemyHP=1;const aim=suggestArcheryAim(s);shootArchery(s,aim.angle,aim.power);store('archery',s);
-    wrapper=mount(ArcheryGame,{props:{paused:false}});await button('继续对决').trigger('click');await advance(150);expect(read('archery').state.phase).toBe('won');expect(read('archery-progress')).toBeNull();wrapper.unmount();expect(read('archery-progress').state.unlocked).toBe(0);
-  });
   it('塔防启动、升级、选卡均落到存档；暂停和续存不会补算离开时间',async()=>{
     wrapper=mount(DefenseGame,{props:{paused:true}});await button('开始守卫').trigger('click');await advance();expect(wrapper.text()).toContain('开始守卫');
     await wrapper.setProps({paused:false});await button('开始守卫').trigger('click');await button('攻击').trigger('click');expect(read('defense').state.upgrades.attack).toBe(1);await advance(200);expect(validDefense(read('defense').state)).toBe(true);

@@ -11,6 +11,12 @@ export interface BattleEffect {
   target?: number;
   fromX?: number;
   fromY?: number;
+  /** 仅影响绘制的材质和覆盖圈，实际次数与半径由战斗规则计算。 */
+  variant?: 'kinetic' | 'shell' | 'fire' | 'ice' | 'plasma' | 'shield' | 'nova' | 'volley';
+  radius?: number;
+  amount?: number;
+  /** 延后命中反馈以衔接弹道；不延迟规则层伤害或存档。 */
+  delay?: number;
 }
 
 // 连射、爆破和群怪时仍限制节点数，避免特效无限积累。
@@ -20,7 +26,11 @@ export function addBattleEffect(effects: BattleEffect[], effect: BattleEffect) {
   if (effects.length > BATTLE_EFFECT_LIMIT) effects.splice(0, effects.length - BATTLE_EFFECT_LIMIT);
 }
 export function stepBattleEffects(effects: BattleEffect[], seconds: number) {
-  for (const effect of effects) effect.life = Math.max(0, effect.life - seconds);
+  for (const effect of effects) {
+    const delay = effect.delay || 0;
+    if (delay) effect.delay = Math.max(0, delay - seconds);
+    effect.life = Math.max(0, effect.life - Math.max(0, seconds - delay));
+  }
   return effects.filter(effect => effect.life > 0);
 }
 export function effectProgress(effect: BattleEffect) {
