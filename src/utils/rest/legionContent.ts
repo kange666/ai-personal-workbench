@@ -9,7 +9,7 @@ export const LEGION_UNITS = [
 export type LegionUnitKind = typeof LEGION_UNITS[number]['id'];
 export type LegionStrategy = 'balanced' | 'arrows' | 'elements' | 'iron';
 export const LEGION_STRATEGIES = [
-  { id: 'balanced', name: '均衡推进', detail: '兼顾输出、前排和治疗，适合全自动挂机。' },
+  { id: 'balanced', name: '均衡推进', detail: '兼顾输出、前排和治疗。只调整强化推荐顺序，选卡和召兵由你操作。' },
   { id: 'arrows', name: '箭雨军团', detail: '优先弓手、双发、穿透和爆裂箭；保留盾卫与治疗。' },
   { id: 'elements', name: '雷火军团', detail: '优先法师、连锁、燃烧与冰霜；元素联动清理敌群。' },
   { id: 'iron', name: '钢铁军团', detail: '优先盾卫、巨人、治疗与反击，稳步积累战力。' },
@@ -36,8 +36,8 @@ export const LEGION_CARDS = [
   { id: 'bulwark', name: '坚守阵线', family: 'iron', detail: '盾卫附近100范围友军护甲系数增加0.087；无护甲时约减伤8%，多个盾卫光环不叠加。' },
   { id: 'stomp', name: '震地践踏', family: 'iron', detail: '巨人范围增加18，重击使敌人减速30%，持续2秒。' },
   { id: 'cleave', name: '横扫连斩', family: 'balanced', detail: '剑士伤及55范围其他敌人，造成40%攻击伤害。' },
-  { id: 'recruit', name: '召唤共鸣', family: 'balanced', detail: '新增编队的召唤等待缩短12%，新兵入场恢复友军少量生命；本关阵亡名额不重复召唤。' },
-  { id: 'bounty', name: '远征补给', family: 'balanced', detail: '击杀金币和召唤精华提高15%，持续增加自动训练效率。' },
+  { id: 'recruit', name: '召唤共鸣', family: 'balanced', detail: '手动召唤公共等待由1.2秒除以（1＋等级×12%），最低0.3秒；入场恢复友军1.5%×等级生命。本关阵亡名额不重复召唤。' },
+  { id: 'bounty', name: '远征补给', family: 'balanced', detail: '击杀金币和召唤精华提高15%，可自行分配给永久训练、召兵或战场指令。' },
   { id: 'resolve', name: '绝境斗志', family: 'balanced', detail: '生命低于50%的友军攻击和治疗提高20%。' },
 ] as const;
 export type LegionCardId = typeof LEGION_CARDS[number]['id'];

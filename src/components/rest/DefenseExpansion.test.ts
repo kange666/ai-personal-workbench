@@ -88,6 +88,27 @@ describe('塔防扩展的真实组件交互',()=>{
     const upgrade=wrapper.get('.defense-upgrades button');expect(upgrade.text()).toContain('需 12 ◈');
     expect(upgrade.text()).not.toContain('+0级');expect(upgrade.attributes('disabled')).toBeDefined();
   });
+  it('弹幕在击杀当轮也显示七束齐射、释放提示和蓄能条，短提示结束后保留蓄能',async()=>{
+    const s=createDefense(74,'endless');startDefense(s,createDefenseMeta());s.spawnLeft=1;s.spawnTime=100;
+    s.features!.evolutions.volley=1;s.features!.log.shots=11;s.shotTime=1/defenseStats(s).rate;
+    s.enemies=[{id:1,kind:'normal',x:390,y:200,hp:1,maxHP:1,speed:0,damage:0,shield:0,cooldown:1,burn:0,burnTime:0,slow:0,freeze:0}];s.nextId=2;
+    store(s);wrapper=mount(DefenseGame,{props:{paused:false}});expect(wrapper.get('[aria-label="穿云弹幕蓄能"]').text()).toContain('11/12');
+    await button('继续守卫').trigger('click');await advance(1);
+    expect(wrapper.get('[aria-label="穿云弹幕蓄能"]').text()).toContain('齐射释放');
+    expect(wrapper.findAll('[data-projectile-body="volley"]')).toHaveLength(7);
+    expect(wrapper.get('[data-skill-effect="volley"]').text()).toBe('穿云弹幕');
+    expect(wrapper.get('[aria-label="穿云弹幕蓄能"]').text()).toContain('已释放 1 次');
+    await advance(35);expect(wrapper.get('[aria-label="穿云弹幕蓄能"]').text()).toContain('蓄能');
+    expect(read().state.features.log.damage.evolution).toBe(1);
+  });
+  it('堡垒护环、脉冲与光束分别绘制，技能搜索和详细规则包含新增内容',async()=>{
+    const s=createDefense(13);s.cards={aura:2,pulse:2,lance:2};store(s);wrapper=mount(DefenseGame,{props:{paused:false}});
+    expect(wrapper.find('[data-skill-aura]').exists()).toBe(true);
+    const details=wrapper.get('details.defense-build');(details.element as HTMLDetailsElement).open=true;await details.trigger('toggle');
+    expect(details.text()).toContain('护环每秒伤害');expect(details.text()).toContain('环形脉冲');expect(details.text()).toContain('聚能光束');expect(details.text()).toContain('不能刷新');
+    wrapper.unmount();const effects:BattleEffect[]=[{id:1,kind:'burst',variant:'pulse',x:300,y:200,color:'#a9f1d0',radius:150,duration:.55,life:.3},{id:2,kind:'shot',variant:'beam',x:450,y:200,fromX:300,fromY:200,color:'#aff',duration:.5,life:.3}];
+    wrapper=mount(DefenseEffects,{props:{effects,tier:2}});expect(wrapper.find('[data-skill-effect="pulse"]').exists()).toBe(true);expect(wrapper.find('[data-skill-effect="beam"]').exists()).toBe(true);expect(wrapper.html()).not.toMatch(/NaN|Infinity/);
+  });
   it('属性详情、限制规则和有效伤害统计可展开，显示实际无上限属性',async()=>{
     const s=createDefense(19);s.upgrades.rate=200;s.upgrades.range=200;store(s);wrapper=mount(DefenseGame,{props:{paused:false}});
     const details=wrapper.get('details.defense-build');(details.element as HTMLDetailsElement).open=true;await details.trigger('toggle');await nextTick();

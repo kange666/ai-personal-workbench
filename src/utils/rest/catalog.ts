@@ -5,7 +5,7 @@ export const restGames = [
   { id: "sokoban", name: "推箱子", hint: "给每只箱子找个家", color: "amber" },
   { id: "mota", name: "魔塔", hint: "经典 21 层 / 50 层", color: "teal" },
   { id: "gomoku", name: "五子棋", hint: "与电脑安静下一局", color: "rose" },
-  { id: "legion", name: "召唤军团", hint: "自动远征 · 放置成长", color: "amber" },
+  { id: "legion", name: "召唤军团", hint: "手动指挥 · 自动战斗", color: "amber" },
   { id: "defense", name: "孤塔守夜", hint: "单塔肉鸽 · 越战越强", color: "mint" },
 ] as const;
 export type RestGameId = typeof restGames[number]["id"];

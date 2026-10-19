@@ -3,7 +3,7 @@ export const DEFENSE_CORES = [
   { id: 'rapid', name: '机关塔芯', description: '双管速射，攻速增加30%，单发伤害降低8%。适合暴击与多重射击。', color: '#f4cc78', family: '速射', damage: .92, rate: 1.3, health: 0 },
   { id: 'cannon', name: '重炮塔芯', description: '单发伤害增加35%，攻速降低18%，自带基础溅射。适合爆破与燃烧。', color: '#f3aa79', family: '爆破', damage: 1.35, rate: .82, health: 0 },
   { id: 'tesla', name: '电磁塔芯', description: '伤害增加4%，自带一次电弧跳跃，护盾增加20点。适合冰霜与连锁闪电。', color: '#91dfe8', family: '元素', damage: 1.04, rate: 1, health: 0 },
-  { id: 'bastion', name: '堡垒塔芯', description: '生命增加60点，每秒额外修复0.8点，自带25%近身反伤。适合反伤与护盾。', color: '#b9daa0', family: '堡垒', damage: 1, rate: 1, health: 60 },
+  { id: 'bastion', name: '堡垒塔芯', description: '生命+60、每秒修复+0.8，自带反伤与持续伤害护环。护环、脉冲和震荡伤害提高20%。', color: '#b9daa0', family: '堡垒', damage: 1, rate: 1, health: 60 },
 ] as const;
 export type DefenseCoreId = typeof DEFENSE_CORES[number]['id'] | 'classic';
 // 与炮塔 SVG 的炮口位置共用；近身敌人的弹道不能从目标身后倒飞回来。
@@ -19,11 +19,11 @@ export const DEFENSE_EVOLUTIONS = [
   { id: 'firestorm', name: '连环火爆', family: '进化', requirements: { blast: 3, burn: 3, inferno: 1 }, description: '燃烧中的敌人死亡时，爆炸伤害周围敌人并传播火焰。升级继续增加伤害和半径。', color: '#ffac6b' },
   { id: 'froststorm', name: '碎冰风暴', family: '进化', requirements: { chain: 3, freeze: 2, storm: 1 }, description: '电弧击中冻结目标时触发碎冰溅射，升级继续增加伤害和半径。', color: '#9ce7f3' },
   { id: 'bulwark', name: '反应壁垒', family: '进化', requirements: { shield: 3, thorns: 3, barrier: 1 }, description: '护盾破裂时反击，伤害同时随攻击力与最大护盾成长。护盾恢复后可再次触发，升级增加伤害与半径并缩短冷却。', color: '#c5e5a3' },
-  { id: 'volley', name: '穿云弹幕', family: '进化', requirements: { speed: 3, multi: 3, crit: 2 }, description: '每累计12轮射击释放一次穿透齐射。升级继续增加穿透伤害和覆盖角度。', color: '#ffe8a0' },
+  { id: 'volley', name: '穿云弹幕', family: '进化', requirements: { speed: 3, multi: 3, crit: 2 }, description: '每累计12轮有效射击，先释放金色扇形穿透齐射再普攻；塔上显示蓄能与释放提示。升级增加伤害和覆盖角度。', color: '#ffe8a0' },
 ] as const;
 export type DefenseEvolutionId = typeof DEFENSE_EVOLUTIONS[number]['id'];
 export type DefenseDamageKind = 'direct' | 'blast' | 'chain' | 'burn' | 'thorns' | 'nova' | 'evolution';
-export const DEFENSE_DAMAGE_NAMES: Record<DefenseDamageKind, string> = { direct: '炮弹直击', blast: '爆破溅射', chain: '连锁电弧', burn: '持续灼烧', thorns: '反伤', nova: '震荡波', evolution: '组合进化' };
+export const DEFENSE_DAMAGE_NAMES: Record<DefenseDamageKind, string> = { direct: '炮弹直击', blast: '爆破溅射', chain: '连锁电弧', burn: '持续灼烧', thorns: '反伤', nova: '范围技能', evolution: '组合进化' };
 export const DEFENSE_BOSSES = {
   ram: { name: '破阵巨兽', description: '蓄力后冲锋，接近塔时造成更强打击。减速、护盾与单体火力都能应对。', color: '#efb37b' },
   bulwark: { name: '铁幕守卫', description: '周期恢复自身护盾，并保护附近敌人。穿甲和持续伤害更有效。', color: '#a6cce8' },

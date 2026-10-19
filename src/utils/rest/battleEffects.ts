@@ -12,7 +12,7 @@ export interface BattleEffect {
   fromX?: number;
   fromY?: number;
   /** 仅影响绘制的材质和覆盖圈，实际次数与半径由战斗规则计算。 */
-  variant?: 'kinetic' | 'shell' | 'fire' | 'ice' | 'plasma' | 'shield' | 'nova' | 'volley';
+  variant?: 'kinetic' | 'shell' | 'fire' | 'ice' | 'plasma' | 'shield' | 'nova' | 'volley' | 'pulse' | 'beam';
   radius?: number;
   amount?: number;
   /** 延后命中反馈以衔接弹道；不延迟规则层伤害或存档。 */

@@ -14,7 +14,14 @@ function scatter(e:BattleEffect,i:number){const angle=i*Math.PI/3+e.id*.7,r=ring
 </script>
 <template>
   <g v-for="fx in effects" :key="fx.id" data-battle-effect :data-effect-kind="fx.kind" :data-effect-variant="fx.variant" :opacity="fx.delay?0:Math.min(1,fx.life*5)" pointer-events="none">
-    <template v-if="fx.kind==='shot'">
+    <g v-if="fx.variant==='beam'" data-skill-effect="beam">
+      <path :d="`M${fx.fromX} ${fx.fromY}L${fx.x} ${fx.y}`" fill="none" stroke="#73d4f5" :stroke-width="Math.min(28,(fx.radius||10)*2)" opacity=".16"/>
+      <path :d="`M${fx.fromX} ${fx.fromY}L${fx.x} ${fx.y}`" fill="none" stroke="#b9f0ff" stroke-width="4"/>
+      <path :d="`M${fx.fromX} ${fx.fromY}L${fx.x} ${fx.y}`" fill="none" stroke="#fffef1" stroke-width="1.3"/>
+      <circle :cx="fx.fromX" :cy="fx.fromY" :r="12+effectProgress(fx)*17" fill="none" stroke="#c4f2ff" stroke-width="1.5"/>
+    </g>
+    <template v-else-if="fx.kind==='shot'">
+      <path v-if="fx.variant==='volley'" :d="`M${fx.fromX} ${fx.fromY}L${fx.x} ${fx.y}`" fill="none" stroke="#ffeeb0" stroke-width="8" opacity=".26"/>
       <path :d="trail(fx)" fill="none" :stroke="fx.color" :stroke-width="fx.variant==='volley'?9:fx.variant==='fire'?6:fx.variant==='shell'?5:4" stroke-linecap="round" opacity=".18"/>
       <path :d="trail(fx)" fill="none" :stroke="fx.color" :stroke-width="fx.variant==='volley'?2.5:fx.variant==='fire'?2.6:1.4" stroke-linecap="round" opacity=".85"/>
       <g :transform="'translate('+position(fx).x+' '+position(fx).y+') rotate('+position(fx).angle+')'">
@@ -52,7 +59,17 @@ function scatter(e:BattleEffect,i:number){const angle=i*Math.PI/3+e.id*.7,r=ring
     <g v-else-if="fx.kind==='hit'" :transform="'translate('+fx.x+' '+(fx.y-effectProgress(fx)*15)+')'"><path v-if="effectProgress(fx)<.25" d="M-6 14-2 12 0 7 2 12 7 14 2 16 0 21-2 16Z" fill="#fff6ce" :opacity="1-effectProgress(fx)*4"/><text text-anchor="middle" :fill="fx.color" font-size="11" font-weight="700" stroke="#4a5a50" stroke-width=".8" paint-order="stroke">{{ fx.text }}</text></g>
     <g v-else-if="fx.kind==='upgrade'" data-skill-effect="upgrade"><ellipse :cx="fx.x" :cy="fx.y+5" :rx="32+effectProgress(fx)*35" :ry="16+effectProgress(fx)*17" fill="none" stroke="#e2c997" stroke-width="2"/><path v-for="i in [0,1,2,3]" :key="i" d="M-2 0 0-5 2 0 7 2 2 4 0 9-2 4-7 2Z" :transform="'translate('+(fx.x+Math.cos(i*1.57)*37)+' '+(fx.y-15-effectProgress(fx)*45+Math.sin(i*1.57)*12)+')'" fill="#f6e8b6"/><text :x="fx.x" :y="fx.y-62-effectProgress(fx)*14" text-anchor="middle" fill="#f2d8ff" stroke="#4c6261" stroke-width=".9" paint-order="stroke" font-size="11" font-weight="700">{{ fx.text }}</text></g>
     <g v-else :data-skill-effect="fx.variant||'burst'">
-      <template v-if="fx.variant==='shell'||fx.variant==='fire'">
+      <template v-if="fx.variant==='volley'">
+        <circle :cx="fx.x" :cy="fx.y" :r="ring(fx)" fill="#fbe2a1" :fill-opacity="(1-effectProgress(fx))*.12" stroke="#fff1b8" stroke-width="2"/>
+        <path v-for="i in [0,1,2,3,4,5]" :key="i" d="M-9 0H8L3-5m5 5-5 5" :transform="scatter(fx,i)" fill="none" stroke="#ffedaa" stroke-width="2"/>
+        <text :x="fx.x" :y="fx.y-75-effectProgress(fx)*8" text-anchor="middle" fill="#fff2bb" stroke="#54452b" stroke-width="1.4" paint-order="stroke" font-size="16" font-weight="700">穿云弹幕</text>
+      </template>
+      <template v-else-if="fx.variant==='pulse'">
+        <circle :cx="fx.x" :cy="fx.y" :r="ring(fx)" fill="#9aebc9" :fill-opacity="(1-effectProgress(fx))*.08" stroke="#b4f5db" stroke-width="3"/>
+        <circle :cx="fx.x" :cy="fx.y" :r="ring(fx)*.78" fill="none" stroke="#d3ffe5" stroke-width="1.5" stroke-dasharray="16 9"/>
+        <path v-for="i in [0,1,2,3,4,5]" :key="i" d="M-5-5H5V5H-5Z" :transform="scatter(fx,i)" fill="#c8f3d7"/>
+      </template>
+      <template v-else-if="fx.variant==='shell'||fx.variant==='fire'">
         <circle :cx="fx.x" :cy="fx.y" :r="ring(fx)" fill="#f3b87d" :fill-opacity="(1-effectProgress(fx))*.16" :stroke="fx.color" stroke-width="1.7"/><circle :cx="fx.x" :cy="fx.y" :r="ring(fx)*.68" fill="none" stroke="#f9dbab" stroke-width=".9" :stroke-dasharray="fx.variant==='fire'?'9 7':undefined"/>
         <g v-for="i in [0,1,2,3,4,5]" :key="i" :transform="scatter(fx,i)"><path v-if="fx.variant==='fire'" d="M-5 2Q-6-4 0-12L1-5 5-9Q10 3 2 7Z" fill="#f3a466" stroke="#ffdda0" stroke-width=".7"/><path v-else d="M-4-2 5-4 10 0 5 3-4 2Z" fill="#e6c49b" opacity=".8"/></g>
         <path v-if="effectProgress(fx)<.35" :transform="'translate('+fx.x+' '+fx.y+') scale('+(.8+effectProgress(fx)*4)+')'" d="M-15 0-6-4-8-11 0-6 7-12 6-4 17 0 6 4 8 12 0 6-7 11-6 4Z" fill="#fff1be" :opacity="1-effectProgress(fx)*2.5"/>

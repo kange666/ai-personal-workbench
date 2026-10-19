@@ -3,6 +3,7 @@ export const DEFENSE_CARDS = [
   ["power","重型弹头","攻击伤害 +22%","速射"],["speed","快速装填","攻击速度 +16%","速射"],["crit","弱点瞄准","暴击率 +9%","速射"],["multi","双重射击","增加一个同时攻击目标","速射"],["pierce","穿甲弹","降低装甲减伤并提高伤害","速射"],["execute","收割者","对低生命敌人造成额外伤害","速射"],["focus","首领猎手","优先攻击首领，伤害提高","速射"],["range","远程瞄具","攻击范围 +14","速射"],["overclock","超频核心","攻速大幅提高，最大生命略减","速射"],
   ["blast","爆破弹","攻击产生范围爆炸","爆破"],["radius","爆破扩散","扩大爆炸范围并提高溅射伤害","爆破"],["chain","连锁闪电","攻击后闪电跳向附近敌人","元素"],["links","电弧延展","增加连锁目标与距离","元素"],["burn","燃烧弹","命中附带持续灼烧","元素"],["inferno","余烬蔓延","灼烧更持久，击杀时引燃邻敌","元素"],["slow","冰霜弹","命中使敌人减速","元素"],["freeze","寒冰封锁","周期性冻结被击中的敌人","元素"],["storm","风暴共鸣","被冻结的敌人承受更多连锁伤害","元素"],
   ["health","加固塔身","最大生命增加并立即治疗","堡垒"],["shield","能量护盾","增加最大护盾并补充护盾","堡垒"],["armor","复合装甲","降低受到的伤害","堡垒"],["regen","维修模块","每秒恢复生命","堡垒"],["thorns","荆棘装甲","近身攻击者受到反伤","堡垒"],["barrier","护盾回充","护盾自动缓慢恢复","堡垒"],["nova","震荡核心","周期冲击波伤害并推开近敌","堡垒"],["leech","生命回路","攻击命中恢复少量生命","堡垒"],["fortress","坚守阵地","生命低于一半时护甲和伤害提高","堡垒"],
+  ["aura","熔能护环","持续灼伤塔周敌人，伤害随攻击和最大生命成长","堡垒"],["pulse","环形脉冲","周期释放整圈能量，伤害随攻击和最大护盾成长","堡垒"],["lance","聚能光束","周期发射贯穿敌阵的直线光束","速射"],
   ["income","赏金协议","击杀金币增加","成长"],["interest","储蓄利息","每波结束按金币获得利息","成长"],["bounty","精英悬赏","首领与精英奖励增加","成长"],["discount","采购优惠","基础升级费用降低","成长"],["healKill","急救回收","击杀恢复生命","成长"],["supply","战地补给","每波结束额外治疗并获得金币","成长"],["growth","厚积薄发","随当前波数增加伤害","成长"],["fortune","幸运一击","暴击额外掉落金币","成长"],["reserve","应急储备","低生命时周期补充护盾","成长"],
 ] .map(([id,name,description,family])=>({id:id!,name:name!,description:description!,family:family!}));
 export type EnemyKind="normal"|"swarm"|"runner"|"armored"|"splitter"|"healer"|"shooter"|"shielded"|"charger"|"warder"|"hexer"|"brood"|"leech"|"boss";
@@ -21,9 +22,9 @@ const tower = {x:300,y:200};
 export interface DefenseEnemy {
   id:number; kind:EnemyKind; x:number; y:number; hp:number; maxHP:number; speed:number; damage:number; shield:number;
   cooldown:number; burn:number; burnTime:number; slow:number; freeze:number;
-  boss?:DefenseBossId; skillTime?:number; charge?:number;siege?:number;
+  boss?:DefenseBossId; skillTime?:number; charge?:number;siege?:number;freezeImmunity?:number;
 }
-export interface DefenseTrace {x:number;y:number;life:number;color:string;id?:number;kind?:'shot'|'chain'|'burst'|'enemy';variant?:'kinetic'|'shell'|'fire'|'ice'|'plasma'|'shield'|'nova'|'volley';fromX?:number;fromY?:number;radius?:number;amount?:number}
+export interface DefenseTrace {x:number;y:number;life:number;color:string;id?:number;kind?:'shot'|'chain'|'burst'|'enemy';variant?:'kinetic'|'shell'|'fire'|'ice'|'plasma'|'shield'|'nova'|'volley'|'pulse'|'beam';fromX?:number;fromY?:number;radius?:number;amount?:number}
 export interface DefenseWaveRecord {wave:number;seconds:number;damage:number;taken:number}
 export interface DefenseLog {
   since:number;startWave:number;shots:number;criticals:number;damage:Record<DefenseDamageKind,number>;
@@ -33,6 +34,7 @@ export interface DefenseFeatures {
   version:1;core:DefenseCoreId;preference:DefensePreference;evolutions:Partial<Record<DefenseEvolutionId,number>>;
   auto:{enabled:boolean;priority:UpgradeId|'balanced';reserve:number;batch:1|5|10;cursor:number};
   autoTime:number;bulwarkTime:number;disruption:number;traceId:number;bossWave:number;
+  volleyBursts?:number;
   reinforcements:{kind:EnemyKind;count:number;x:number;y:number}[];log:DefenseLog;
 }
 export interface DefenseState {
@@ -46,7 +48,7 @@ export interface DefenseState {
 export interface DefenseMeta {version:1;bestWave:number;wins:number;shards:number;talents:{power:number;guard:number;wealth:number}}
 function createFeatures(core:DefenseCoreId, since=0, startWave=1):DefenseFeatures {
   return {version:1,core,preference:"全部",evolutions:{},auto:{enabled:false,priority:"balanced",reserve:0,batch:1,cursor:0},
-    autoTime:0,bulwarkTime:0,disruption:0,traceId:0,bossWave:0,reinforcements:[],
+    autoTime:0,bulwarkTime:0,disruption:0,traceId:0,bossWave:0,volleyBursts:0,reinforcements:[],
     log:{since,startWave,shots:0,criticals:0,damage:{direct:0,blast:0,chain:0,burn:0,thorns:0,nova:0,evolution:0},incoming:{},history:[],waveDamage:0,waveTaken:0,peakDPS:0}};
 }
 export function defenseFeatures(s:DefenseState):DefenseFeatures {return s.features||createFeatures('classic',s.time,s.wave);}
@@ -90,16 +92,20 @@ export function defenseStats(s:DefenseState){
   const armorRating=c("armor")*.09+low*.08;
   // 保留旧无尽存档已获得的远程聚焦收益，同时让真实射程继续增长。
   const range=safe(150+u.range*8+c("range")*14),rangeFocus=Math.max(1,range/300);
-  return {maxHP,maxShield:safe(45+c("shield")*35+(f.core==='tesla'?20:0)),
-    damage:safe(18*(1+u.attack*.24+c("power")*.22+c("pierce")*.08+c("growth")*.005*s.wave+low*.2)*(s.perk==="power"?1.1:1)*(core?.damage||1)*(1+mastery*.04)*rangeFocus),
+  const damage=safe(18*(1+u.attack*.24+c("power")*.22+c("pierce")*.08+c("growth")*.005*s.wave+low*.2)*(s.perk==="power"?1.1:1)*(core?.damage||1)*(1+mastery*.04)*rangeFocus);
+  const maxShield=safe(45+c("shield")*35+(f.core==='tesla'?20:0)),fortification=f.core==='bastion'?1.2:1;
+  return {maxHP,maxShield,damage,
     rate:safe(1.8*(1+u.rate*.13+c("speed")*.16+c("overclock")*.25)*(core?.rate||1)),
     range,rangeFocus,multi:safe(1+c("multi")),chain:c("chain")?safe(1+c("chain")+c("links")):f.core==='tesla'?1:0,
     chainRange:safe(90+c("links")*15),blast:c("blast")+(f.core==='cannon'?.65:0),blastRadius:safe(34+c("radius")*9),
     crit:Math.min(1,critRating),critMultiplier:safe(2+Math.max(0,critRating-1)),armor:armorRating/(1+armorRating),armorRating,
     regen:safe(1.5+u.regen*.6+c("regen")*.8+(f.core==='bastion'?.8:0)),
     shieldRegen:safe(c("barrier")*1.4*(f.disruption>0?.5:1)),coinBoost:safe(1+u.income*.1+c("income")*.15),
-    slow:c("slow")*.12/(1+c("slow")*.12),freezeChance:Math.min(1,c("freeze")*.12),freezeDuration:1.1+c("freeze")*.08,
+    slow:.65*c("slow")*.12/(1+c("slow")*.12),freezeChance:.45*c("freeze")/(3+c("freeze")),freezeDuration:.65+.75*c("freeze")/(4+c("freeze")),freezeProtection:2.5,bossFreezeProtection:4,
     burnDPS:safe(.13*c("burn")),burnDuration:safe(3+c("inferno")),novaRadius:safe(115+c("nova")*5),novaPeriod:5/(1+c("nova")*.08),
+    auraDPS:safe((damage*(.18*c("aura")+(f.core==='bastion'?.2:0))+maxHP*(.004*c("aura")+(f.core==='bastion'?.006:0)))*fortification),auraRadius:safe(105+c("aura")*7),
+    pulsePeriod:Math.max(1.6,4.8/(1+c("pulse")*.12)),pulseRadius:safe(140+c("pulse")*7),pulseDamage:safe((damage*(.75+c("pulse")*.45)+maxShield*c("pulse")*.1)*fortification),
+    lancePeriod:Math.max(1.5,5/(1+c("lance")*.1)),lanceDamage:safe(damage*(1+c("lance")*.65)),lanceWidth:safe(10+c("lance")*2),fortification,
     lifeSteal:c("leech")*.003,discount:1/(1+c("discount")*.1),thorns:c("thorns")*.8+(f.core==='bastion'?.25:0),
   };
 }
@@ -163,7 +169,7 @@ export function defenseCardRequirements(s:DefenseState,id:string){
 }
 export function defenseChoiceLevel(s:DefenseState,id:string){return id.startsWith('evo:')?defenseFeatures(s).evolutions[id.slice(4) as DefenseEvolutionId]||0:s.cards[id]||0;}
 export function defenseChoiceCatalog(s:DefenseState,query='',family:DefensePreference='全部'){
-  const keywords:Record<string,string>={burn:'火 火焰 灼烧',inferno:'火 火焰 燃烧 灼烧',leech:'吸血 回血',regen:'治疗 回血',healKill:'治疗 回血',chain:'电 闪电 电弧',links:'电 闪电 电弧',freeze:'冰 冰霜 冰冻',slow:'冰 冰霜 冰冻',storm:'冰 电 闪电 冰霜 冰冻 冻结',nova:'范围 击退 冲击',thorns:'反弹 反击',speed:'攻速 射速 次数',overclock:'攻速 射速 次数','evo:firestorm':'火 燃烧 灼烧','evo:froststorm':'冰 电 闪电','evo:bulwark':'盾 反伤','evo:volley':'速射 穿透 攻速'};
+  const keywords:Record<string,string>={burn:'火 火焰 灼烧',inferno:'火 火焰 燃烧 灼烧',leech:'吸血 回血',regen:'治疗 回血',healKill:'治疗 回血',chain:'电 闪电 电弧',links:'电 闪电 电弧',freeze:'冰 冰霜 冰冻',slow:'冰 冰霜 冰冻',storm:'冰 电 闪电 冰霜 冰冻 冻结',nova:'范围 击退 冲击',aura:'火 持续 范围 光环',pulse:'圆形 范围 环形 护盾',lance:'穿透 激光 光束',thorns:'反弹 反击',speed:'攻速 射速 次数',overclock:'攻速 射速 次数','evo:firestorm':'火 燃烧 灼烧','evo:froststorm':'冰 电 闪电','evo:bulwark':'盾 反伤','evo:volley':'速射 穿透 攻速'};
   const words=query.trim().toLowerCase().slice(0,100).split(/\s+/).filter(Boolean);
   const entries=[...DEFENSE_CARDS,...DEFENSE_EVOLUTIONS.map(e=>({...e,id:'evo:'+e.id}))];
   return entries.filter(c=>(family==='全部'||c.family===family)&&words.every(w=>(c.name+' '+c.family+' '+c.description+' '+(keywords[c.id]||'')).toLowerCase().includes(w)))
@@ -195,8 +201,8 @@ export function pickDefenseCard(s:DefenseState,id:string,fromCatalog=false){
   if(s.pendingUpgrades>0)defenseOffers(s,true);else closeDefenseOffers(s);
   s.last='强化已获得，剩余 '+s.pendingUpgrades+' 次'+(s.pendingUpgrades?'，可以连续选择。':'，战斗继续。');return true;
 }
-function addTrace(s:DefenseState,trace:Omit<DefenseTrace,'life'|'id'>){
-  if(s.traces.length>=32)return;
+function addTrace(s:DefenseState,trace:Omit<DefenseTrace,'life'|'id'>,priority=false){
+  if(s.traces.length>=32){if(!priority)return;s.traces.shift();}
   const f=ensureFeatures(s);f.traceId=(f.traceId+1)%LIMIT;
   s.traces.push({...trace,id:f.traceId,life:.24});
 }
@@ -251,6 +257,23 @@ function attack(s:DefenseState,volleys:number,stats:Stats){
   if(!targets.length)return;
   const matrix=stats.blast||stats.chain?positions.map(p=>positions.map(q=>distance2(p,q))):[];
   const before=f.log.shots;f.log.shots=safe(before+volleys);
+  // 弹幕先于本轮普攻结算，避免目标先被普攻击杀而让齐射无声消失。
+  const bursts=Math.floor((before+volleys)/12)-Math.floor(before/12),rank=f.evolutions.volley||0;
+  if(rank&&bursts){
+    f.volleyBursts=safe((f.volleyBursts||0)+bursts);
+    const primary=enemies[targets[0]!]!,heading=Math.atan2(primary.y-200,primary.x-300),width=Math.min(Math.PI,.32+rank*.08);
+    for(let i=0;i<n;i++)if(enemies[i]!.hp>0&&distances[i]!<=stats.range**2){
+      const e=enemies[i]!,angle=Math.atan2(e.y-200,e.x-300),difference=Math.abs(Math.atan2(Math.sin(angle-heading),Math.cos(angle-heading)));
+      if(difference<=width)hit(s,e,safe(stats.damage*bursts*(.7+rank*.4)),'evolution',stats);
+    }
+    // 固定7条齐射轨迹与一个炮口波纹，不随升级、攻速或敌人数增加绘制节点。
+    const reach=Math.min(400,stats.range);
+    addTrace(s,{...tower,kind:'burst',variant:'volley',radius:65,color:'#fff0b1',amount:bursts},true);
+    for(let ray=0;ray<7;ray++){
+      const angle=heading-width+ray*width/3;
+      addTrace(s,{x:300+Math.cos(angle)*reach,y:200+Math.sin(angle)*reach,fromX:300,fromY:177,kind:'shot',variant:'volley',color:'#fff0b1',amount:bursts},true);
+    }
+  }
   // 次数不封顶。每步最多4批命中，溅射/电弧/碎冰按目标累加后结算，复杂度与攻速无关。
   const packets=volleys>4?1:volleys;
   let visuals=Math.max(0,32-s.traces.length);
@@ -269,7 +292,10 @@ function attack(s:DefenseState,volleys:number,stats:Stats){
       if(visuals>0){visuals--;addTrace(s,{x:e.x,y:e.y,fromX:300,fromY:177,kind:'shot',variant,amount:count,color:variant==='fire'?'#f4ad77':variant==='ice'?'#a2e5ef':variant==='plasma'?'#b9a6f4':'#f2d58c'});}
       if(s.cards.burn){e.burn=safe(stats.damage*stats.burnDPS);e.burnTime=stats.burnDuration;}
       if(s.cards.slow)e.slow=2.5;
-      if(s.cards.freeze&&random(s)<1-(1-stats.freezeChance)**count)e.freeze=stats.freezeDuration*(e.kind==='boss'?.4:1);
+      if(s.cards.freeze&&e.freeze<=0&&(e.freezeImmunity||0)<=0&&random(s)<1-(1-stats.freezeChance)**count){
+        e.freeze=stats.freezeDuration*(e.kind==='boss'?.4:1);
+        e.freezeImmunity=e.freeze+(e.kind==='boss'?stats.bossFreezeProtection:stats.freezeProtection);
+      }
       if(stats.blast){
         for(let j=0;j<n;j++)if(j!==index&&enemies[j]!.hp>0&&matrix[index]![j]!<=stats.blastRadius**2)splash[j]=safe(splash[j]!+damage*(.3+stats.blast*.1+(s.cards.radius||0)*.04));
         if(visuals>0){visuals--;addTrace(s,{x:e.x,y:e.y,kind:'burst',variant:'shell',radius:stats.blastRadius,color:'#efb17c'});}
@@ -292,14 +318,6 @@ function attack(s:DefenseState,volleys:number,stats:Stats){
       if(visuals>0){visuals--;addTrace(s,{x:positions[j]!.x,y:positions[j]!.y,kind:'burst',variant:'ice',radius,color:'#b3eaf5'});}
     }
     for(let j=0;j<n;j++)if(ice[j])hit(s,enemies[j]!,ice[j]!,'evolution',stats);
-  }
-  const bursts=Math.floor((before+volleys)/12)-Math.floor(before/12),rank=f.evolutions.volley||0;
-  if(rank&&bursts){
-    const primary=enemies[targets[0]!]!,heading=Math.atan2(primary.y-200,primary.x-300),width=.32+rank*.08;
-    for(let i=0;i<n;i++)if(enemies[i]!.hp>0&&distances[i]!<=stats.range**2){
-      const e=enemies[i]!,angle=Math.atan2(e.y-200,e.x-300),difference=Math.abs(Math.atan2(Math.sin(angle-heading),Math.cos(angle-heading)));
-      if(difference<=width){hit(s,e,safe(stats.damage*bursts*(.7+rank*.4)),'evolution',stats);addTrace(s,{x:e.x,y:e.y,fromX:300,fromY:177,kind:'shot',variant:'volley',color:'#fff0b1'});}
-    }
   }
 }
 function queueSpawn(s:DefenseState,kind:EnemyKind,count:number,x:number,y:number){
@@ -335,11 +353,38 @@ export function defenseRunReview(s:DefenseState){
   const suggestion=top?.[0]==='boss'?'增加首领猎手、暴击或穿甲，并预留护盾与塔身应对首领波。':top&&['shooter','hexer','healer','warder'].includes(top[0])?'优先补充射程、穿甲或范围火力，处理远程与支援敌人。':top&&['swarm','splitter','brood'].includes(top[0])?'增加爆破、连锁或击杀恢复，降低密集敌人的近身压力。':'兼顾主力输出、塔身和维修，观察下一波的敌人组合。';
   return{total,seconds,dps:seconds?total/seconds:0,top:name,suggestion,sources,damage:Object.entries(log.damage).map(([id,value])=>({id,name:DEFENSE_DAMAGE_NAMES[id as DefenseDamageKind],value,share:total?value/total:0}))};
 }
+function areaSkills(s:DefenseState,dt:number,stats:Stats){
+  const ticks=(period:number)=>Math.floor((s.time+1e-9)/period)-Math.floor((s.time-dt+1e-9)/period);
+  if(stats.auraDPS){
+    const count=ticks(.25);
+    if(count)for(const e of s.enemies)if(e.hp>0&&distance2(e,tower)<=stats.auraRadius**2)hit(s,e,safe(stats.auraDPS*.25*count),'nova',stats);
+  }
+  if(s.cards.pulse){
+    const count=ticks(stats.pulsePeriod);
+    if(count){
+      for(const e of s.enemies)if(e.hp>0&&distance2(e,tower)<=stats.pulseRadius**2)hit(s,e,safe(stats.pulseDamage*count),'nova',stats);
+      addTrace(s,{...tower,kind:'burst',variant:'pulse',radius:stats.pulseRadius,color:'#a9f1d0'},true);
+    }
+  }
+  if(s.cards.lance){
+    const count=ticks(stats.lancePeriod);
+    const target=s.enemies.filter(e=>e.hp>0&&distance2(e,tower)<=stats.range**2).sort((a,b)=>distance2(a,tower)-distance2(b,tower))[0];
+    if(count&&target){
+      const heading=Math.atan2(target.y-200,target.x-300),dx=Math.cos(heading),dy=Math.sin(heading);
+      for(const e of s.enemies){const x=e.x-300,y=e.y-200,along=x*dx+y*dy;
+        if(e.hp>0&&along>=0&&distance2(e,tower)<=stats.range**2&&Math.abs(x*dy-y*dx)<=stats.lanceWidth)hit(s,e,safe(stats.lanceDamage*count),'nova',stats);
+      }
+      const length=Math.min(400,stats.range);
+      addTrace(s,{x:300+dx*length,y:200+dy*length,fromX:300,fromY:200,kind:'shot',variant:'beam',color:'#a8e9ff',radius:stats.lanceWidth},true);
+    }
+  }
+}
 export function stepDefense(s:DefenseState,dt:number){
   if(s.phase!=="playing"||!finite(dt,.000001,.2))return;
   const f=ensureFeatures(s),stats=defenseStats(s);
   if(s.hp<=0){s.phase='lost';return;}
   s.time=safe(s.time+dt);s.waveTime=safe(s.waveTime+dt);s.shotTime+=dt;f.bulwarkTime=Math.max(0,f.bulwarkTime-dt);f.disruption=Math.max(0,f.disruption-dt);
+  for(const e of s.enemies){e.freeze=Math.max(0,e.freeze-dt);e.freezeImmunity=Math.max(0,(e.freezeImmunity||0)-dt);}
   s.hp=Math.min(stats.maxHP,s.hp+stats.regen*dt);s.shield=Math.min(stats.maxShield,s.shield+stats.shieldRegen*dt);
   f.autoTime+=dt;
   if(f.auto.enabled&&f.autoTime>=.5){
@@ -365,15 +410,16 @@ export function stepDefense(s:DefenseState,dt:number){
   }
   const volleys=Math.floor(Math.min(LIMIT,s.shotTime*stats.rate)+1e-9);
   if(volleys>0){s.shotTime=Math.max(0,s.shotTime-volleys/stats.rate);attack(s,volleys,stats);}
+  areaSkills(s,dt,stats);
   if(s.cards.nova){
     const count=Math.floor(s.time/stats.novaPeriod)-Math.floor((s.time-dt)/stats.novaPeriod);
     if(count){for(const e of s.enemies)if(e.hp>0&&distance2(e,tower)<stats.novaRadius**2){
-      hit(s,e,safe(stats.damage*(1+s.cards.nova*.5)*count),'nova',stats);
+      hit(s,e,safe(stats.damage*(1+s.cards.nova*.5)*stats.fortification*count),'nova',stats);
       const angle=Math.atan2(e.y-200,e.x-300),push=18*count;e.x=clamp(e.x+Math.cos(angle)*push,-400,1000);e.y=clamp(e.y+Math.sin(angle)*push,-400,800);
     }addTrace(s,{...tower,kind:'burst',variant:'nova',radius:stats.novaRadius,color:'#c8b6ef'});}
   }
   for(const e of [...s.enemies]){
-    if(e.hp<=0)continue;e.cooldown-=dt;e.slow=Math.max(0,e.slow-dt);e.freeze=Math.max(0,e.freeze-dt);
+    if(e.hp<=0)continue;e.cooldown-=dt;e.slow=Math.max(0,e.slow-dt);
     if(e.burnTime>0){const elapsed=Math.min(dt,e.burnTime);hit(s,e,e.burn*elapsed,'burn',stats);e.burnTime=Math.max(0,e.burnTime-dt);}if(e.hp<=0)continue;
     if(e.freeze>0)continue;enemySkill(s,e,dt,stats);
     // 远程打击后逐步前压，避免射程外敌人与高回复炮塔形成永不结束的僵局。
@@ -421,6 +467,7 @@ function validFeatures(v:unknown){
   const a=v.auto,l=v.log;
   if(typeof a.enabled!=='boolean'||!['balanced',...DEFENSE_UPGRADES.map(u=>u.id)].includes(String(a.priority))||![1,5,10].includes(Number(a.batch))||!integer(a.reserve,0,LIMIT)||!integer(a.cursor,0,5))return false;
   if(![v.autoTime,v.bulwarkTime,v.disruption,v.traceId,v.bossWave].every(n=>finite(n,0,LIMIT)))return false;
+  if(v.volleyBursts!==undefined&&!integer(v.volleyBursts,0,LIMIT))return false;
   if(!Array.isArray(v.reinforcements)||v.reinforcements.length>32||!v.reinforcements.every(q=>object(q)&&Object.hasOwn(DEFENSE_ENEMY_NAMES,String(q.kind))&&integer(q.count,1,LIMIT)&&finite(q.x,-1000,1000)&&finite(q.y,-1000,1000)))return false;
   if(![l.since,l.startWave,l.shots,l.criticals,l.waveDamage,l.waveTaken,l.peakDPS].every(n=>finite(n,0,LIMIT))||!object(l.damage)||!object(l.incoming))return false;
   if(!Object.keys(DEFENSE_DAMAGE_NAMES).every(id=>finite((l.damage as Record<string,unknown>)[id],0,LIMIT))||!Object.entries(l.incoming).every(([id,n])=>Object.hasOwn(DEFENSE_ENEMY_NAMES,id)&&finite(n,0,LIMIT)))return false;
@@ -432,6 +479,7 @@ export function validDefense(v:unknown):v is DefenseState{
   if(v.features!==undefined&&!validFeatures(v.features))return false;
   if(!Array.isArray(v.offers)||v.offers.length>3||new Set(v.offers).size!==v.offers.length||!v.offers.every(id=>typeof id==='string'&&choiceKnown(id))||!Array.isArray(v.enemies)||v.enemies.length>DEFENSE_ENEMY_LIMIT)return false;
   if(!v.enemies.every(e=>object(e)&&integer(e.id,0,LIMIT)&&Object.hasOwn(DEFENSE_ENEMY_NAMES,String(e.kind))&&[e.x,e.y,e.hp,e.maxHP,e.speed,e.damage,e.shield,e.cooldown,e.burn,e.burnTime,e.slow,e.freeze].every(n=>finite(n,-LIMIT,LIMIT))&&(e.boss===undefined||Object.hasOwn(DEFENSE_BOSSES,String(e.boss)))&&(e.skillTime===undefined||finite(e.skillTime,-1,LIMIT))&&(e.charge===undefined||finite(e.charge,0,LIMIT))&&(e.siege===undefined||integer(e.siege,0,LIMIT))))return false;
+  if(!v.enemies.every(e=>e.freezeImmunity===undefined||finite(e.freezeImmunity,0,LIMIT)))return false;
   return Array.isArray(v.traces)&&v.traces.length<=70&&v.traces.every(t=>object(t)&&finite(t.x,-1000,1000)&&finite(t.y,-1000,1000)&&finite(t.life,0,1)&&typeof t.color==="string");
 }
 export function migrateDefense(v:unknown):DefenseState|null{

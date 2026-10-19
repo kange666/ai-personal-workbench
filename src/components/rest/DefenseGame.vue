@@ -21,29 +21,34 @@ const core=computed(()=>DEFENSE_CORES.find(c=>c.id===features.value.core));
 const evolved=computed(()=>Object.values(features.value.evolutions).some(n=>!!n&&n>0));
 const visualSkills=computed(()=>({fire:state.value.cards.burn||0,ice:state.value.cards.slow||0,chain:state.value.cards.chain||0,blast:state.value.cards.blast||0}));
 const waiting=ref(state.value.phase==='playing'),surface=ref<HTMLElement>();
-const effects=ref<BattleEffect[]>([]),recoil=ref(0),towerHurt=ref(0),direction=ref(-25),revision=ref(0);
+const effects=ref<BattleEffect[]>([]),recoil=ref(0),towerHurt=ref(0),direction=ref(-25),revision=ref(0),volleyFlash=ref(0);
+const volleyCharge=computed(()=>{void revision.value;return features.value.log.shots%12;});
 const boss=computed(()=>state.value.enemies.find(e=>e.kind==='boss'));
 const bossInfo=computed(()=>boss.value?.boss?DEFENSE_BOSSES[boss.value.boss]:undefined);
 const quotes=computed(()=>Object.fromEntries(DEFENSE_UPGRADES.map(u=>[u.id,defensePurchaseQuote(state.value,u.id,features.value.auto.batch)])));
 const upgradeIcons=['M5 19 18 6m-5 0h5v5M4 15l5 5','m5 5 6 7-6 7m8-14 6 7-6 7','M5 20V9h3V5h3v4h3V5h3v4h2v11ZM10 20v-6h4v6','M12 2v20M2 12h20M19 12a7 7 0 1 1-14 0 7 7 0 0 1 14 0','m6 18 8-8M14 10q-5-8 3-7l-2 4 3 2 3-3q3 9-7 6L8 21Z','M8 5h8l-2 4q8 5 6 10H4Q2 14 10 9ZM10 2h4m-2 10v6m-3-4h5m-5 3h5'];
 let elapsed=0,uiElapsed=0,effectId=0;
 function effect(kind:BattleEffect['kind'],x:number,y:number,text='',target?:number,color='#ffe0a0',trace?:DefenseTrace){
-  const duration=kind==='shot'?.2:kind==='chain'?.24:kind==='burst'?.55:.7;
+  const duration=trace?.variant==='volley'?1:trace?.variant==='beam'?.5:kind==='shot'?.2:kind==='chain'?.24:kind==='burst'?.55:.7;
   const delay=kind==='hit'?.12:kind==='chain'?.06:kind==='burst'&&(trace?.variant==='shell'||trace?.variant==='ice')?.13:0;
   addBattleEffect(effects.value,{id:++effectId,kind,x,y,text,target,color,duration,life:duration,delay,fromX:trace?.fromX,fromY:trace?.fromY,variant:trace?.variant,radius:trace?.radius,amount:trace?.amount});
 }
 useGameLoop(()=>props.paused||waiting.value||state.value.phase==='choice'||(state.value.phase!=='playing'&&!effects.value.length&&recoil.value===0&&towerHurt.value===0),dt=>{
-  effects.value=stepBattleEffects(effects.value,dt);recoil.value=Math.max(0,recoil.value-dt*7);towerHurt.value=Math.max(0,towerHurt.value-dt*5);
+  effects.value=stepBattleEffects(effects.value,dt);recoil.value=Math.max(0,recoil.value-dt*7);towerHurt.value=Math.max(0,towerHurt.value-dt*5);volleyFlash.value=Math.max(0,volleyFlash.value-dt);
   const s=state.value,phase=s.phase,wave=s.wave,hp=s.hp+s.shield,traceIds=new Set(s.traces.map(t=>t.id));
   const previous=new Map(s.enemies.map(e=>[e.id,{hp:e.hp,shield:e.shield,x:e.x,y:e.y}]));
   stepDefense(s,dt);
   // 绘制预算只影响短特效；规则层的完整攻击和技能次数已经结算。
   const traces=s.traces.filter(t=>t.id!==undefined&&!traceIds.has(t.id));
   // 高连锁时也保留主弹道的位置，避免短电弧挤掉全部发射反馈。
-  const shots=traces.filter(t=>t.kind==='shot').slice(0,3),secondary=traces.filter(t=>t.kind!=='shot').slice(-7);
-  for(const original of [...shots,...secondary]){
+  const special=traces.filter(t=>t.variant==='volley'||t.variant==='beam'||t.variant==='pulse');
+  if(special.some(t=>t.variant==='volley'))volleyFlash.value=1.5;
+  const normal=traces.filter(t=>!special.includes(t));
+  const shots=normal.filter(t=>t.kind==='shot').slice(0,3),secondary=normal.filter(t=>t.kind!=='shot').slice(-5);
+  // 齐射最后入绘制队列，普通命中反馈不会把七束弹幕全部挤走。
+  for(const original of [...shots,...secondary,...special]){
     let trace=original;
-    if(trace.kind==='shot'){
+    if(trace.kind==='shot'&&trace.variant!=='beam'){
       const origin=defenseProjectileOrigin(features.value.core,tier.value,trace);
       direction.value=origin.angle*180/Math.PI;recoil.value=1;
       trace={...trace,fromX:origin.x,fromY:origin.y};
@@ -68,7 +73,7 @@ useGameLoop(()=>props.paused||waiting.value||state.value.phase==='choice'||(stat
 },{pauseOnBlur:false});
 const focusSurface=()=>nextTick(()=>surface.value?.focus());
 function persist(){revision.value++;save();}
-function clearEffects(){effects.value=[];recoil.value=0;towerHurt.value=0;elapsed=0;}
+function clearEffects(){effects.value=[];recoil.value=0;towerHurt.value=0;volleyFlash.value=0;elapsed=0;}
 function restart(){
   if(props.paused)return;
   const previous=features.value,next=createDefense(Date.now()>>>0,state.value.mode);
@@ -124,6 +129,10 @@ defineExpose({restart});
           <circle cx="300" cy="200" r="51" fill="var(--defense-stone)" stroke="#9eaf9a" stroke-width="1"/><circle cx="300" cy="200" r="37" fill="none" stroke="#9eaf9a" stroke-dasharray="19 2" stroke-width="11" opacity=".55"/>
         </g>
         <circle cx="300" cy="200" :r="Math.min(stats.range,470)" fill="none" stroke="var(--defense-range)" opacity=".65" stroke-dasharray="5 7" stroke-width="1.2"/>
+        <g v-if="stats.auraDPS" data-skill-aura :opacity="paused||waiting ? .35 : .8">
+          <circle cx="300" cy="200" :r="Math.min(360,stats.auraRadius)" fill="#eab06a" fill-opacity=".07" stroke="#f3c780" stroke-width="1.4" stroke-dasharray="8 5"/>
+          <g :transform="`rotate(${state.time*24} 300 200)`"><path v-for="i in [0,1,2,3,4,5]" :key="i" d="M-7 0 0-10 7 0 0 5Z" :transform="`translate(${300+Math.cos(i*Math.PI/3)*Math.min(360,stats.auraRadius)} ${200+Math.sin(i*Math.PI/3)*Math.min(360,stats.auraRadius)})`" fill="#f4c17a" opacity=".65"/></g>
+        </g>
         <g v-for="e in state.enemies" :key="e.id" :data-enemy="e.kind" :data-enemy-id="e.id">
           <g :transform="enemyPose(e)">
             <circle v-if="(e.charge||0)>0" r="23" cy="-3" fill="none" stroke="#f7be86" stroke-width="1.8" stroke-dasharray="5 3"/><circle v-if="e.boss==='bulwark'" r="31" cy="-3" fill="none" stroke="#a5ddf5" stroke-width="1.4"/><path v-if="e.boss==='summoner'" d="M-22-9-33-17-28-2m50-7 11-8-5 15" fill="none" stroke="#d9a7ed" stroke-width="3"/><use :href="`#defense-${e.kind}`"/>
@@ -138,6 +147,7 @@ defineExpose({restart});
         <DefenseEffects :effects="effects" :tier="tier" :skills="visualSkills" />
       </svg>
       <div class="defense-hud" aria-label="塔身与护盾"><div><span>♥ {{ defenseNumber(Math.ceil(state.hp)) }} / {{ defenseNumber(Math.round(stats.maxHP)) }}</span><i><em :style="{width:`${Math.max(0,state.hp/stats.maxHP)*100}%`}"/></i></div><div class="defense-shield"><span>◇ {{ defenseNumber(Math.ceil(state.shield)) }} / {{ defenseNumber(stats.maxShield) }}</span><i><em :style="{width:`${state.shield/stats.maxShield*100}%`}"/></i></div><span v-if="boss" class="defense-boss-tag" :title="bossInfo?.description">{{ bossInfo?.name||'区域首领' }}</span></div>
+      <div v-if="features.evolutions.volley" class="defense-volley-status" :class="{'volley-active':volleyFlash>0}" aria-label="穿云弹幕蓄能" role="status"><strong>{{ volleyFlash>0?'穿云弹幕 · 齐射释放！':'穿云弹幕 · 蓄能 '+volleyCharge+'/12' }}</strong><i><em :style="{width:`${volleyFlash>0?100:volleyCharge/12*100}%`}"/></i><small>已释放 {{ defenseNumber(features.volleyBursts||0) }} 次</small></div>
       <span v-if="state.phase==='playing'&&!waiting" class="defense-wave-detail">场上 {{ state.enemies.length }} · 待入场 {{ state.spawnLeft }} · 击败 {{ state.kills }}</span>
       <div v-if="state.phase==='ready'||waiting||state.phase==='won'||state.phase==='lost'" class="defense-overlay">
         <h3>{{ waiting?'守卫进度已保存':state.phase==='ready'?'今晚，只守这一座塔':state.phase==='won'?'守住三十波！':'这次已经很棒了' }}</h3>
@@ -169,12 +179,13 @@ defineExpose({restart});
 <style scoped>
 .defense-topline{display:flex;align-items:center;justify-content:space-between;gap:9px;flex-wrap:wrap;margin-bottom:7px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.defense-topline b{color:var(--text)}.defense-topline small{font-size:10px}.defense-coins{color:var(--warning);font-weight:600}.defense-topline .defense-endless-link{margin-left:7px;padding:3px 7px;font-size:10px}.defense-strengthen{padding:5px 9px;font-size:11px;white-space:nowrap}
 .defense-stage{--defense-ground:#91af98;--defense-edge:#769d87;--defense-path:#c1c5a0;--defense-tree:#3d7467;--defense-grass:#6c9b77;--defense-stone:#b4bda1;--defense-range:#d9e4c4;position:relative;border:1px solid var(--line);border-radius:12px;overflow:hidden;outline-offset:3px}.defense-surface{display:block;width:100%;aspect-ratio:16/9}.defense-region-dusk{--defense-ground:#a8a29a;--defense-edge:#8b8c8c;--defense-path:#c8baa0;--defense-tree:#666780;--defense-grass:#87857d}.defense-region-frost{--defense-ground:#a0bac0;--defense-edge:#8ba5ae;--defense-path:#c9d5ce;--defense-tree:#4e7b85;--defense-grass:#86a5ac}.defense-region-ember{--defense-ground:#b39c88;--defense-edge:#99856f;--defense-path:#d4b99a;--defense-tree:#796963;--defense-grass:#a48c71}
-.defense-hud{position:absolute;inset:10px 12px auto;display:flex;align-items:flex-start;gap:9px;pointer-events:none;font-size:10px;color:#f2f5ec}.defense-hud>div{background:#28464add;padding:6px 9px;border-radius:7px;min-width:120px}.defense-hud span{font-variant-numeric:tabular-nums}.defense-hud i{display:block;height:4px;background:#193d42;border-radius:5px;margin-top:4px;overflow:hidden}.defense-hud em{display:block;height:100%;background:#86d4a5;transition:width .15s}.defense-shield em{background:#94d7e4}.defense-boss-tag{margin-left:auto;background:#7c4e59e8;border:1px solid #e7a3a2;padding:6px 9px;border-radius:7px}.defense-wave-detail{position:absolute;left:12px;bottom:9px;color:#e1ebd9;font-size:10px;border-radius:5px;background:#304f4ac9;padding:4px 7px;pointer-events:none}
+.defense-volley-status{position:absolute;left:12px;top:66px;width:194px;max-width:calc(100% - 24px);padding:7px 10px;border:1px solid #b79c56;border-radius:8px;background:#273b43ed;color:#f4df9e;pointer-events:none;font-size:11px;line-height:1.6;overflow-wrap:anywhere}.defense-volley-status strong{font-weight:600}.defense-volley-status i{display:block;height:4px;margin-top:3px;background:#6c664433;border-radius:3px;overflow:hidden}.defense-volley-status em{display:block;height:100%;background:#efd589;transition:width .08s}.defense-volley-status.volley-active{border-color:#fff2af;background:#594928ed;color:#fff5c4;box-shadow:0 0 0 2px #efce7920}.defense-hud{position:absolute;inset:10px 12px auto;display:flex;align-items:flex-start;gap:9px;pointer-events:none;font-size:10px;color:#f2f5ec}.defense-hud>div{background:#28464add;padding:6px 9px;border-radius:7px;min-width:120px}.defense-hud span{font-variant-numeric:tabular-nums}.defense-hud i{display:block;height:4px;background:#193d42;border-radius:5px;margin-top:4px;overflow:hidden}.defense-hud em{display:block;height:100%;background:#86d4a5;transition:width .15s}.defense-shield em{background:#94d7e4}.defense-boss-tag{margin-left:auto;background:#7c4e59e8;border:1px solid #e7a3a2;padding:6px 9px;border-radius:7px}.defense-wave-detail{position:absolute;left:12px;bottom:9px;color:#e1ebd9;font-size:10px;border-radius:5px;background:#304f4ac9;padding:4px 7px;pointer-events:none}
 .defense-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:safe center;gap:10px;padding:16px;overflow-y:auto;text-align:center;background:#1b3139e3;color:#f2f3e9}.defense-overlay h3{font-size:20px;margin:0}.defense-overlay p{font-size:11px;color:#d7e2db;margin:0;line-height:1.7}.defense-stage .game-actions{margin:0}.defense-overlay .button{font-size:11px}.defense-core-choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;width:100%;max-width:850px}.defense-core-card{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;gap:7px;text-align:left;min-width:0;height:auto;white-space:normal;overflow-wrap:anywhere;line-height:1.5;padding:10px;background:#28424e;color:#e3ebe7;border:1px solid #657c81}.defense-core-card .defense-core-preview{width:100%;height:78px;flex:0 0 78px;align-self:center}.defense-core-card.primary{border-color:#edc98e;background:#344e5b}.defense-core-card strong{font-size:12px}.defense-core-card small{font-size:10px;line-height:1.6;color:#d9e3dd}.defense-loss-review{max-width:560px}
 .defense-battle-caption{display:flex;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);margin:7px 0}.defense-upgrades{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:8px}.defense-upgrades .button{display:flex;align-items:center;justify-content:center;gap:8px;padding:8px 5px;min-width:0;height:auto;min-height:45px;line-height:1.35;font-size:12px}.defense-upgrades svg{width:25px;height:25px;flex:none;color:var(--primary)}.defense-upgrades span{text-align:left;white-space:normal;overflow-wrap:anywhere}.defense-upgrades small{font-size:10px;color:var(--muted)}.defense-upgrades b{display:block;color:var(--warning);font-size:10px;font-weight:500;margin-top:2px}
 .defense-automation{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin-top:8px;padding:8px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-size:10px}.defense-automation label{display:flex;gap:5px;align-items:center}.defense-automation .input{min-height:27px;font-size:10px;background:var(--surface);color:var(--text);padding:4px 6px;border:1px solid var(--line);border-radius:5px}.defense-reserve{width:83px;min-width:0}.defense-legacy-core{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:10px;color:var(--muted);margin-top:8px}.defense-legacy-core .button{padding:5px 7px;font-size:10px}
 .defense-research{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px;font-size:10px;color:var(--muted)}.defense-research .button{font-size:10px;padding:5px 7px}.defense-game .defense-help{display:flex;justify-content:space-between;gap:10px;margin:7px 0 0;font-size:10px;text-align:left}
 :global(:root[data-theme="warm"] .defense-stage){--defense-ground:#b6b495;--defense-edge:#9eaa83;--defense-path:#d6caab;--defense-tree:#738666;--defense-stone:#d0c5a5;--defense-range:#f1e7cb}:global(:root[data-theme="warm"] .defense-region-dusk){--defense-ground:#c2b29b;--defense-edge:#a89a8c;--defense-tree:#8a7b7d}:global(:root[data-theme="warm"] .defense-region-frost){--defense-ground:#c1d0c6;--defense-edge:#a3b6ac;--defense-tree:#7b9b91}:global(:root[data-theme="warm"] .defense-region-ember){--defense-ground:#cbb18d;--defense-edge:#b39879;--defense-tree:#928167}
 @media(max-width:850px){.defense-upgrades{grid-template-columns:repeat(3,minmax(0,1fr))}.defense-upgrades .button{padding:6px}.defense-topline small{display:none}.defense-hud>div{min-width:90px}.defense-core-choices{grid-template-columns:repeat(2,minmax(0,1fr))}.defense-overlay h3{font-size:17px}.defense-overlay{padding:12px;gap:8px}.defense-core-card{padding:8px}.defense-game .defense-help{display:block}}
+.defense-volley-status small{display:block;margin-top:3px;font-size:10px;line-height:1.3;font-weight:400}
 @media(prefers-reduced-motion:reduce){.defense-hud em{transition:none}}
 </style>

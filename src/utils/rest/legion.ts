@@ -3,19 +3,24 @@ import { LEGION_CARDS, LEGION_ENEMIES, LEGION_REGIONS, LEGION_STRATEGIES, LEGION
 export const LEGION_ACTOR_LIMIT = 56;
 export const LEGION_EFFECT_LIMIT = 28;
 const limit = (value: number, max = 1e12) => Math.max(0, Math.min(max, value));
-// replenish 仅保留旧存档字段，当前关卡不会补回阵亡的兵。
-type Options = { summon: boolean; strengthen: boolean; replenish: boolean; retry: boolean; train: boolean };
+type Options = { advance: boolean };
+export const LEGION_COMMANDS = {
+  assault: { name: '强攻号令', cost: 20, cooldown: 18, detail: '全军攻击与治疗提高25%，持续6秒；冷却18秒。' },
+  heal: { name: '战地救援', cost: 20, cooldown: 22, detail: '立即恢复存活友军20%最大生命；冷却22秒，不复活阵亡单位。' },
+} as const;
+export type LegionCommand = keyof typeof LEGION_COMMANDS;
 export interface LegionActor {
   id: number; kind: LegionUnitKind | LegionEnemyKind; side: 'ally' | 'enemy'; x: number; y: number;
   hp: number; maxHP: number; cooldown: number; attack: number; slow: number; burn: number; burnTime: number; skill: number;
 }
 export interface LegionEffect { id: number; kind: 'arrow' | 'fire' | 'lightning' | 'heal' | 'slash' | 'hit'; x: number; y: number; tx: number; ty: number; life: number; text: string; source?: LegionActor['kind'] }
 export interface LegionState {
-  version: 1; seed: number; nextId: number; wave: number; bestWave: number; cleared: number; elapsed: number;
+  version: 2; seed: number; nextId: number; wave: number; bestWave: number; cleared: number; elapsed: number;
   phase: 'battle' | 'march' | 'recover'; phaseTime: number; waveTime: number; paused: boolean; speed: 1 | 2;
   strategy: LegionStrategy; options: Options; coins: number; essence: number; xp: number; rank: number;
   training: Record<LegionUnitKind, number>; formation: Record<LegionUnitKind, number>; cards: Partial<Record<LegionCardId, number>>; pending: number;
-  allies: LegionActor[]; enemies: LegionActor[]; spawnLeft: number; spawnClock: number; recruitClock: number; trainClock: number;
+  allies: LegionActor[]; enemies: LegionActor[]; spawnLeft: number; spawnClock: number; recruitClock: number;
+  commands: { assault: number; assaultCooldown: number; healCooldown: number };
   effects: LegionEffect[]; log: string[]; kills: number; defeats: number; wins: number; bestRun: number; damage: number; healing: number;
 }
 const unit = (kind: LegionUnitKind) => LEGION_UNITS.find(item => item.id === kind)!;
@@ -27,7 +32,7 @@ export const legionUnlocked = (s: LegionState, kind: LegionUnitKind) => s.bestWa
 export function legionStats(s: LegionState, kind: LegionUnitKind) {
   const u = unit(kind), level = s.training[kind], c = (id: LegionCardId) => legionCardLevel(s, id);
   return { hp: u.hp * (1 + level * .1) * (1 + c('vitality') * .15),
-    damage: u.damage * (1 + level * .09) * (1 + c('power') * .12) * (kind === 'archer' ? 1 + c('precision') * .18 : 1),
+    damage: u.damage * (1 + level * .09) * (1 + c('power') * .12) * (kind === 'archer' ? 1 + c('precision') * .18 : 1) * (s.commands.assault > 0 ? 1.25 : 1),
     rate: Math.min(12,u.rate * (1 + c('haste') * .1)), range: u.range + (kind === 'archer' ? c('precision') * 12 : 0),
     armor: u.armor / Math.max(.1, 1 - u.armor) + c('armor') * .12,
   };
@@ -68,57 +73,57 @@ function beginWave(s: LegionState) {
   else note(s, `${legionRegion(s).name} ${legionChapter(s)} · ${s.wave % 5 === 0 ? '精英遭遇' : '自动推进'}`);
 }
 export function createLegion(seed = Date.now() >>> 0): LegionState {
-  const s: LegionState = { version: 1, seed, nextId: 1, wave: 1, bestWave: 1, cleared: 0, elapsed: 0, phase: 'battle', phaseTime: 0, waveTime: 0, paused: false, speed: 1,
-    strategy: 'balanced', options: { summon: true, strengthen: true, replenish: true, retry: true, train: true }, coins: 0, essence: 45, xp: 0, rank: 1,
+  const s: LegionState = { version: 2, seed, nextId: 1, wave: 1, bestWave: 1, cleared: 0, elapsed: 0, phase: 'battle', phaseTime: 0, waveTime: 0, paused: false, speed: 1,
+    strategy: 'balanced', options: { advance: true }, coins: 0, essence: 45, xp: 0, rank: 1,
     training: { guard: 0, sword: 0, archer: 0, mage: 0, priest: 0, giant: 0 }, formation: { guard: 0, sword: 0, archer: 0, mage: 0, priest: 0, giant: 0 }, cards: {}, pending: 0,
-    allies: [], enemies: [], spawnLeft: 0, spawnClock: 0, recruitClock: 0, trainClock: 0, effects: [], log: [], kills: 0, defeats: 0, wins: 0, bestRun: 1, damage: 0, healing: 0 };
+    allies: [], enemies: [], spawnLeft: 0, spawnClock: 0, recruitClock: 0, commands: { assault: 0, assaultCooldown: 0, healCooldown: 0 }, effects: [], log: [], kills: 0, defeats: 0, wins: 0, bestRun: 1, damage: 0, healing: 0 };
   for (const kind of ['guard', 'sword', 'archer', 'sword', 'guard', 'archer'] as const) addAlly(s, kind);
   beginWave(s); return s;
 }
 export function trainLegion(s: LegionState, kind: LegionUnitKind) {
-  if (!legionUnlocked(s, kind) || s.training[kind] >= 300 || s.coins < legionTrainingCost(s, kind)) return false;
+  if (s.paused || !legionUnlocked(s, kind) || s.training[kind] >= 300 || s.coins < legionTrainingCost(s, kind)) return false;
   s.coins -= legionTrainingCost(s, kind); s.training[kind]++;
   refreshHealth(s); return true;
 }
 function refreshHealth(s: LegionState) {
   for (const a of s.allies) { const hp = legionStats(s, a.kind as LegionUnitKind).hp; a.hp = Math.min(hp, a.hp + Math.max(0, hp - a.maxHP)); a.maxHP = hp; }
 }
-export function legionOffers(s: LegionState) {
-  // 只提供已解锁兵种能使用的强化，避免自动选择尚无作用的能力。
-  const available = LEGION_CARDS.filter(c => (c.family !== 'elements' || legionUnlocked(s, 'mage')) && (c.id !== 'heal' || legionUnlocked(s, 'priest')) && (c.id !== 'stomp' || legionUnlocked(s, 'giant')));
-  const copy = [...available]; for (let i = copy.length - 1; i > 0; i--) { const j = Math.floor(random(s) * (i + 1)); [copy[i], copy[j]] = [copy[j]!, copy[i]!]; }
-  return copy.slice(0, 3);
-}
-export function strengthenLegion(s: LegionState, id?: LegionCardId) {
-  if (!s.pending) return false;
+export function strengthenLegion(s: LegionState, id: LegionCardId) {
+  if (s.paused || !s.pending || s.phase === 'recover') return false;
   if (id && ((LEGION_CARDS.find(c=>c.id===id)?.family==='elements'&&!legionUnlocked(s,'mage')) || (id==='heal'&&!legionUnlocked(s,'priest')) || (id==='stomp'&&!legionUnlocked(s,'giant')))) return false;
-  const card = id ? LEGION_CARDS.find(c => c.id === id) : legionOffers(s).sort((a, b) => {
-    const score = (c: typeof a) => (c.family === s.strategy ? 5 : c.family === 'balanced' ? 2 : 0) + 2 / (1 + legionCardLevel(s, c.id)) + (c.id === 'vitality' && s.allies.some(a => a.hp < a.maxHP * .4) ? 5 : 0);
-    return score(b) - score(a);
-  })[0];
-  if (!card) return false;
+  const card = LEGION_CARDS.find(c => c.id === id);
+  if (!card || legionCardLevel(s, card.id) >= 10000) return false;
   s.cards[card.id] = limit(legionCardLevel(s, card.id) + 1, 10000); s.pending--; refreshHealth(s);
   if (card.id === 'vitality') for (const a of s.allies) a.hp = Math.min(a.maxHP, a.hp + a.maxHP * .15);
   note(s, `新强化 · ${card.name} ${s.cards[card.id]}级`); return true;
 }
-function desiredKinds(s: LegionState): LegionUnitKind[] {
-  const list: LegionUnitKind[] = ['guard', 'sword', 'archer', 'archer', 'guard', 'sword'];
-  if (legionUnlocked(s, 'mage')) list.push('mage', s.strategy === 'elements' ? 'mage' : 'archer');
-  if (legionUnlocked(s, 'priest')) list.push('priest', 'guard');
-  if (legionUnlocked(s, 'giant')) list.push('giant', s.strategy === 'iron' ? 'giant' : s.strategy === 'elements' ? 'mage' : 'archer');
-  if (s.bestWave >= 12) list.push('priest', s.strategy === 'iron' ? 'guard' : 'archer', 'sword', 'mage');
-  return list;
+export const legionSlots = (s: LegionState) => Object.values(s.formation).reduce((sum, n) => sum + n, 0);
+export function summonLegion(s: LegionState, kind: LegionUnitKind) {
+  if (s.paused || s.phase === 'recover' || !legionUnlocked(s, kind) || s.recruitClock > 0 || legionSlots(s) >= 24 || s.essence < unit(kind).cost) return false;
+  s.essence -= unit(kind).cost; addAlly(s, kind);
+  s.recruitClock = Math.max(.3, 1.2 / (1 + legionCardLevel(s, 'recruit') * .12));
+  if (legionCardLevel(s, 'recruit')) for (const a of s.allies) a.hp = Math.min(a.maxHP, a.hp + a.maxHP * .015 * legionCardLevel(s, 'recruit'));
+  note(s, `手动召唤 · ${unit(kind).name}加入编队（${legionSlots(s)}/24）`); return true;
 }
-function recruit(s: LegionState) {
-  const desired = desiredKinds(s);
-  for (const kind of desired) {
-    const needed = desired.filter(k => k === kind).length;
-    if (s.formation[kind] >= needed) continue;
-    if (s.essence < unit(kind).cost) return;
-    s.essence -= unit(kind).cost; addAlly(s, kind);
-    if (legionCardLevel(s, 'recruit')) for (const a of s.allies) a.hp = Math.min(a.maxHP, a.hp + a.maxHP * .015 * legionCardLevel(s, 'recruit'));
-    return;
+export function commandLegion(s: LegionState, id: LegionCommand) {
+  if (s.paused || s.phase !== 'battle' || !Object.hasOwn(LEGION_COMMANDS, id)) return false;
+  const command = LEGION_COMMANDS[id], cooldown = id === 'assault' ? 'assaultCooldown' : 'healCooldown';
+  if (s.commands[cooldown] > 0 || s.essence < command.cost || !s.allies.length || (id === 'heal' && !s.allies.some(a => a.hp > 0 && a.hp < a.maxHP))) return false;
+  s.essence -= command.cost; s.commands[cooldown] = command.cooldown;
+  if (id === 'assault') s.commands.assault = 6;
+  else for (const a of s.allies) if (a.hp > 0) {
+    const amount = Math.min(a.maxHP - a.hp, a.maxHP * .2); a.hp += amount; s.healing = limit(s.healing + amount);
+    if (amount > 0) effect(s, 'heal', a, a, `+${Math.round(amount)}`);
   }
+  note(s, `战场指令 · ${command.name}`); return true;
+}
+export function advanceLegion(s: LegionState) {
+  if (s.paused || s.phase === 'battle') return false;
+  if (s.phase === 'recover') {
+    // 只提供基础小队，解锁兵种由玩家决定召唤，不自动花资源配置整支军团。
+    for (const kind of ['guard', 'sword', 'archer', 'sword', 'guard', 'archer'] as const) addAlly(s, kind);
+  }
+  beginWave(s); return true;
 }
 function nearest(a: LegionActor, targets: LegionActor[]) {
   let best: LegionActor | undefined, distance = Infinity;
@@ -168,10 +173,11 @@ function finishWave(s: LegionState) {
 function defeat(s: LegionState) {
   s.defeats++; s.coins = limit(s.coins + 20 + s.wave * 2); s.essence = 60;
   // 随机构筑重置后回到可重新积累的战线，避免高层连续秒败。
-  s.wave = Math.max(1, Math.floor((s.wave-1)*(s.defeats%3===0?.65:.75))); s.phase = 'recover'; s.phaseTime = 4;
+  s.wave = Math.max(1, Math.floor((s.wave-1)*(s.defeats%3===0?.65:.75))); s.phase = 'recover'; s.phaseTime = 0;
   s.cards = {}; s.pending = 0; s.rank = 1; s.xp = 0; s.enemies = []; s.allies = []; s.effects = [];
   s.formation = {guard:0,sword:0,archer:0,mage:0,priest:0,giant:0};
-  note(s, '远征结算 · 保留金币和训练，回退整备后自动续战');
+  s.commands = { assault: 0, assaultCooldown: 0, healCooldown: 0 }; s.recruitClock = 0;
+  note(s, '远征结算 · 保留金币和训练，调整训练后点击重新出征');
 }
 export function restartLegion(s: LegionState) {
   const fresh = createLegion(s.seed); fresh.training = { ...s.training }; fresh.coins = s.coins; fresh.bestWave = s.bestWave; fresh.bestRun = s.bestRun;
@@ -181,28 +187,18 @@ export function restartLegion(s: LegionState) {
 export function stepLegion(s: LegionState, dt: number) {
   if (!Number.isFinite(dt) || dt <= 0 || dt > 1 || s.paused) return;
   s.elapsed += dt; s.effects = s.effects.filter(e => (e.life -= dt) > 0);
-  if (s.options.strengthen && s.pending) strengthenLegion(s);
   const threshold = () => 45 + s.rank * 12;
   for (let count = 0; count < 5 && s.xp >= threshold(); count++) { s.xp -= threshold(); s.rank++; s.pending++; }
-  s.trainClock += dt;
-  if (s.options.train && s.trainClock >= 1) {
-    s.trainClock = 0;
-    const order = LEGION_UNITS.filter(u => legionUnlocked(s, u.id)).sort((a, b) => {
-      const preference = (kind: LegionUnitKind) => s.training[kind] - ((s.strategy === 'arrows' && kind === 'archer') || (s.strategy === 'elements' && kind === 'mage') || (s.strategy === 'iron' && ['guard', 'giant'].includes(kind)) ? 2 : 0);
-      return preference(a.id) - preference(b.id);
-    });
-    for (const u of order) if (trainLegion(s, u.id)) break;
-  }
+  s.recruitClock = Math.max(0, s.recruitClock - dt);
+  s.commands.assault = Math.max(0, s.commands.assault - dt);
+  s.commands.assaultCooldown = Math.max(0, s.commands.assaultCooldown - dt);
+  s.commands.healCooldown = Math.max(0, s.commands.healCooldown - dt);
   if (s.phase !== 'battle') {
-    if (s.phase === 'recover' && !s.options.retry) return;
-    s.phaseTime -= dt; if (s.phaseTime > 0) return;
-    if (s.phase === 'recover') for (const kind of desiredKinds(s)) addAlly(s, kind);
-    beginWave(s); return;
+    if (s.phase === 'recover' || !s.options.advance) return;
+    s.phaseTime = Math.max(0, s.phaseTime - dt); if (s.phaseTime > 0) return;
+    advanceLegion(s); return;
   }
-  s.waveTime += dt; s.recruitClock += dt; s.essence = limit(s.essence + dt * 2.4);
-  if (s.recruitClock >= Math.max(.3, 1.8 / (1 + legionCardLevel(s, 'recruit') * .12))) {
-    s.recruitClock = 0; if (s.options.summon) recruit(s);
-  }
+  s.waveTime += dt; s.essence = limit(s.essence + dt * 2.4);
   s.spawnClock -= dt;
   if (s.spawnLeft > 0 && s.spawnClock <= 0) {
     const pool: LegionEnemyKind[] = s.wave < 3 ? ['goblin', 'swarm'] : s.wave < 5 ? ['goblin', 'runner', 'skeleton'] : ['goblin', 'runner', 'skeleton', 'armored', 'shaman', 'swarm'];
@@ -254,12 +250,13 @@ export function stepLegion(s: LegionState, dt: number) {
 export function validLegion(value: unknown): value is LegionState {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const s = value as LegionState, finite = (n: unknown, max = 1e12) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= max;
-  if (s.version !== 1 || !LEGION_STRATEGIES.some(x => x.id === s.strategy) || !['battle', 'march', 'recover'].includes(s.phase) || typeof s.paused !== 'boolean' || ![1, 2].includes(s.speed)) return false;
-  for (const k of ['seed', 'nextId', 'wave', 'bestWave', 'cleared', 'elapsed', 'phaseTime', 'waveTime', 'coins', 'essence', 'xp', 'rank', 'pending', 'spawnLeft', 'recruitClock', 'trainClock', 'kills', 'defeats', 'wins', 'bestRun', 'damage', 'healing'] as const) if (!finite(s[k])) return false;
+  if (s.version !== 2 || !LEGION_STRATEGIES.some(x => x.id === s.strategy) || !['battle', 'march', 'recover'].includes(s.phase) || typeof s.paused !== 'boolean' || ![1, 2].includes(s.speed)) return false;
+  for (const k of ['seed', 'nextId', 'wave', 'bestWave', 'cleared', 'elapsed', 'phaseTime', 'waveTime', 'coins', 'essence', 'xp', 'rank', 'pending', 'spawnLeft', 'recruitClock', 'kills', 'defeats', 'wins', 'bestRun', 'damage', 'healing'] as const) if (!finite(s[k])) return false;
   if (!Number.isSafeInteger(s.wave) || s.wave < 1 || s.bestWave < s.wave || !s.training || !s.formation || !s.cards || !s.options || s.spawnLeft > 28 || !Number.isFinite(s.spawnClock)) return false;
-  if (!Object.values(s.options).every(v => typeof v === 'boolean') || !['summon', 'strengthen', 'replenish', 'retry', 'train'].every(k => typeof s.options[k as keyof Options] === 'boolean')) return false;
+  if (typeof s.options.advance !== 'boolean' || !s.commands || ![s.commands.assault,s.commands.assaultCooldown,s.commands.healCooldown].every(n => finite(n,22))) return false;
   if (!LEGION_UNITS.every(u => finite(s.training[u.id], 300) && Number.isInteger(s.training[u.id]))) return false;
   if (!LEGION_UNITS.every(u => finite(s.formation[u.id],24) && Number.isInteger(s.formation[u.id]))) return false;
+  if (legionSlots(s) > 24) return false;
   if (!Object.entries(s.cards).every(([k, v]) => LEGION_CARDS.some(c => c.id === k) && finite(v, 10000) && Number.isInteger(v))) return false;
   if (!Array.isArray(s.log) || s.log.length > 18 || !s.log.every(x => typeof x === 'string' && x.length <= 150)) return false;
   if (!Array.isArray(s.effects) || s.effects.length > LEGION_EFFECT_LIMIT || !s.effects.every(e => finite(e.id) && ['arrow', 'fire', 'lightning', 'heal', 'slash', 'hit'].includes(e.kind) && [e.x, e.y, e.tx, e.ty, e.life].every(Number.isFinite) && typeof e.text === 'string' && e.text.length < 40)) return false;

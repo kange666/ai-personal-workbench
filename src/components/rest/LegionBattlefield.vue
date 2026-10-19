@@ -50,9 +50,10 @@ const livingSlots = computed(() => LEGION_UNITS.reduce((sum,u)=>sum+props.state.
         <g v-if="a.slow>0" stroke="#c4f0ff" stroke-width="1.3" opacity=".8"><path d="M-8-7h16M0-15V1m-6-14L6-1m-12 0L6-13"/><ellipse cy="2" rx="17" ry="5" fill="#b1dbe826"/></g>
       </g>
       <LegionEffects :effects="state.effects" :cards="state.cards"/>
-      <g v-if="state.phase!=='battle'"><rect x="286" y="148" width="388" height="82" rx="14" fill="#192e3edc"/><text x="480" y="180" text-anchor="middle" fill="#f1e7cc" font-size="19">{{state.phase==='march'?'战线已突破 · 自动前进':'远征结算 · 全军整备'}}</text><text x="480" y="207" text-anchor="middle" fill="#bfced0" font-size="13">{{state.phase==='recover'&&!state.options.retry?'自动续战已关闭，可在右侧开启':`${Math.max(0,Math.ceil(state.phaseTime))} 秒后继续 · 永久训练保留`}}</text></g>
+      <g v-if="state.commands.assault>0"><rect x="370" y="75" width="220" height="30" rx="8" fill="#714a30dc"/><text x="480" y="95" text-anchor="middle" fill="#ffdfa4" font-size="14">强攻号令 · 全军增伤25%</text></g>
+      <g v-if="state.phase!=='battle'"><rect x="286" y="148" width="388" height="82" rx="14" fill="#192e3edc"/><text x="480" y="180" text-anchor="middle" fill="#f1e7cc" font-size="19">{{state.phase==='march'?'战线已突破':'远征结算 · 全军整备'}}</text><text x="480" y="207" text-anchor="middle" fill="#bfced0" font-size="13">{{state.phase==='recover'?'手动训练后点击重新出征':state.options.advance?`${Math.max(0,Math.ceil(state.phaseTime))} 秒后进入下一关`:'自动过关已关闭，点击下一关继续'}}</text></g>
     </svg>
-    <div class="legion-field-status"><span>{{state.paused?'已暂停':state.phase==='battle'?'自动推进中':state.phase==='march'?'前往下一战线':'正在整备'}}</span><small>军团 {{ state.allies.length }}/{{livingSlots}} 人 · 敌军 {{state.enemies.length}} 人</small></div>
+    <div class="legion-field-status"><span>{{state.paused?'已暂停':state.phase==='battle'?'自动战斗 · 手动指挥':state.phase==='march'?'准备下一战线':'等待重新出征'}}</span><small>军团 {{ state.allies.length }}/{{livingSlots}} 人 · 敌军 {{state.enemies.length}} 人</small></div>
     <div v-if="boss" class="legion-boss"><strong>{{ LEGION_ENEMIES[boss.kind as LegionEnemyKind].name }}</strong><i><b :style="{width:`${boss.hp/boss.maxHP*100}%`}"/></i></div>
     <div class="legion-field-toast">{{state.log[0]}}</div>
   </div>
