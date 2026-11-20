@@ -551,6 +551,7 @@ export interface JenkinsPublishRecord {
   currentStage: string;
   stages: JenkinsPipelineStage[];
   changes: JenkinsChange[];
+  imageVersion: string;
   startedAt: string;
   buildStartedAt?: string;
   finishedAt?: string;

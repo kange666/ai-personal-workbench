@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 const CREDENTIAL_SERVICE: &str = "ai-personal-workbench";
 const CREDENTIAL_USER: &str = "apifox-access-token";
-const APIFOX_EXPORT_URL: &str = "https://api.apifox.com/v1/projects";
 const APIFOX_API_VERSION: &str = "2024-03-28";
 const MAX_OPENAPI_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_API_TEST_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -228,6 +227,7 @@ struct SourceRow {
 #[derive(Debug, Clone)]
 struct ParsedEndpoint {
     id: String,
+    module_id: String,
     operation_id: String,
     method: String,
     path: String,
@@ -504,19 +504,92 @@ fn export_payload() -> Value {
     })
 }
 
-fn fetch_openapi(project_id: &str, token: &str) -> Result<Value, String> {
+fn fetch_project_documents(
+    project_id: &str,
+    token: &str,
+) -> Result<Vec<(String, String, Value)>, String> {
+    fetch_project_documents_from("https://api.apifox.com", project_id, token)
+}
+
+fn fetch_project_documents_from(
+    host: &str,
+    project_id: &str,
+    token: &str,
+) -> Result<Vec<(String, String, Value)>, String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|error| format!("创建 Apifox 请求失败：{error}"))?;
+    let catalog = client
+        .get(format!("{host}/api/v1/projects/{project_id}/modules"))
+        .header("X-Apifox-Api-Version", "2026-05-28")
+        .header("X-Project-Id", project_id)
+        .bearer_auth(token)
+        .send()
+        .map_err(|_| "无法连接 Apifox 获取模块列表。")?;
+    if !catalog.status().is_success() {
+        return Err(format!(
+            "获取 Apifox 模块列表失败（HTTP {}），请检查令牌和项目权限。",
+            catalog.status().as_u16()
+        ));
+    }
+    let catalog: Value = catalog.json().map_err(|_| "Apifox 模块列表格式异常。")?;
+    let data = catalog.get("data").unwrap_or(&catalog);
+    let modules = data
+        .as_array()
+        .or_else(|| data.get("items")?.as_array())
+        .or_else(|| data.get("modules")?.as_array())
+        .filter(|items| !items.is_empty())
+        .ok_or("Apifox 未返回有效的模块列表。")?;
+    let mut docs = Vec::new();
+    let mut total = 0;
+    for module in modules {
+        let id = module["id"]
+            .as_u64()
+            .or_else(|| module["id"].as_str()?.parse().ok())
+            .ok_or("Apifox 模块缺少有效 ID。")?;
+        let name = module["name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or("Apifox 模块缺少名称。")?;
+        let mut payload = export_payload();
+        payload["moduleId"] = json!(id);
+        let (doc, size) = fetch_openapi(&client, host, project_id, token, &payload)
+            .map_err(|e| format!("模块“{name}”同步失败：{e}"))?;
+        total += size;
+        if total > MAX_OPENAPI_BYTES {
+            return Err("项目的模块文档合计超过 32 MB，已保留原缓存。".into());
+        }
+        let is_default =
+            modules.len() == 1 || module["isDefault"].as_bool().unwrap_or(name == "默认模块");
+        docs.push((
+            if is_default {
+                String::new()
+            } else {
+                id.to_string()
+            },
+            name.to_owned(),
+            strip_apifox_extensions(&doc),
+        ));
+    }
+    Ok(docs)
+}
+
+fn fetch_openapi(
+    client: &Client,
+    host: &str,
+    project_id: &str,
+    token: &str,
+    payload: &Value,
+) -> Result<(Value, u64), String> {
     let response = client
         .post(format!(
-            "{APIFOX_EXPORT_URL}/{project_id}/export-openapi?locale=zh-CN"
+            "{host}/v1/projects/{project_id}/export-openapi?locale=zh-CN"
         ))
         .header("X-Apifox-Api-Version", APIFOX_API_VERSION)
         .bearer_auth(token)
-        .json(&export_payload())
+        .json(payload)
         .send()
         .map_err(|error| format!("无法连接 Apifox：{error}"))?;
     let status = response.status();
@@ -542,6 +615,7 @@ fn fetch_openapi(project_id: &str, token: &str) -> Result<Value, String> {
         return Err("Apifox OpenAPI 文档超过 32 MB，为避免占用过多本机内存已停止同步。".into());
     }
     serde_json::from_slice::<Value>(&bytes)
+        .map(|doc| (doc, bytes.len() as u64))
         .map_err(|error| format!("Apifox 返回的 OpenAPI JSON 无法解析：{error}"))
 }
 
@@ -716,6 +790,7 @@ fn parse_openapi(
             .to_lowercase();
             endpoints.push(ParsedEndpoint {
                 id: endpoint_id(source_id, method, path),
+                module_id: String::new(),
                 operation_id,
                 method: method.to_ascii_uppercase(),
                 path: path.clone(),
@@ -755,6 +830,91 @@ fn mark_sync_failure(state: &DatabaseState, source: &SourceRow, error: &str) {
     });
 }
 
+fn parse_project_documents(
+    mut documents: Vec<(String, String, Value)>,
+    source_id: &str,
+) -> Result<(Value, String, String, Vec<ParsedEndpoint>), String> {
+    if documents.len() == 1 {
+        let (_, _, root) = documents.pop().unwrap();
+        let (title, version, endpoints) = parse_openapi(&root, source_id)?;
+        return Ok((root, title, version, endpoints));
+    }
+    let mut cache = Map::new();
+    let mut default_label = None;
+    let mut endpoints = Vec::new();
+    let mut version = String::new();
+    let mut labels = Vec::new();
+    for (id, name, _) in &documents {
+        // 模块名作为目录的一层，目录分隔符显示为全角字符。
+        let label = name.trim().replace(['/', '\\', '›', '>'], "／");
+        let unique = documents
+            .iter()
+            .filter(|(_, n, _)| n.trim().replace(['/', '\\', '›', '>'], "／") == label)
+            .count()
+            == 1;
+        labels.push(if unique {
+            label
+        } else {
+            format!("{label} ({id})")
+        });
+    }
+    for ((id, _, mut root), label) in documents.into_iter().zip(labels) {
+        let paths = root
+            .get_mut("paths")
+            .and_then(Value::as_object_mut)
+            .ok_or("模块文档缺少 paths。")?;
+        for path in paths.values_mut() {
+            for method in operation_methods() {
+                let Some(op) = path.get_mut(*method).and_then(Value::as_object_mut) else {
+                    continue;
+                };
+                let mut tags: Vec<_> = op
+                    .get("tags")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(normalized_tag)
+                    .filter(|tag| !tag.is_empty())
+                    .map(|tag| format!("{label}/{tag}"))
+                    .collect();
+                if tags.is_empty() {
+                    tags.push(label.clone());
+                }
+                op.insert("tags".into(), json!(tags));
+            }
+        }
+        if let Some(tags) = root.get_mut("tags").and_then(Value::as_array_mut) {
+            for tag in tags {
+                if let Some(name) = tag["name"].as_str() {
+                    tag["name"] = json!(format!("{label}/{}", normalized_tag(name)));
+                }
+            }
+        }
+        let scope = if id.is_empty() {
+            default_label = Some(label.clone());
+            source_id.to_string()
+        } else {
+            format!("{source_id}/module/{id}")
+        };
+        let (_, v, mut items) = parse_openapi(&root, &scope)?;
+        version = v;
+        for item in &mut items {
+            item.module_id = id.clone();
+        }
+        endpoints.extend(items);
+        if cache.insert(label, root).is_some() {
+            return Err("模块名称重复，无法生成唯一目录。".into());
+        }
+    }
+    Ok((
+        json!({"workbenchModuleDocuments":cache, "defaultModule":default_label}),
+        "多模块接口文档".into(),
+        version,
+        endpoints,
+    ))
+}
+
 fn sync_source(state: &DatabaseState, source: &SourceRow) -> Result<ApiSyncSummary, String> {
     state
         .connect()?
@@ -764,8 +924,9 @@ fn sync_source(state: &DatabaseState, source: &SourceRow) -> Result<ApiSyncSumma
         )
         .map_err(|error| error.to_string())?;
     let token = access_token()?;
-    let root = strip_apifox_extensions(&fetch_openapi(&source.external_project_id, &token)?);
-    let (document_title, version, endpoints) = parse_openapi(&root, &source.id)?;
+    let documents = fetch_project_documents(&source.external_project_id, &token)?;
+    let (root, document_title, version, endpoints) =
+        parse_project_documents(documents, &source.id)?;
     let now = Utc::now().to_rfc3339();
     let content_hash =
         stable_hash(&serde_json::to_string(&root).map_err(|error| error.to_string())?);
@@ -813,9 +974,9 @@ fn sync_source(state: &DatabaseState, source: &SourceRow) -> Result<ApiSyncSumma
         .map_err(|error| error.to_string())?;
     for endpoint in &endpoints {
         transaction.execute(
-            "INSERT INTO api_endpoints(id,source_id,operation_id,method,path,title,description,tags_json,deprecated,document_json,document_hash,search_text,is_favorite,updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-            params![endpoint.id,source.id,endpoint.operation_id,endpoint.method,endpoint.path,endpoint.title,endpoint.description,serde_json::to_string(&endpoint.tags).map_err(|error| error.to_string())?,endpoint.deprecated,serde_json::to_string(&endpoint.document).map_err(|error| error.to_string())?,endpoint.document_hash,endpoint.search_text,existing.get(&endpoint.id).map(|(_,favorite)|*favorite).unwrap_or(false),now],
+            "INSERT INTO api_endpoints(id,source_id,operation_id,method,path,title,description,tags_json,deprecated,document_json,document_hash,search_text,is_favorite,updated_at,module_id)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![endpoint.id,source.id,endpoint.operation_id,endpoint.method,endpoint.path,endpoint.title,endpoint.description,serde_json::to_string(&endpoint.tags).map_err(|error| error.to_string())?,endpoint.deprecated,serde_json::to_string(&endpoint.document).map_err(|error| error.to_string())?,endpoint.document_hash,endpoint.search_text,existing.get(&endpoint.id).map(|(_,favorite)|*favorite).unwrap_or(false),now,endpoint.module_id],
         ).map_err(|error| error.to_string())?;
     }
     transaction.execute(
@@ -1171,8 +1332,35 @@ fn build_tag_openapi(
         .optional()
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "接口文档项目关联不存在。".to_string())?;
-    let root: Value = serde_json::from_str(&raw)
+    let mut root: Value = serde_json::from_str(&raw)
         .map_err(|_| "完整 OpenAPI 缓存无法解析，请重新同步该项目。".to_string())?;
+    if root.get("openapi").is_none() {
+        let default_label = root
+            .get("defaultModule")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(modules) = root
+            .get_mut("workbenchModuleDocuments")
+            .and_then(Value::as_object_mut)
+        {
+            let normalized = normalized_tag(tag_path);
+            let module = normalized.split('/').next().unwrap_or("");
+            if let Some(doc) = modules.remove(module) {
+                return build_tag_openapi_document(doc, tag_path, requested_version);
+            }
+            // 兼容首次多模块同步前复制的默认模块目录地址。
+            if let Some(label) = default_label {
+                if let Some(doc) = modules.remove(&label) {
+                    return build_tag_openapi_document(
+                        doc,
+                        &format!("{label}/{normalized}"),
+                        requested_version,
+                    );
+                }
+            }
+            return Err("找不到接口目录对应的模块，请重新复制目录 URL。".into());
+        }
+    }
     build_tag_openapi_document(root, tag_path, requested_version)
 }
 
@@ -2855,6 +3043,86 @@ mod tests {
                 .pointer("/responses/200/content/application~1json/schema/properties/id/type")
                 .and_then(Value::as_str),
             Some("string")
+        );
+    }
+
+    #[test]
+    fn module_discovery_exports_each_listed_module() {
+        use std::io::{BufRead, BufReader};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for n in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut size = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(length) = header.to_lowercase().strip_prefix("content-length:") {
+                        size = length.trim().parse().unwrap();
+                    }
+                }
+                let response = if n == 0 {
+                    assert!(request.starts_with("GET /api/v1/projects/123/modules "));
+                    json!({"success":true,"data":[{"id":1,"name":"默认模块","isDefault":true},{"id":"2","name":"组态"}]})
+                } else {
+                    assert!(
+                        request.starts_with("POST /v1/projects/123/export-openapi?locale=zh-CN ")
+                    );
+                    let mut body = vec![0; size];
+                    reader.read_exact(&mut body).unwrap();
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(payload["moduleId"], n);
+                    assert_eq!(payload["scope"]["type"], "ALL");
+                    json!({"openapi":"3.1.0","info":{"title":"接口"},"paths":{}})
+                };
+                let body = response.to_string();
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let docs = fetch_project_documents_from(&host, "123", "test-only").unwrap();
+        server.join().unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[1].1, "组态");
+    }
+
+    #[test]
+    fn module_sync_keeps_overlapping_operations_and_references_separate() {
+        let doc = |kind: &str| json!({"openapi":"3.1.0","info":{"title":"模块"},"paths":{"/items":{"get":{"tags":["列表"],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Item"}}}}}}}},"components":{"schemas":{"Item":{"type":kind}}}});
+        let first = doc("string");
+        let second = doc("integer");
+        let legacy = parse_openapi(&first, "source").unwrap().2[0].id.clone();
+        let (cache, _, _, rows) = parse_project_documents(
+            vec![
+                (String::new(), "默认模块".into(), first),
+                ("2".into(), "组态".into(), second),
+            ],
+            "source",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, legacy);
+        assert_ne!(rows[0].id, rows[1].id);
+        assert_eq!(rows[1].tags, vec!["组态/列表"]);
+        assert_eq!(rows[1].path, "/items");
+        let export = build_tag_openapi_document(
+            cache["workbenchModuleDocuments"]["组态"].clone(),
+            "组态/列表",
+            "3.1",
+        )
+        .unwrap();
+        assert_eq!(export["components"]["schemas"]["Item"]["type"], "integer");
+        assert_eq!(
+            rows[1]
+                .document
+                .pointer("/responses/200/content/application~1json/schema/type"),
+            Some(&json!("integer"))
         );
     }
 

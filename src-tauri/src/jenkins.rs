@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -100,6 +101,7 @@ pub struct JenkinsPublishRecord {
     pub current_stage: String,
     pub stages: Vec<JenkinsPipelineStage>,
     pub changes: Vec<JenkinsChange>,
+    pub image_version: String,
     pub started_at: String,
     pub build_started_at: Option<String>,
     pub finished_at: Option<String>,
@@ -772,16 +774,17 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JenkinsPublishRe
         current_stage: row.get(13)?,
         stages: serde_json::from_str(&stages_json).unwrap_or_default(),
         changes: serde_json::from_str(&changes_json).unwrap_or_default(),
-        started_at: row.get(17)?,
-        build_started_at: row.get(18)?,
-        finished_at: row.get(19)?,
-        updated_at: row.get(20)?,
-        result: row.get(21)?,
-        error_message: row.get(22)?,
+        image_version: row.get(17)?,
+        started_at: row.get(18)?,
+        build_started_at: row.get(19)?,
+        finished_at: row.get(20)?,
+        updated_at: row.get(21)?,
+        result: row.get(22)?,
+        error_message: row.get(23)?,
     })
 }
 
-const RECORD_SELECT: &str = "SELECT id,job_name,job_full_name,job_url,branch_parameter,branch,queue_id,queue_url,build_number,build_url,status,sync_state,queue_reason,current_stage,progress_percent,stages_json,changes_json,started_at,build_started_at,finished_at,updated_at,result,error_message FROM jenkins_publish_records";
+const RECORD_SELECT: &str = "SELECT id,job_name,job_full_name,job_url,branch_parameter,branch,queue_id,queue_url,build_number,build_url,status,sync_state,queue_reason,current_stage,progress_percent,stages_json,changes_json,image_version,started_at,build_started_at,finished_at,updated_at,result,error_message FROM jenkins_publish_records";
 
 fn get_record(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRecord, String> {
     let connection = state.connect()?;
@@ -1019,6 +1022,129 @@ fn merge_changes(existing: &[JenkinsChange], current: Vec<JenkinsChange>) -> Vec
     changes
 }
 
+fn normalize_image_version(value: &str) -> Option<String> {
+    let value = value
+        .trim()
+        .trim_matches(|character| matches!(character, '"' | '\''));
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn image_version_from_build_value(value: &Value) -> Option<String> {
+    for action in value
+        .get("actions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for parameter in action
+            .get("parameters")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if parameter
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case("VERSION"))
+            {
+                let Some(raw_value) = parameter.get("value") else {
+                    continue;
+                };
+                let version = raw_value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| raw_value.as_i64().map(|value| value.to_string()))
+                    .or_else(|| raw_value.as_u64().map(|value| value.to_string()))
+                    .and_then(|value| normalize_image_version(&value));
+                if version.is_some() {
+                    return version;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn image_version_from_console_text(text: &str) -> Option<String> {
+    let mut version = None;
+    for line in text.lines() {
+        for (index, _) in line.match_indices("VERSION") {
+            let valid_boundary = index == 0
+                || line[..index].chars().next_back().is_some_and(|character| {
+                    !character.is_ascii_alphanumeric() && character != '_'
+                });
+            if !valid_boundary {
+                continue;
+            }
+            let suffix = line[index + "VERSION".len()..].trim_start();
+            let Some(value) = suffix.strip_prefix('=') else {
+                continue;
+            };
+            let value = value.trim_start().trim_start_matches(['"', '\'']);
+            let candidate = value
+                .chars()
+                .take_while(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+                })
+                .collect::<String>();
+            if let Some(candidate) = normalize_image_version(&candidate) {
+                version = Some(candidate);
+            }
+        }
+    }
+    version
+}
+
+fn image_version_from_console(
+    client: &Client,
+    connection: &JenkinsConnection,
+    build_url: &str,
+) -> Option<String> {
+    let response = authenticated_get(
+        client,
+        connection,
+        &format!(
+            "{}consoleText",
+            build_url.trim_end_matches('/').to_string() + "/"
+        ),
+    )
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mut reader = response;
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut overlap = Vec::new();
+    let mut version = None;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        let mut block = std::mem::take(&mut overlap);
+        block.extend_from_slice(&buffer[..read]);
+        if let Some(candidate) = image_version_from_console_text(&String::from_utf8_lossy(&block)) {
+            version = Some(candidate);
+        }
+        let overlap_start = block.len().saturating_sub(256);
+        overlap.extend_from_slice(&block[overlap_start..]);
+    }
+    version
+}
+
 fn build_result_status(result: &str) -> &'static str {
     match result {
         "SUCCESS" => "success",
@@ -1127,7 +1253,7 @@ fn sync_publish_once(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRe
         }
     } else if record.status == "running" {
         let build_api = format!(
-            "{}api/json?tree=number,url,building,result,timestamp,duration,queueId,changeSet[items[commitId,id,msg,author[fullName],timestamp]],changeSets[items[commitId,id,msg,author[fullName],timestamp]]",
+            "{}api/json?tree=number,url,building,result,timestamp,duration,queueId,actions[parameters[name,value]],changeSet[items[commitId,id,msg,author[fullName],timestamp]],changeSets[items[commitId,id,msg,author[fullName],timestamp]]",
             record.build_url.trim_end_matches('/').to_string() + "/"
         );
         let response = authenticated_get(&client, &connection, &build_api)?;
@@ -1156,14 +1282,16 @@ fn sync_publish_once(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRe
         let changes_json =
             serde_json::to_string(&merge_changes(&record.changes, changes_from_value(&value)))
                 .map_err(|error| error.to_string())?;
+        let parameter_image_version = image_version_from_build_value(&value);
         let building = value
             .get("building")
             .and_then(Value::as_bool)
             .unwrap_or(true);
         if building {
+            let image_version = parameter_image_version.unwrap_or(record.image_version);
             state.connect()?.execute(
-                "UPDATE jenkins_publish_records SET current_stage=?1,stages_json=?2,changes_json=?3,sync_state='synced',updated_at=?4,error_message='' WHERE id=?5",
-                params![current_stage,stages_json,changes_json,timestamp,id],
+                "UPDATE jenkins_publish_records SET current_stage=?1,stages_json=?2,changes_json=?3,image_version=?4,sync_state='synced',updated_at=?5,error_message='' WHERE id=?6",
+                params![current_stage,stages_json,changes_json,image_version,timestamp,id],
             ).map_err(|error| error.to_string())?;
         } else {
             let result = value
@@ -1176,9 +1304,16 @@ fn sync_publish_once(state: &DatabaseState, id: &str) -> Result<JenkinsPublishRe
             } else {
                 String::new()
             };
+            let image_version = if status == "success" {
+                image_version_from_console(&client, &connection, &record.build_url)
+                    .or(parameter_image_version)
+                    .unwrap_or(record.image_version)
+            } else {
+                parameter_image_version.unwrap_or(record.image_version)
+            };
             state.connect()?.execute(
-                "UPDATE jenkins_publish_records SET status=?1,current_stage=?2,stages_json=?3,changes_json=?4,sync_state='synced',result=?5,error_message=?6,finished_at=?7,updated_at=?7 WHERE id=?8",
-                params![status,current_stage,stages_json,changes_json,result,error_message,timestamp,id],
+                "UPDATE jenkins_publish_records SET status=?1,current_stage=?2,stages_json=?3,changes_json=?4,image_version=?5,sync_state='synced',result=?6,error_message=?7,finished_at=?8,updated_at=?8 WHERE id=?9",
+                params![status,current_stage,stages_json,changes_json,image_version,result,error_message,timestamp,id],
             ).map_err(|error| error.to_string())?;
         }
     }
@@ -1455,6 +1590,27 @@ mod tests {
         assert_eq!(changes[1].commit_id, "987654");
         let merged = merge_changes(&changes[..1], changes.clone());
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn reads_image_version_from_build_parameter_or_current_console() {
+        let value = json!({"actions":[
+            {},
+            {"parameters":[
+                {"name":"BRANCH_NAME","value":"main"},
+                {"name":"VERSION","value":"20261027171357026"}
+            ]}
+        ]});
+        assert_eq!(
+            image_version_from_build_value(&value).as_deref(),
+            Some("20261027171357026")
+        );
+        let console = "IMAGE_VERSION=old\nVERSION=${BUILD_TIME}\nVERSION=20261027170000001\nexport VERSION = 20261027171357026\n";
+        assert_eq!(
+            image_version_from_console_text(console).as_deref(),
+            Some("20261027171357026")
+        );
+        assert!(image_version_from_console_text("VERSION=$SECRET").is_none());
     }
 
     #[test]

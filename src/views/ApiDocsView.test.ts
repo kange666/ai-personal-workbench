@@ -4,6 +4,7 @@ import { createMemoryHistory, createRouter } from "vue-router";
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ApiDocsView from "./ApiDocsView.vue";
+import { listApiEndpoints, syncAllApiSources, syncApiSource } from "../services/backend";
 
 declare const process: { cwd(): string };
 
@@ -26,12 +27,12 @@ vi.mock("../services/backend", () => ({
   isTauriRuntime: () => true,
   getApifoxCredentialStatus: async () => ({ configured:true,source:"Windows 凭据库" }),
   listApiSources: async () => [{ id:"source-1",externalProjectId:"1001",apifoxProjectName:"客户接口",documentTitle:"示例服务",openapiVersion:"3.1.0",syncStatus:"ready",endpointCount:2,lastSyncedAt:"2026-08-31T08:00:00Z",lastError:"",createdAt:"",updatedAt:"" },{ id:"source-2",externalProjectId:"1002",apifoxProjectName:"订单接口",documentTitle:"订单服务",openapiVersion:"3.1.0",syncStatus:"ready",endpointCount:1,lastSyncedAt:"2026-08-31T08:00:00Z",lastError:"",createdAt:"",updatedAt:"" }],
-  listApiEndpoints: async (sourceId:string) => sourceId==="source-2" ? [
+  listApiEndpoints: vi.fn(async (sourceId:string) => sourceId==="source-2" ? [
     { id:"ep-3",sourceId:"source-2",operationId:"getOrder",method:"GET",path:"/orders",title:"查询订单",description:"",tags:["订单"],deprecated:false,updatedAt:"",documentHash:"hash-1" },
   ] : [
     { id:"ep-1",sourceId:"source-1",operationId:"getUser",method:"GET",path:"/users/{id}",title:"查询用户",description:"按编号查询",tags:["用户"],deprecated:false,updatedAt:"",documentHash:"hash-1" },
     { id:"ep-2",sourceId:"source-1",operationId:"deleteUser",method:"DELETE",path:"/users/{id}",title:"删除用户",description:"",tags:["用户/管理"],deprecated:true,updatedAt:"",documentHash:"hash-1" },
-  ],
+  ]),
   getApiEndpoint: mocks.detail,
   renderApiEndpointMarkdown: mocks.render,
   renderApiEndpointRequestCode: mocks.renderCode,
@@ -48,6 +49,9 @@ vi.mock("../services/backend", () => ({
 describe("ApiDocsView", () => {
   beforeEach(() => {
     localStorage.clear();
+    vi.mocked(listApiEndpoints).mockClear();
+    vi.mocked(syncApiSource).mockReset();
+    vi.mocked(syncAllApiSources).mockReset();
     mocks.render.mockClear();
     mocks.renderCode.mockClear();
     mocks.detail.mockReset();mocks.detail.mockImplementation(async (id:string)=>mocks.detailResult(id));
@@ -65,6 +69,7 @@ describe("ApiDocsView", () => {
     await router.push("/api-docs");await router.isReady();
     const wrapper=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
     expect(wrapper.get(".api-tree-group").text()).toContain("有更新");
+    expect(wrapper.get(".api-tree-group .api-update-badge").attributes("title")).toContain("2 个接口有更新");
     expect(wrapper.get(".api-tree-toggle").attributes("aria-expanded")).toBe("false");
     await wrapper.get('input[placeholder*="搜索名称"]').setValue("用户");await flushPromises();
     expect(wrapper.findAll(".api-update-badge").length).toBeGreaterThan(0);
@@ -79,10 +84,120 @@ describe("ApiDocsView", () => {
     reopened.unmount();
   });
 
+  it("切换项目后详情仍在加载，立即离开也保留所选项目", async () => {
+    const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView}]});
+    await router.push("/api-docs");await router.isReady();
+    const mountView=()=>mount(ApiDocsView,{global:{plugins:[router]}});
+    const view=mountView();await flushPromises();
+    let finish!: () => void;
+    mocks.detail.mockImplementationOnce(id=>new Promise(resolve=>{finish=()=>resolve(mocks.detailResult(id));}));
+    await view.get(".api-project-switch-trigger").trigger("click");
+    await view.findAll('[role="option"]')[1].trigger("click");
+    await flushPromises();view.unmount();
+    await router.push("/api-docs");
+    const reopened=mountView();await flushPromises();
+    finish();await flushPromises();
+    expect(reopened.get(".api-project-switch-trigger").text()).toContain("订单接口");
+    expect(router.currentRoute.value.query.endpoint).toBe("ep-3");
+    reopened.unmount();
+  });
+
+  it("同步失败后刷新项目仍展示原因和缓存详情", async () => {
+    vi.mocked(syncApiSource).mockRejectedValueOnce("无项目权限");
+    const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView}]});
+    await router.push("/api-docs");await router.isReady();
+    const view=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    await view.get(".api-source-actions button").trigger("click");await flushPromises();
+    expect(view.get(".scan-message.error").text()).toContain("无项目权限");
+    expect(view.get(".api-detail-panel h2").text()).toBe("查询用户");
+    view.unmount();
+  });
+
+  it("同步全部复用已读取列表，保留其他项目的失败原因", async () => {
+    const summary={sourceId:"source-1",projectName:"客户接口",status:"ready" as const,added:0,updated:1,removed:0,total:2,error:""};
+    const failed={...summary,sourceId:"source-2",projectName:"订单接口",status:"stale" as const,updated:0,error:"网络超时"};
+    vi.mocked(syncAllApiSources).mockResolvedValue([summary,failed]);
+    const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView}]});
+    await router.push("/api-docs");await router.isReady();
+    const view=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    const syncButton=view.findAll("button").find(button=>button.text()==="同步全部")!;
+    vi.mocked(listApiEndpoints).mockClear();
+    await syncButton.trigger("click");await flushPromises();
+    expect(vi.mocked(listApiEndpoints).mock.calls).toEqual([["source-2"],["source-1"]]);
+    expect(view.get(".scan-message.error").text()).toContain("订单接口：网络超时");
+    vi.mocked(listApiEndpoints).mockClear();
+    await syncButton.trigger("click");await flushPromises();
+    expect(vi.mocked(listApiEndpoints).mock.calls).toEqual([["source-1"]]);
+    view.unmount();
+  });
+
+  it("批量同步后本地列表读取失败仍保留同步结果并刷新当前项目", async () => {
+    const result = {sourceId:"source-2",projectName:"订单接口",status:"ready" as const,added:1,updated:0,removed:0,total:2,error:""};
+    vi.mocked(syncAllApiSources).mockImplementationOnce(async () => {
+      vi.mocked(listApiEndpoints).mockClear().mockRejectedValueOnce("读取超时");
+      return [result, {...result,sourceId:"source-1",projectName:"客户接口",status:"stale",added:0,error:"无项目权限"}];
+    });
+    const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView}]});
+    await router.push("/api-docs");await router.isReady();
+    const view=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    await view.findAll("button").find(button=>button.text()==="同步全部")!.trigger("click");
+    await flushPromises();
+    const notice=view.get(".scan-message.error").text();
+    expect(notice).toContain("已同步 1/2 个项目");
+    expect(notice).toContain("客户接口：无项目权限");
+    expect(notice).toContain("订单接口已同步，本地接口列表读取失败：读取超时");
+    expect(vi.mocked(listApiEndpoints).mock.calls).toEqual([["source-2"],["source-1"]]);
+    expect(view.get(".api-detail-panel h2").text()).toBe("查询用户");
+    view.unmount();
+  });
+
   it("大字号模式保持接口树和详情两栏布局", () => {
     const styles=readFileSync(`${process.cwd()}/src/styles/typography.css`,"utf8");
     expect(styles).toContain('.api-docs-layout { grid-template-columns: minmax(270px, 300px) minmax(0, 1fr); overflow-x: hidden; }');
     expect(styles).not.toContain(".api-docs-layout.source-collapsed");
+  });
+
+  it("重进时恢复项目，各项目独立保留接口和手动折叠的目录", async () => {
+    const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView}]});
+    await router.push("/api-docs");await router.isReady();
+    let view=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    const group=(name:string)=>view.findAll(".api-tree-toggle").find(button=>button.get("b").text()===name)!;
+    const choose=async(name:string)=>{
+      await view.get(".api-project-switch-trigger").trigger("click");
+      await view.findAll('[role="option"]').find(button=>button.text().includes(name))!.trigger("click");
+      await flushPromises();
+    };
+    await group("管理").trigger("click");
+    await view.findAll(".api-tree-endpoint").find(button=>button.text().includes("删除用户"))!.trigger("click");
+    await flushPromises();
+    await group("用户").trigger("click");
+    await choose("订单接口");
+    view.unmount();await router.push("/api-docs");
+    view=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    expect(view.get(".api-project-switch-trigger").text()).toContain("订单接口");
+    expect(router.currentRoute.value.query.endpoint).toBe("ep-3");
+    await choose("客户接口");
+    expect(view.get(".api-detail-panel h2").text()).toBe("删除用户");
+    expect(group("用户").attributes("aria-expanded")).toBe("false");
+    await group("用户").trigger("click");
+    expect(group("管理").attributes("aria-expanded")).toBe("true");
+    view.unmount();
+  });
+
+  it("指定接口链接优先，失效的浏览记录自动回退并清理目录", async () => {
+    const key="workbench-api-doc-location-v1";
+    localStorage.setItem(key,"source-2");
+    localStorage.setItem(key+":source-1",JSON.stringify({endpoint:"removed",folders:["已删除目录"]}));
+    const router=createRouter({history:createMemoryHistory(),routes:[{path:"/api-docs",component:ApiDocsView}]});
+    await router.push("/api-docs?source=source-1");await router.isReady();
+    let view=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    expect(router.currentRoute.value.query.endpoint).toBe("ep-1");
+    expect(JSON.parse(localStorage.getItem(key+":source-1")!).folders).not.toContain("已删除目录");
+    view.unmount();await router.push("/api-docs?endpoint=ep-3");
+    view=mount(ApiDocsView,{global:{plugins:[router]}});await flushPromises();
+    expect(view.get(".api-project-switch-trigger").text()).toContain("订单接口");
+    expect(router.currentRoute.value.query.endpoint).toBe("ep-3");
+    view.unmount();
   });
 
   it("按 Apifox 项目展示树形接口、可在项目名称下拉切换并复制接口内容", async () => {

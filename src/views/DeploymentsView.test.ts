@@ -12,7 +12,7 @@ const mocks=vi.hoisted(()=>({
   favorite:vi.fn(async()=>undefined),
   displayName:vi.fn(async()=>undefined),
   branches:vi.fn(async(jobFullName:string)=>({jobFullName,parameterName:"BRANCH_NAME",branches:["main","develop"]})),
-  publish:vi.fn(async(jobFullName:string,branch:string)=>({id:"run-1",jobName:"业务后台",jobFullName,jobUrl:"https://jenkins/job/normal/",branchParameter:"BRANCH_NAME",branch,queueId:12,queueUrl:"https://jenkins/queue/item/12/",buildUrl:"",status:"queued",syncState:"synced",queueReason:"等待节点",currentStage:"",stages:[],changes:[],startedAt:"2026-09-01T08:00:00Z",updatedAt:"2026-09-01T08:00:00Z",result:"",errorMessage:""})),
+  publish:vi.fn(async(jobFullName:string,branch:string)=>({id:"run-1",jobName:"业务后台",jobFullName,jobUrl:"https://jenkins/job/normal/",branchParameter:"BRANCH_NAME",branch,queueId:12,queueUrl:"https://jenkins/queue/item/12/",buildUrl:"",status:"queued",syncState:"synced",queueReason:"等待节点",currentStage:"",stages:[],changes:[],imageVersion:"",startedAt:"2026-09-01T08:00:00Z",updatedAt:"2026-09-01T08:00:00Z",result:"",errorMessage:""})),
   records:[] as any[],
 }));
 
@@ -40,7 +40,7 @@ async function mountView() {
 }
 
 function publishRecord(id:string,status:"queued"|"running"|"success"|"failed"|"aborted",overrides:Record<string,unknown>={}) {
-  return {id,jobName:"业务后台",jobFullName:"folder/普通项目",jobUrl:"https://jenkins/job/normal/",branchParameter:"BRANCH_NAME",branch:"develop",queueId:12,queueUrl:"https://jenkins/queue/item/12/",buildNumber:18,buildUrl:"https://jenkins/job/normal/18/",status,syncState:"synced",queueReason:"",currentStage:"部署",stages:[],changes:[],startedAt:new Date().toISOString(),finishedAt:status==="queued"||status==="running"?undefined:new Date().toISOString(),updatedAt:new Date().toISOString(),result:status.toUpperCase(),errorMessage:"",...overrides};
+  return {id,jobName:"业务后台",jobFullName:"folder/普通项目",jobUrl:"https://jenkins/job/normal/",branchParameter:"BRANCH_NAME",branch:"develop",queueId:12,queueUrl:"https://jenkins/queue/item/12/",buildNumber:18,buildUrl:"https://jenkins/job/normal/18/",status,syncState:"synced",queueReason:"",currentStage:"部署",stages:[],changes:[],imageVersion:"",startedAt:new Date().toISOString(),finishedAt:status==="queued"||status==="running"?undefined:new Date().toISOString(),updatedAt:new Date().toISOString(),result:status.toUpperCase(),errorMessage:"",...overrides};
 }
 
 describe("DeploymentsView",()=>{
@@ -155,6 +155,17 @@ describe("DeploymentsView",()=>{
     expect(wrapper.get(".deployment-card .record-changes").text()).toContain("abcdef12");
     expect(wrapper.get(".deployment-card .record-changes").text()).toContain("fix: 修复发布问题");
     expect(wrapper.get(".deployment-history .record-changes").text()).toContain("张三");
+    wrapper.unmount();
+  });
+
+  it("发布成功后在发布记录显示镜像版本",async()=>{
+    mocks.records=[
+      publishRecord("success","success",{imageVersion:"20261027171357026"}),
+      publishRecord("failed","failed",{imageVersion:"20261027170000001"}),
+    ];
+    const wrapper=await mountView();
+    expect(wrapper.text()).toContain("VERSION=20261027171357026");
+    expect(wrapper.text()).not.toContain("VERSION=20261027170000001");
     wrapper.unmount();
   });
 

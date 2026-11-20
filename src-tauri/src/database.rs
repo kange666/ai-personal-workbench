@@ -9,7 +9,48 @@ mod access;
 pub use access::DatabaseConnection;
 use access::{DatabaseAccess, DatabaseRestoreGuard};
 
-pub const SCHEMA_VERSION: i64 = 49;
+pub const SCHEMA_VERSION: i64 = 51;
+
+const API_ENDPOINTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS api_endpoints (
+                   id TEXT PRIMARY KEY,
+                   source_id TEXT NOT NULL,
+                   operation_id TEXT NOT NULL DEFAULT '',
+                   method TEXT NOT NULL,
+                   path TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   description TEXT NOT NULL DEFAULT '',
+                   tags_json TEXT NOT NULL DEFAULT '[]',
+                   deprecated INTEGER NOT NULL DEFAULT 0,
+                   document_json TEXT NOT NULL DEFAULT '{}',
+                   document_hash TEXT NOT NULL DEFAULT '',
+                   search_text TEXT NOT NULL DEFAULT '',
+                   is_favorite INTEGER NOT NULL DEFAULT 0,
+                   updated_at TEXT NOT NULL,
+                   module_id TEXT NOT NULL DEFAULT '',
+                   UNIQUE(source_id,module_id,method,path),
+                   FOREIGN KEY(source_id) REFERENCES api_sources(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_api_endpoints_source ON api_endpoints(source_id,method,path);
+                 CREATE INDEX IF NOT EXISTS idx_api_endpoints_title ON api_endpoints(title);";
+
+// 重建旧表以允许不同模块保存同方法、同路径的接口，已有 ID 和缓存原样迁移。
+fn migrate_module_endpoints(connection: &Connection) -> Result<(), String> {
+    let has_module:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('api_endpoints') WHERE name='module_id')",[],|row|row.get(0)).map_err(|e|e.to_string())?;
+    if has_module {
+        return Ok(());
+    }
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|e| e.to_string())?;
+    tx.execute_batch("ALTER TABLE api_endpoints RENAME TO api_endpoints_before_modules;
+        DROP INDEX IF EXISTS idx_api_endpoints_source; DROP INDEX IF EXISTS idx_api_endpoints_title;").map_err(|e|e.to_string())?;
+    tx.execute_batch(API_ENDPOINTS_SCHEMA)
+        .map_err(|e| e.to_string())?;
+    tx.execute_batch("INSERT INTO api_endpoints(id,source_id,operation_id,method,path,title,description,tags_json,deprecated,document_json,document_hash,search_text,is_favorite,updated_at)
+        SELECT id,source_id,operation_id,method,path,title,description,tags_json,deprecated,document_json,document_hash,search_text,is_favorite,updated_at FROM api_endpoints_before_modules;
+        DROP TABLE api_endpoints_before_modules;").map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
 
 #[derive(Clone)]
 pub struct DatabaseState {
@@ -1061,6 +1102,7 @@ impl DatabaseState {
                    progress_percent INTEGER,
                    stages_json TEXT NOT NULL DEFAULT '[]',
                    changes_json TEXT NOT NULL DEFAULT '[]',
+                   image_version TEXT NOT NULL DEFAULT '',
                    started_at TEXT NOT NULL,
                    build_started_at TEXT,
                    finished_at TEXT,
@@ -1109,26 +1151,6 @@ impl DatabaseState {
                    FOREIGN KEY(project_profile_id) REFERENCES project_profiles(id) ON DELETE SET NULL
                  );
                  CREATE INDEX IF NOT EXISTS idx_api_sources_status ON api_sources(sync_status,updated_at DESC);
-                 CREATE TABLE IF NOT EXISTS api_endpoints (
-                   id TEXT PRIMARY KEY,
-                   source_id TEXT NOT NULL,
-                   operation_id TEXT NOT NULL DEFAULT '',
-                   method TEXT NOT NULL,
-                   path TEXT NOT NULL,
-                   title TEXT NOT NULL,
-                   description TEXT NOT NULL DEFAULT '',
-                   tags_json TEXT NOT NULL DEFAULT '[]',
-                   deprecated INTEGER NOT NULL DEFAULT 0,
-                   document_json TEXT NOT NULL DEFAULT '{}',
-                   document_hash TEXT NOT NULL DEFAULT '',
-                   search_text TEXT NOT NULL DEFAULT '',
-                   is_favorite INTEGER NOT NULL DEFAULT 0,
-                   updated_at TEXT NOT NULL,
-                   UNIQUE(source_id,method,path),
-                   FOREIGN KEY(source_id) REFERENCES api_sources(id) ON DELETE CASCADE
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_api_endpoints_source ON api_endpoints(source_id,method,path);
-                 CREATE INDEX IF NOT EXISTS idx_api_endpoints_title ON api_endpoints(title);
                  CREATE TABLE IF NOT EXISTS api_tag_exports (
                    source_id TEXT NOT NULL,
                    tag_path TEXT NOT NULL,
@@ -1297,6 +1319,9 @@ impl DatabaseState {
                   CREATE INDEX IF NOT EXISTS idx_tapd_codex_jobs_item ON tapd_codex_jobs(item_key,created_at);",
             )
             .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch(API_ENDPOINTS_SCHEMA)
+            .map_err(|e| e.to_string())?;
         migrate_api_sources_shared_external_project_id(&connection)?;
         for migration in [
             "ALTER TABLE tasks ADD COLUMN start_date TEXT",
@@ -1374,11 +1399,13 @@ impl DatabaseState {
             "ALTER TABLE api_sources ADD COLUMN code_typescript INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE api_endpoints ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE jenkins_publish_records ADD COLUMN changes_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE jenkins_publish_records ADD COLUMN image_version TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE reports ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''",
         ] {
             add_column_if_missing(&connection, migration)?;
         }
         migrate_api_sources_to_apifox_projects(&connection)?;
+        migrate_module_endpoints(&connection)?;
         crate::project_identity::migrate_renamed_project_profiles(&connection)?;
         connection
             .execute(
@@ -1780,6 +1807,50 @@ pub fn search_workspace(
 
 #[cfg(test)]
 mod migration_tests {
+    #[test]
+    fn module_endpoint_migration_preserves_cached_rows_and_accepts_overlapping_paths() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+            CREATE TABLE api_sources(id TEXT PRIMARY KEY);
+            INSERT INTO api_sources VALUES('project');",
+        )
+        .unwrap();
+        let legacy = super::API_ENDPOINTS_SCHEMA
+            .replace("module_id TEXT NOT NULL DEFAULT '',", "")
+            .replace(
+                "UNIQUE(source_id,module_id,method,path)",
+                "UNIQUE(source_id,method,path)",
+            );
+        db.execute_batch(&legacy).unwrap();
+        db.execute_batch(
+            "INSERT INTO api_endpoints(id,source_id,method,path,title,updated_at,is_favorite)
+            VALUES('legacy','project','GET','/items','默认接口','now',1)",
+        )
+        .unwrap();
+        super::migrate_module_endpoints(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO api_endpoints(id,source_id,module_id,method,path,title,updated_at)
+            VALUES('other','project','2','GET','/items','组态接口','now')",
+        )
+        .unwrap();
+        super::migrate_module_endpoints(&db).unwrap();
+        assert_eq!(db.query_row("SELECT is_favorite FROM api_endpoints WHERE id='legacy' AND module_id='' AND title='默认接口'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM api_endpoints", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+    }
     use super::*;
 
     fn test_directory(name: &str) -> PathBuf {
@@ -2126,17 +2197,16 @@ mod migration_tests {
                 .unwrap();
             assert!(exists, "数据库升级后缺少 {table}");
         }
-        let jenkins_changes_exists: bool = upgraded
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('jenkins_publish_records') WHERE name='changes_json')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            jenkins_changes_exists,
-            "jenkins_publish_records 缺少 changes_json"
-        );
+        for column in ["changes_json", "image_version"] {
+            let exists: bool = upgraded
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('jenkins_publish_records') WHERE name=?1)",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "jenkins_publish_records 缺少 {column}");
+        }
         for table in ["api_sources", "api_endpoints", "api_tag_exports"] {
             let exists: bool = upgraded
                 .query_row(

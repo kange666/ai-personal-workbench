@@ -18,6 +18,7 @@ function record(overrides: Partial<JenkinsPublishRecord> = {}): JenkinsPublishRe
     currentStage: "",
     stages: [],
     changes: [],
+    imageVersion: "",
     startedAt: "2026-09-01T08:00:00Z",
     updatedAt: "2026-09-01T08:00:00Z",
     result: "",

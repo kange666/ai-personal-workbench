@@ -43,8 +43,9 @@ describe('孤塔守夜平衡与规则',()=>{
     }
     return s;
   };
-  it('36 张强化无重复，三选一不会出现缺少基础能力的空效果卡',()=>{
-    expect(new Set(DEFENSE_CARDS.map(c=>c.id)).size).toBe(36);
+  it('39 张强化无重复，三选一不会出现缺少基础能力的空效果卡',()=>{
+    expect(DEFENSE_CARDS).toHaveLength(39);
+    expect(new Set(DEFENSE_CARDS.map(c=>c.id)).size).toBe(DEFENSE_CARDS.length);
     const s=createDefense(5);s.wave=5;s.phase='playing';s.pendingUpgrades=1;defenseOffers(s);expect(s.offers.some(id=>['radius','links','inferno','freeze','storm'].includes(id))).toBe(false);
     const before=JSON.stringify(s);expect(pickDefenseCard(s,'invalid')).toBe(false);expect(JSON.stringify(s)).toBe(before);
     const clone=JSON.parse(before);expect(pickDefenseCard(s,s.offers[0]!)).toBe(true);pickDefenseCard(clone,clone.offers[0]);expect(clone).toEqual(s);

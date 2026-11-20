@@ -58,7 +58,14 @@ function markApiUpdatesRead(items:ApiEndpointSummary[]) {
   saveApiUpdates(selectedSourceId.value,state);
 }
 function endpointUpdate(item?:ApiEndpointSummary) { return item && apiUpdates.value[item.sourceId]?.unread[item.id]; }
-function groupUpdateCount(path?:string) { return endpoints.value.filter(item=>endpointUpdate(item) && endpointFolderKeys(item).includes(path || "")).length; }
+const unreadFolderCounts = computed(() => {
+  const folders = new Map<string, number>();
+  for (const item of endpoints.value) {
+    if (!endpointUpdate(item)) continue;
+    for (const key of endpointFolderKeys(item)) folders.set(key, (folders.get(key) ?? 0) + 1);
+  }
+  return folders;
+});
 const selected = ref<ApiEndpointDetail | null>(null);
 const loading = ref(false);
 const detailLoading = ref(false);
@@ -70,6 +77,39 @@ const query = ref("");
 const projectSwitchOpen = ref(false);
 const projectSwitchRef = ref<HTMLElement|null>(null);
 const expandedTreeKeys = ref(new Set<string>());
+const locationKey = "workbench-api-doc-location-v1";
+let navigationVersion = 0;
+let disposed = false;
+
+function lastSourceId(): string {
+  try { return localStorage.getItem(locationKey) ?? ""; }
+  catch { return ""; }
+}
+
+function rememberSource(id: string) {
+  try { localStorage.setItem(locationKey, id); }
+  catch { /* 本机存储不可用时仍允许浏览。 */ }
+}
+
+function savedLocation(sourceId: string): { endpoint: string; folders: string[] } | null {
+  try {
+    const saved = JSON.parse(localStorage.getItem(`${locationKey}:${sourceId}`) ?? "null");
+    if (typeof saved?.endpoint !== "string" || !Array.isArray(saved.folders)) return null;
+    return { endpoint: saved.endpoint, folders: saved.folders.filter((key: unknown) => typeof key === "string") };
+  } catch { return null; }
+}
+
+function rememberLocation() {
+  const sourceId = selectedSourceId.value;
+  if (!sourceId || disposed || (selected.value && selected.value.sourceId !== sourceId)) return;
+  try {
+    localStorage.setItem(`${locationKey}:${sourceId}`, JSON.stringify({
+      endpoint: selected.value?.id ?? "",
+      folders: [...expandedTreeKeys.value],
+    }));
+    rememberSource(sourceId);
+  } catch { /* 本机存储不可用时仍允许浏览。 */ }
+}
 const configOpen = ref(false);
 const settingsLoading = ref(false);
 const config = reactive({ id:"", externalProjectId:"", apifoxProjectName:"" });
@@ -229,6 +269,7 @@ function toggleTreeGroup(row:ApiTreeRow) {
     markApiUpdatesRead(endpoints.value.filter(item=>endpointFolderKeys(item).includes(key)));
   }
   expandedTreeKeys.value=next;
+  rememberLocation();
 }
 async function selectTreeEndpoint(item?:ApiEndpointSummary) {
   if(!item) return;
@@ -270,18 +311,29 @@ function responseContents(response:JsonObject) { return Object.entries(asObject(
 function formatTime(value?:string) { return value ? new Intl.DateTimeFormat("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(value)) : "从未同步"; }
 function statusText(value:ApiSource["syncStatus"]) { return ({never:"从未同步",syncing:"正在同步",ready:"同步成功",stale:"使用旧缓存",error:"同步失败"} as Record<string,string>)[value] || value; }
 
-async function loadEndpoints(sourceId:string, preferredEndpointId="") {
-  endpoints.value = sourceId && isTauriRuntime() ? await listApiEndpoints(sourceId) : [];
-  if(sourceId) trackApiUpdates(sourceId,endpoints.value);
-  const target=preferredEndpointId || (selected.value?.sourceId===sourceId ? selected.value.id : "") || endpoints.value[0]?.id || "";
-  selected.value = target && endpoints.value.some(item=>item.id===target) ? await getApiEndpoint(target) : null;
-  expandedTreeKeys.value=new Set();
-  const activeEndpoint=endpoints.value.find(item=>item.id===selected.value?.id) || endpoints.value[0];
-  if(activeEndpoint && !endpointFolderKeys(activeEndpoint).some(key=>groupUpdateCount(key)>0)) expandEndpointPath(activeEndpoint);
-  if(selected.value) await router.replace({query:{source:sourceId,endpoint:selected.value.id}});
+async function loadEndpoints(sourceId:string, preferredEndpointId="", requestedDetail:ApiEndpointDetail|null=null, refreshed?: ApiEndpointSummary[]) {
+  const version = ++navigationVersion;
+  const items = refreshed ?? await listApiEndpoints(sourceId);
+  if (version !== navigationVersion) return;
+  const saved = savedLocation(sourceId);
+  const active = items.find(item => item.id === preferredEndpointId)
+    ?? items.find(item => item.id === saved?.endpoint)
+    ?? items[0];
+  const detail = active ? (requestedDetail?.id === active.id ? requestedDetail : await getApiEndpoint(active.id)) : null;
+  if (version !== navigationVersion) return;
+  endpoints.value = items;
+  selected.value = detail;
+  if (!refreshed) trackApiUpdates(sourceId, items);
+  const folders = new Set(items.flatMap(endpointFolderKeys));
+  expandedTreeKeys.value = new Set(saved?.folders.filter(key => folders.has(key)));
+  if (active && active.id !== saved?.endpoint && (active.id === preferredEndpointId || !endpointFolderKeys(active).some(key => unreadFolderCounts.value.has(key)))) {
+    expandEndpointPath(active);
+  }
+  rememberLocation();
+  await router.replace({query:{source:sourceId,endpoint:detail?.id}});
 }
 
-async function load() {
+async function load(refreshed?: Map<string, ApiEndpointSummary[]>) {
   if(!isTauriRuntime()) return;
   loading.value=true; error.value="";
   try {
@@ -295,18 +347,23 @@ async function load() {
       || sources.value.find(item=>item.id===sourceId)
       || sources.value.find(item=>legacyProjectId && item.projectProfileId===legacyProjectId)
       || sources.value.find(item=>item.id===selectedSourceId.value)
+      || sources.value.find(item=>item.id===lastSourceId())
       || sources.value[0];
+    if(disposed) return;
     selectedSourceId.value=target?.id || "";
-    if(target) await loadEndpoints(target.id,requestedDetail?.id || requestedEndpoint);
+    if(target) await loadEndpoints(target.id,requestedDetail?.id || requestedEndpoint,requestedDetail,refreshed?.get(target.id));
+    else { endpoints.value=[]; selected.value=null; expandedTreeKeys.value=new Set(); }
   } catch(cause) { error.value=String(cause); }
   finally { loading.value=false; }
 }
 
 async function selectSource(item:ApiSource) {
   selectedSourceId.value=item.id; query.value="";error.value="";testResult.value=null;
+  rememberSource(item.id);
+  endpoints.value=[]; selected.value=null; expandedTreeKeys.value=new Set();
   detailLoading.value=true;
   try { await loadEndpoints(item.id); }
-  catch(cause){error.value=String(cause);}finally{detailLoading.value=false;}
+  catch(cause){if(item.id===selectedSourceId.value) error.value=String(cause);}finally{if(item.id===selectedSourceId.value) detailLoading.value=false;}
 }
 function selectSourceById(sourceId:string) {
   projectSwitchOpen.value=false;
@@ -317,9 +374,15 @@ function closeProjectSwitch(event:PointerEvent) {
   if(!projectSwitchRef.value?.contains(event.target as Node)) projectSwitchOpen.value=false;
 }
 async function selectEndpoint(item:ApiEndpointSummary) {
+  const version=++navigationVersion;
   error.value="";testResult.value=null;detailLoading.value=true;
-  try { expandEndpointPath(item);selected.value=await getApiEndpoint(item.id);await router.replace({query:{source:selected.value.sourceId,endpoint:item.id}}); }
-  catch(cause){error.value=String(cause);}finally{detailLoading.value=false;}
+  try {
+    const detail=await getApiEndpoint(item.id);
+    if(version!==navigationVersion) return;
+    expandEndpointPath(item);selected.value=detail;rememberLocation();
+    await router.replace({query:{source:detail.sourceId,endpoint:item.id}});
+  }
+  catch(cause){if(version===navigationVersion) error.value=String(cause);}finally{if(version===navigationVersion) detailLoading.value=false;}
 }
 async function openProjectSettings(source?:ApiSource|null) {
   const target=source || null;
@@ -354,22 +417,54 @@ async function persistProjectSettings() {
 async function removeSource(item:ApiSource) {
   if(!await confirmAction({ title:"删除 Apifox 项目", message:`确定删除 Apifox 项目“${item.apifoxProjectName || item.externalProjectId}”及其本地接口缓存吗？Apifox 原项目不会删除。`, confirmText:"删除项目", tone:"danger" })) return;
   loading.value=true;error.value="";
-  try { await removeApiSource(item.id);configOpen.value=false;message.value="Apifox 项目和本地接口缓存已移除。";selected.value=null;await load(); }
+  try {
+    await removeApiSource(item.id);
+    try {
+      localStorage.removeItem(`${locationKey}:${item.id}`);
+      if (lastSourceId() === item.id) localStorage.removeItem(locationKey);
+    } catch { /* 项目已删除，本机存储可能不可用。 */ }
+    configOpen.value=false;message.value="Apifox 项目和本地接口缓存已移除。";selected.value=null;await load();
+  }
   catch(cause){error.value=String(cause);}finally{loading.value=false;}
 }
 async function syncOne(item:ApiSource) {
   syncingSourceId.value=item.id;error.value="";message.value="";
   try { const result=await syncApiSource(item.id);message.value=`${item.apifoxProjectName || item.externalProjectId} 同步完成：新增 ${result.added}、更新 ${result.updated}、移除 ${result.removed}，共 ${result.total} 个接口。`;await load(); }
-  catch(cause){error.value=String(cause);await load();}
+  catch(cause){
+    await load();
+    error.value = [String(cause), error.value].filter(Boolean).join("；");
+  }
   finally{syncingSourceId.value="";}
 }
 async function syncAll() {
   syncingAll.value=true;error.value="";message.value="";
   try {
-    for(const source of sources.value) trackApiUpdates(source.id,await listApiEndpoints(source.id));
+    for (const source of sources.value) {
+      if (!apiUpdates.value[source.id] && !readApiUpdates(source.id)) {
+        trackApiUpdates(source.id, await listApiEndpoints(source.id));
+      }
+    }
     const results=await syncAllApiSources();
-    for(const source of sources.value) trackApiUpdates(source.id,await listApiEndpoints(source.id));
-    const failed=results.filter(item=>item.status!=="ready");message.value=`已同步 ${results.length-failed.length}/${results.length} 个项目${failed.length ? `，${failed.length} 个项目保留旧缓存或同步失败` : ""}。`;await load();
+    const failed = results.filter(item => item.status !== "ready");
+    const summary = `已同步 ${results.length - failed.length}/${results.length} 个项目。`;
+    const issues = failed.map(item => `${item.projectName || item.sourceId}：${item.error || "同步失败"}`);
+    message.value = summary;
+    const refreshed = new Map<string, ApiEndpointSummary[]>();
+    for (const result of results) {
+      if (result.status !== "ready" || !(result.added || result.updated || result.removed)) continue;
+      let items: ApiEndpointSummary[];
+      try {
+        items = await listApiEndpoints(result.sourceId);
+      } catch (cause) {
+        issues.push(`${result.projectName || result.sourceId}已同步，本地接口列表读取失败：${String(cause)}`);
+        continue;
+      }
+      trackApiUpdates(result.sourceId, items);
+      if (result.sourceId === selectedSourceId.value) refreshed.set(result.sourceId, items);
+    }
+    await load(refreshed);
+    if (error.value) issues.push(`刷新当前页面失败：${error.value}`);
+    if (issues.length) error.value = [summary, ...issues].join(" ");
   }
   catch(cause){error.value=String(cause);}finally{syncingAll.value=false;}
 }
@@ -444,7 +539,7 @@ function openTagExportUrl() {
   if(tagExportUrl.value) window.open(tagExportUrl.value,"_blank","noopener,noreferrer");
 }
 onMounted(() => { void load();document.addEventListener("pointerdown",closeProjectSwitch); });
-onBeforeUnmount(() => document.removeEventListener("pointerdown",closeProjectSwitch));
+onBeforeUnmount(() => { disposed=true; navigationVersion++; document.removeEventListener("pointerdown",closeProjectSwitch); });
 </script>
 
 <template>
@@ -459,7 +554,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown",closeProjectSwi
         <div class="api-filters"><label>⌕<input v-model="query" placeholder="搜索名称、路径、描述或 Operation ID"></label></div>
         <div class="api-endpoint-list" aria-label="接口目录树">
           <template v-for="row in treeRows" :key="row.key">
-            <div v-if="row.kind==='group'" class="api-tree-group" :style="{paddingLeft:`${12+row.depth*16}px`}"><button class="api-tree-toggle" :aria-expanded="row.expanded" @click="toggleTreeGroup(row)"><span class="disclosure-icon tree" aria-hidden="true"></span><b>{{ row.name }}</b><span v-if="groupUpdateCount(row.tagPath)" class="api-update-badge" :title="`${groupUpdateCount(row.tagPath)} 个接口有更新，展开后清除提示`">有更新</span><em>{{ row.count }}</em></button><button class="api-tag-export-trigger" title="导出整个标签的 OpenAPI URL" :disabled="tagExportLoading" @click="openTagExport(row)">URL</button></div>
+            <div v-if="row.kind==='group'" class="api-tree-group" :style="{paddingLeft:`${12+row.depth*16}px`}"><button class="api-tree-toggle" :aria-expanded="row.expanded" @click="toggleTreeGroup(row)"><span class="disclosure-icon tree" aria-hidden="true"></span><b>{{ row.name }}</b><span v-if="row.tagPath && unreadFolderCounts.has(row.tagPath)" class="api-update-badge" :title="`${unreadFolderCounts.get(row.tagPath)} 个接口有更新，展开后清除提示`">有更新</span><em>{{ row.count }}</em></button><button class="api-tag-export-trigger" title="导出整个标签的 OpenAPI URL" :disabled="tagExportLoading" @click="openTagExport(row)">URL</button></div>
             <button v-else class="api-tree-endpoint" :class="{active:row.item?.id===selected?.id}" :style="{paddingLeft:`${15+row.depth*16}px`}" @click="selectTreeEndpoint(row.item)"><span class="api-method" :class="row.item?.method.toLowerCase()">{{ row.item?.method }}</span><span class="api-tree-copy"><b>{{ row.item?.title }}</b><code>{{ row.item?.path }}</code></span><span v-if="endpointUpdate(row.item)" class="api-update-badge">{{ endpointUpdate(row.item)==='added' ? '新增' : '更新' }}</span><em v-if="row.item?.deprecated">弃用</em></button>
           </template>
           <p v-if="activeSource && !filtered.length">{{ endpoints.length ? "没有符合筛选条件的接口。" : "尚无缓存，请点击同步。" }}</p>
